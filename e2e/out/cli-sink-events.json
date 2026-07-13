@@ -1,0 +1,86 @@
+[
+  {
+    "id": "01KXBEXGB73HK4MNJSYZPT7AF3",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/input-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-12T15:25:15.495Z",
+    "data": {
+      "value": "42",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "1cb69d01-48d1-4168-949e-0c3aa543fff2"
+      }
+    }
+  },
+  {
+    "id": "01KXBEXGB7Q2CPX3QV5R64ZZE1",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/output-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-12T15:25:15.495Z",
+    "data": {
+      "value": "23",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "1cb69d01-48d1-4168-949e-0c3aa543fff2"
+      }
+    }
+  },
+  {
+    "id": "01KXBEXGB7MBEZPDK2AR0M70W1",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/messages",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-12T15:25:15.495Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "1cb69d01-48d1-4168-949e-0c3aa543fff2"
+      }
+    }
+  },
+  {
+    "id": "01KXBEXGB744WQNND0ZMA094HZ",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/tool-invocations",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-12T15:25:15.495Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "service": "streaming.streamco.example"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "1cb69d01-48d1-4168-949e-0c3aa543fff2"
+      }
+    }
+  }
+]

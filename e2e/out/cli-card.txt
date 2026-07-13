@@ -1,0 +1,10 @@
+Patch  (A2A protocol 1.0, v0.1.0)
+Patch is the Datum Cloud assistant. It answers questions about a project and its resources and can invoke provider service tools that are entitled to the project through the Datum agent framework.
+
+Endpoint:   http://127.0.0.1:7820/a2a  [JSONRPC]
+Provider:   Datum  https://www.datum.net
+Streaming:  yes
+Auth:       http bearer
+Skills:     project-assistant
+
+---STDERR---

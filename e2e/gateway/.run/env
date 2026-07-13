@@ -1,0 +1,7 @@
+KUBECONFIG=/Users/scotwells/repos/datum-cloud/test-infra/kubeconfig
+CLUSTER=test-infra
+NS=patch-ai-gateway
+PF_PORT=1975
+GATEWAY_URL=http://localhost:1975/v1
+GATEWAY_MODEL=patch-stub-v1
+MCP_URL=http://localhost:1975/mcp

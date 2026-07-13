@@ -1,0 +1,6 @@
+Ran the pipeline diagnosis. The provider tool reported: { "id": "p-1", "pipeline": "vod-transcode", "findings": [ { "severity": "critical", "code": "CONSUMER_LAG", "message": "Consumer group vod-transcode is 847s behind on stream s-2 (playback-telemetry), partition 3." }, { "severity": "warning", "code": "CHECKPOINT_INTERVAL", "message": "Checkpoint interval is 300s; recommended <= 60s for lag-sensitive pipelines." }, { "severity": "info", "code": "THROUGHPUT_OK", "message": "Ingest throughput 861 rps is within provisioned capacity." } ], "recommendation": "Scale consumer group vod-transcode from 2 to 4 workers and lower the checkpoint interval to 60s. Runbook: http://127.0.0.1:7810/runbooks/lag.md" }. In short, that's the signal to chase down.
+
+---STDERR---
+» task 3539bbe0-155f-491d-bd2a-ce7bf6f64c2f (submitted)
+» working
+» completed

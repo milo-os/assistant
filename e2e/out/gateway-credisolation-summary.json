@@ -1,0 +1,12 @@
+{
+  "label": "credisolation",
+  "results": [
+    {
+      "item": "gw.cred.direct401",
+      "name": "direct-to-stub WITHOUT the gateway-injected key → 401 (key lives only at the gateway)",
+      "ok": true,
+      "required": true,
+      "detail": "status=401 body={\"error\":{\"message\":\"missing or invalid api key — the gateway BackendSecurityPolicy must inject it\",\"type\":\"invalid_request_error\",\"code\":\"invalid_api_key\"}}"
+    }
+  ]
+}

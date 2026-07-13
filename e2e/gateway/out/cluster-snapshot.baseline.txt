@@ -1,0 +1,40 @@
+## namespaces
+namespace/cert-manager
+namespace/chainsaw-capable-elephant
+namespace/chainsaw-fine-kid
+namespace/chainsaw-literate-louse
+namespace/chainsaw-relieved-catfish
+namespace/default
+namespace/etcd-system
+namespace/flux-system
+namespace/ipam-perf-0
+namespace/ipam-perf-1
+namespace/ipam-perf-2
+namespace/ipam-perf-3
+namespace/ipam-perf-4
+namespace/ipam-perf-5
+namespace/ipam-perf-6
+namespace/ipam-perf-7
+namespace/ipam-perf-8
+namespace/ipam-perf-9
+namespace/ipam-system
+namespace/kube-node-lease
+namespace/kube-public
+namespace/kube-system
+namespace/kyverno
+namespace/local-path-storage
+namespace/nats-system
+## crds (gateway/aigateway/mcp)
+## flux helmreleases (ns/name)
+cert-manager/cert-manager
+cert-manager/cert-manager-csi-driver
+etcd-system/etcd
+ipam-system/postgres
+nats-system/nack
+nats-system/nats
+## helm releases (ns/name)
+cert-manager/cert-manager
+cert-manager/cert-manager-csi-driver
+etcd-system/etcd
+ipam-system/postgres
+nats-system/nack

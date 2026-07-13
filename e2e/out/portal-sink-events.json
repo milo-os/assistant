@@ -1,0 +1,86 @@
+[
+  {
+    "id": "01KXBEXNEFEE6GBZ6DP5D4RPXY",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/input-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-12T15:25:20.719Z",
+    "data": {
+      "value": "42",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "e2e-portal-conv-1"
+      }
+    }
+  },
+  {
+    "id": "01KXBEXNEF2PXQAJEAYXXMYMVW",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/output-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-12T15:25:20.719Z",
+    "data": {
+      "value": "23",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "e2e-portal-conv-1"
+      }
+    }
+  },
+  {
+    "id": "01KXBEXNEFM44349NAPSRXGDZD",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/messages",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-12T15:25:20.719Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "e2e-portal-conv-1"
+      }
+    }
+  },
+  {
+    "id": "01KXBEXNEF4GK53YY4FS6EGDGH",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/tool-invocations",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-12T15:25:20.719Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "service": "streaming.streamco.example"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "e2e-portal-conv-1"
+      }
+    }
+  }
+]

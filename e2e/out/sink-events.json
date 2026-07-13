@@ -1,0 +1,254 @@
+[
+  {
+    "id": "01KX9JH2X5BX9QC8Q6W6V7HRA1",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/input-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.957Z",
+    "data": {
+      "value": "42",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "2e2b33b9-d34a-4ced-8c67-24a4cf0dcd03"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2X58E9DCG9DPF835C5G",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/output-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.957Z",
+    "data": {
+      "value": "23",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "2e2b33b9-d34a-4ced-8c67-24a4cf0dcd03"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2X5VG8QH6R1RERJC074",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/messages",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.957Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "2e2b33b9-d34a-4ced-8c67-24a4cf0dcd03"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2X6T66K5A6PS46YMWMT",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/tool-invocations",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.958Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "service": "streaming.streamco.example"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "2e2b33b9-d34a-4ced-8c67-24a4cf0dcd03"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2XHCNVECGF9ZRA2RR4M",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/input-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.969Z",
+    "data": {
+      "value": "42",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "11ed6933-68e5-46e7-9fb6-10eb5b13bdd0"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2XHDMT11X2G092448Y3",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/output-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.969Z",
+    "data": {
+      "value": "23",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "11ed6933-68e5-46e7-9fb6-10eb5b13bdd0"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2XH557VYG8FVAA6VHBN",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/messages",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.969Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "11ed6933-68e5-46e7-9fb6-10eb5b13bdd0"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2XH6PFEZM9Q2RJV2KDF",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/tool-invocations",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.969Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "service": "streaming.streamco.example"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "11ed6933-68e5-46e7-9fb6-10eb5b13bdd0"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2XZW0J6YB6AM362E3Y4",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/input-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.983Z",
+    "data": {
+      "value": "42",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "78ba9990-aae2-45cf-82b0-714aff5cd953"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2XZ9KGT1ZYQETBMJGJ2",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/output-tokens",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.983Z",
+    "data": {
+      "value": "23",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "78ba9990-aae2-45cf-82b0-714aff5cd953"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2XZPX4EB3KK3ZH6DHH4",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/messages",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.983Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "model": "patch-mock-v0"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "78ba9990-aae2-45cf-82b0-714aff5cd953"
+      }
+    }
+  },
+  {
+    "id": "01KX9JH2XZYNZ84ZZ2HJ9QABPY",
+    "specversion": "1.0",
+    "type": "assistant.miloapis.com/conversation/tool-invocations",
+    "source": "http://127.0.0.1:7820/a2a",
+    "subject": "projects/demo-project",
+    "datacontenttype": "application/json",
+    "time": "2026-07-11T21:49:53.983Z",
+    "data": {
+      "value": "1",
+      "dimensions": {
+        "service": "streaming.streamco.example"
+      },
+      "resource": {
+        "group": "assistant.miloapis.com",
+        "kind": "Conversation",
+        "namespace": "default",
+        "name": "78ba9990-aae2-45cf-82b0-714aff5cd953"
+      }
+    }
+  }
+]

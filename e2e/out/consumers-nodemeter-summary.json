@@ -1,0 +1,46 @@
+{
+  "mode": "nodemeter",
+  "generatedAt": "2026-07-12T15:25:20.772Z",
+  "totals": {
+    "checks": 5,
+    "passed": 5,
+    "failedRequired": 0
+  },
+  "results": [
+    {
+      "item": "portal.sink.nonempty",
+      "name": "sink captured usage events during the portal conversation (service emitted)",
+      "ok": true,
+      "required": true,
+      "detail": "usage events=4"
+    },
+    {
+      "item": "portal.meter.serviceonly",
+      "name": "ALL usage events came from the SERVICE (no portal-sourced events)",
+      "ok": true,
+      "required": true,
+      "detail": "sources={\"http://127.0.0.1:7820/a2a\":4}"
+    },
+    {
+      "item": "portal.meter.noportalemit",
+      "name": "portal emitted ZERO usage events (no source contains any of [/api/assistant, cloud-portal])",
+      "ok": true,
+      "required": true,
+      "detail": "portal-sourced=0"
+    },
+    {
+      "item": "portal.meter.contextid",
+      "name": "all portal-conversation usage events carry the pinned contextId",
+      "ok": true,
+      "required": true,
+      "detail": "contextIds=[\"e2e-portal-conv-1\"] expected=e2e-portal-conv-1"
+    },
+    {
+      "item": "portal.meter.nodupes",
+      "name": "no duplicate (meter,contextId,value) rows (no double emission)",
+      "ok": true,
+      "required": true,
+      "detail": "duplicate-key groups=0"
+    }
+  ]
+}
