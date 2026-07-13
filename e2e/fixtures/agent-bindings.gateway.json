@@ -1,0 +1,39 @@
+[
+  {
+    "apiVersion": "services.miloapis.com/v1alpha1",
+    "kind": "AgentBinding",
+    "metadata": {
+      "name": "streamco-gateway-binding",
+      "namespace": "demo-project"
+    },
+    "spec": {
+      "serviceRef": { "name": "streaming-streamco-example" },
+      "serviceName": "streaming.streamco.example",
+      "serviceAgentRef": { "name": "streamco-streaming-agent" },
+      "configurationVersion": "v1-gateway",
+      "tools": {
+        "mcpServers": [
+          {
+            "name": "streamco",
+            "endpoint": "http://localhost:1975/mcp",
+            "toolSelector": {
+              "include": [
+                "streamco-backend__streams_list",
+                "streamco-backend__streams_get",
+                "streamco-backend__pipeline_diagnose"
+              ]
+            },
+            "mutating": []
+          }
+        ]
+      },
+      "authority": {
+        "reads": [{ "gvk": { "group": "streaming.streamco.example", "kind": "*" } }],
+        "maxTaskDurationSeconds": 60
+      }
+    },
+    "status": {
+      "conditions": [{ "type": "Ready", "status": "True", "reason": "AllAgentGatesOpen" }]
+    }
+  }
+]

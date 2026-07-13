@@ -1,0 +1,43 @@
+# STRETCH (CONTRACT-GATEWAY.md §5): token-budget rate limit keyed on the
+# consumer attribution header. Consumes the gateway-counted total tokens
+# (io.envoy.ai_gateway:llm_total_token) from a per-project budget; once the
+# budget is exhausted the gateway returns 429.
+#
+# NOT applied by default: Global rate limiting requires Envoy Gateway to be
+# configured with a rate-limit (Redis) backend, which is an additional EG
+# override beyond the extension config. up.sh applies this only with
+# `--with-ratelimit` (which also enables the EG rate-limit addon + Redis).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: patch-token-budget
+  namespace: patch-ai-gateway
+  labels:
+    app.kubernetes.io/part-of: agent-framework-e2e
+spec:
+  targetRefs:
+    - name: patch-ai-gateway
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rateLimit:
+    type: Global
+    global:
+      rules:
+        - clientSelectors:
+            - headers:
+                - name: x-datum-project
+                  type: Distinct
+          limit:
+            # Tiny budget so a couple of diagnose turns exhaust it and the
+            # next model call 429s — the enforcement proof.
+            requests: 40
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 0
+            response:
+              from: Metadata
+              metadata:
+                namespace: io.envoy.ai_gateway
+                key: llm_total_token

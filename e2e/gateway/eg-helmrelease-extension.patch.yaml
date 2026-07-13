@@ -1,0 +1,38 @@
+# Documented override (CONTRACT-GATEWAY.md §"Environment shape"): the ONE
+# change to a test-infra-owned live object. Envoy AI Gateway drives Envoy
+# Gateway through EG's extension server, so the EG controller must be told
+# about the AI Gateway controller (extensionManager → :1063) and have the
+# Backend API + EnvoyPatchPolicy enabled. test-infra installs EG via a Flux
+# HelmRelease whose values only set gateway.controllerName; this JSON-merge
+# patch ADDS the extension config while preserving that key. up.sh applies it
+# with `kubectl patch helmrelease envoy-gateway -n flux-system --type merge`,
+# then restarts EG. down.sh reverts it (sets the added keys back to null).
+#
+# Values mirror the AI Gateway v1.0.0 manifests/envoy-gateway-values.yaml.
+spec:
+  values:
+    config:
+      envoyGateway:
+        extensionApis:
+          enableEnvoyPatchPolicy: true
+          enableBackend: true
+        extensionManager:
+          hooks:
+            xdsTranslator:
+              translation:
+                listener:
+                  includeAll: true
+                route:
+                  includeAll: true
+                cluster:
+                  includeAll: true
+                secret:
+                  includeAll: true
+              post:
+                - Translation
+                - Cluster
+                - Route
+          service:
+            fqdn:
+              hostname: ai-gateway-controller.envoy-ai-gateway-system.svc.cluster.local
+              port: 1063

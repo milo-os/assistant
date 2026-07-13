@@ -1,0 +1,7 @@
+# Per-run e2e evidence (regenerate with run-e2e.sh).
+out/
+
+# Installed deps (bun install): the e2e harness (MCP SDK for gateway-checks)
+# and the StreamCo demo provider.
+node_modules/
+streamco/node_modules/

@@ -1,0 +1,39 @@
+# StreamCo Streaming (streaming.streamco.example)
+
+StreamCo Streaming is a managed event-streaming service. Consumers publish
+records to Streams and process them with Pipelines. This document is the
+provider-supplied knowledge pack (llms-full.txt) for AI assistants.
+
+## Concepts
+
+### Stream (group: streaming.streamco.example, kind: Stream)
+A named, partitioned event stream ingesting records at some rate (rps).
+Streams have a status of "healthy" or "degraded". Degraded streams report a
+non-zero lagSeconds, meaning consumers are falling behind the head of the
+stream by that many seconds.
+
+### Pipeline (group: streaming.streamco.example, kind: Pipeline)
+A processing pipeline that consumes one or more Streams through a consumer
+group. Pipelines are the unit of diagnosis. Known pipelines in the demo
+environment: p-1 (vod-transcode), p-2 (ad-rollup).
+
+## Tools
+
+The StreamCo MCP server (Streamable HTTP, endpoint /mcp) exposes:
+
+- streams_list(): list all streams with id, name, status, rps.
+- streams_get(id): full detail for one stream, including region and
+  lagSeconds.
+- pipeline_diagnose(id): run diagnostics for a pipeline; returns structured
+  findings (severity, code, message) and a recommendation.
+
+All tools are read-only. None of them mutate state.
+
+## Operational guidance
+
+- If a stream is degraded (lagSeconds > 0), identify the pipeline consuming
+  it and run pipeline_diagnose with the pipeline id.
+- Consumer-lag troubleshooting is documented in the runbook at
+  /runbooks/lag.md.
+- Escalate to StreamCo support only after the runbook's remediation steps
+  have been attempted.

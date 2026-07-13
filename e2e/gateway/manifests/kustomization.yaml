@@ -1,0 +1,19 @@
+# Applies the gateway manifests with a common attribution label on every
+# resource (team-lead guardrail #4), WITHOUT mutating Deployment/Service
+# selectors (includeSelectors: false). up.sh does `kustomize build | kubectl
+# apply -f -`. The stretch BackendTrafficPolicy (70) and the namespace (00,
+# applied first so the stub-llm ConfigMap can be created in it) are deliberately
+# excluded here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 10-gateway.yaml
+  - 20-stub-llm.yaml
+  - 30-streamco.yaml
+  - 40-llm-backend.yaml
+  - 50-aigatewayroute.yaml
+  - 60-mcp.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: agent-framework-e2e
+    includeSelectors: false
