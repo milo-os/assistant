@@ -1,0 +1,4 @@
+# Per-run evidence + build artifacts are regenerated from a live run — never
+# commit them (the Go-port E2E report flagged stale tracked out/ as a hazard).
+out/
+.run/
