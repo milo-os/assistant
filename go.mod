@@ -6,6 +6,7 @@ require (
 	github.com/a2aproject/a2a-go/v2 v2.3.1
 	github.com/anthropics/anthropic-sdk-go v1.57.0
 	github.com/lestrrat-go/jwx/v2 v2.1.7
+	github.com/openai/openai-go/v3 v3.43.0
 )
 
 require (
