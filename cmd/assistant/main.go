@@ -49,7 +49,10 @@ func run() error {
 	}
 	authorizer := auth.NewAuthorizer(cfg, log)
 
-	runner := newAgentRunner(cfg, log)
+	runner, err := newAgentRunner(cfg, log)
+	if err != nil {
+		return fmt.Errorf("failed to initialize agent runner: %w", err)
+	}
 
 	app := server.New(server.Deps{
 		Config:        cfg,
