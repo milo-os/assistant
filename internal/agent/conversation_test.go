@@ -112,24 +112,34 @@ func TestFullMockToolPath(t *testing.T) {
 		t.Fatalf("final answer should quote the tool findings, got: %q", result.Text)
 	}
 
-	// Usage: token meters + exactly one tool-invocation event.
-	var toolEvents, inputEvents int
+	// Usage: token meters aggregated across BOTH model steps (tool-call step +
+	// answer step, 42/23 each) plus exactly one tool-invocation event. The
+	// multi-step TOTAL (84/46) is the billing-critical number the sink golden
+	// pins — emitting only the final step (42/23) is the TS under-billing bug.
+	byMeter := map[string]string{}
+	var toolEvents int
 	for _, e := range result.UsageEvents {
-		switch {
-		case strings.HasSuffix(e.MeterName, "tool-invocations"):
+		byMeter[e.MeterName] = e.Value
+		if strings.HasSuffix(e.MeterName, "tool-invocations") {
 			toolEvents++
 			if e.Dimensions["service"] != "streaming.streamco.example" {
 				t.Fatalf("tool event service dim = %q", e.Dimensions["service"])
 			}
-		case strings.HasSuffix(e.MeterName, "input-tokens"):
-			inputEvents++
+		} else if e.Dimensions["model"] != "patch-mock-v0" {
+			t.Fatalf("token meter %s model dim = %q", e.MeterName, e.Dimensions["model"])
 		}
+	}
+	if byMeter["assistant.miloapis.com/conversation/input-tokens"] != "84" {
+		t.Fatalf("input-tokens total = %q, want 84 (2 steps x 42)", byMeter["assistant.miloapis.com/conversation/input-tokens"])
+	}
+	if byMeter["assistant.miloapis.com/conversation/output-tokens"] != "46" {
+		t.Fatalf("output-tokens total = %q, want 46 (2 steps x 23)", byMeter["assistant.miloapis.com/conversation/output-tokens"])
+	}
+	if byMeter["assistant.miloapis.com/conversation/messages"] != "1" {
+		t.Fatalf("messages = %q, want 1", byMeter["assistant.miloapis.com/conversation/messages"])
 	}
 	if toolEvents != 1 {
 		t.Fatalf("want 1 tool-invocation event, got %d", toolEvents)
-	}
-	if inputEvents == 0 {
-		t.Fatal("expected input-token meter")
 	}
 	if result.Usage.ToolInvocationEventCount != 1 {
 		t.Fatalf("ToolInvocationEventCount = %d", result.Usage.ToolInvocationEventCount)
