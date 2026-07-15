@@ -45,6 +45,10 @@ func newAgentRunner(cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRun
 		Source:    source,
 		Emitter:   emitter,
 		Logger:    log,
+		// StepLimit 0 uses the agentcore default (8). MaxOutputTokens is set
+		// explicitly to match the TS service, which always sent 4096; leaving
+		// it zero would defer to each provider's own (differing) default.
+		MaxOutputTokens: 4096,
 	})
 	return conversationRunner{conv: conv}, nil
 }
