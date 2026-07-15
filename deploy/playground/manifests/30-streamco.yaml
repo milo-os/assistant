@@ -1,0 +1,62 @@
+# StreamCo demo MCP provider, in-cluster (image built from e2e/streamco by
+# playground-up.sh and kind-loaded). The gateway's MCPRoute fronts it; the
+# assistant reaches its tools ONLY through the gateway (allow-list enforced
+# there). Runs on 7810 (its default). Node reaches @modelcontextprotocol/sdk +
+# zod from the image's baked node_modules.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streamco
+  namespace: patch-playground
+  labels:
+    app: streamco
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: streamco }
+  template:
+    metadata:
+      labels:
+        app: streamco
+        app.kubernetes.io/part-of: agent-framework-playground
+    spec:
+      containers:
+        - name: streamco
+          image: patch-streamco:local
+          imagePullPolicy: IfNotPresent
+          command: ["node", "src/server.ts"]
+          ports:
+            - containerPort: 7810
+          env:
+            - name: STREAMCO_HOST
+              value: "0.0.0.0"
+            - name: STREAMCO_PORT
+              value: "7810"
+          readinessProbe:
+            httpGet: { path: /healthz, port: 7810 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 7810 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 192Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: streamco
+  namespace: patch-playground
+  labels:
+    app: streamco
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  selector: { app: streamco }
+  ports:
+    - name: http
+      port: 7810
+      targetPort: 7810
+  type: ClusterIP

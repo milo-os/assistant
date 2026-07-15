@@ -1,0 +1,101 @@
+# The in-cluster assistant (CONTRACT-REAL-ENV.md component 1). Gateway mode:
+# MODEL_MODE=gateway with NO model credential in env — the upstream key lives
+# only at the gateway (40-llm-backend.yaml). AUTH_MODE=dev with the token from
+# the `assistant-dev-token` Secret. Capability documents are mounted from the
+# `assistant-capabilities` ConfigMap; their MCP endpoint points at the gateway
+# MCPRoute so tool traffic is allow-list-enforced and metered.
+#
+# __GATEWAY_URL__ is a placeholder: playground-up.sh resolves the managed Envoy
+# service FQDN (in envoy-gateway-system) once the Gateway is Programmed and seds
+# it in before apply — the service name is generated, so it cannot be hardcoded.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: assistant
+  namespace: patch-playground
+  labels:
+    app: assistant
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: assistant }
+  template:
+    metadata:
+      labels:
+        app: assistant
+        app.kubernetes.io/part-of: agent-framework-playground
+    spec:
+      containers:
+        - name: assistant
+          image: patch-assistant:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 7820
+          env:
+            - name: PORT
+              value: "7820"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: LOG_LEVEL
+              value: "info"
+            # ── Model: gateway mode, keyless ────────────────────────
+            - name: MODEL_MODE
+              value: "gateway"
+            - name: GATEWAY_URL
+              value: "__GATEWAY_URL__"
+            - name: GATEWAY_MODEL
+              value: "patch-stub-v1"
+            # ── Auth: dev token from a Secret ───────────────────────
+            - name: AUTH_MODE
+              value: "dev"
+            - name: AUTH_DEV_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: assistant-dev-token
+                  key: tokens
+            # ── Capabilities: fixture mounted from a ConfigMap ──────
+            - name: CAPABILITY_DOCS_FIXTURE
+              value: "/config/capability-documents.json"
+            # ── Usage: emit CloudEvents to the in-cluster sink ──────
+            - name: USAGE_GATEWAY_URL
+              value: "http://sink.patch-playground.svc.cluster.local:7811"
+            # Agent card / CloudEvents source advertises the host-reachable URL
+            # (playground-up.sh port-forwards the Service to this localhost port).
+            - name: PUBLIC_BASE_URL
+              value: "http://localhost:1986"
+          volumeMounts:
+            - name: capabilities
+              mountPath: /config
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: 7820 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 7820 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: capabilities
+          configMap:
+            name: assistant-capabilities
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: assistant
+  namespace: patch-playground
+  labels:
+    app: assistant
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  selector: { app: assistant }
+  ports:
+    - name: http
+      port: 7820
+      targetPort: 7820
+  type: ClusterIP

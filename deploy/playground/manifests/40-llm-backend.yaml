@@ -1,0 +1,63 @@
+# The LLM upstream wiring: a Backend pointing at the in-cluster stub service, an
+# AIServiceBackend declaring the OpenAI wire schema, and a BackendSecurityPolicy
+# that injects the API key from a Secret. The assistant holds NO model
+# credential in gateway mode — the key lives ONLY here.
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: stub-llm-backend
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  endpoints:
+    - fqdn:
+        hostname: stub-llm.patch-playground.svc.cluster.local
+        port: 8080
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIServiceBackend
+metadata:
+  name: patch-stub
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  schema:
+    name: OpenAI
+  backendRef:
+    name: stub-llm-backend
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+# The upstream credential — present ONLY at the gateway. The stub 401s without
+# it; the assistant never sends it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: stub-llm-apikey
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+type: Opaque
+stringData:
+  # BackendSecurityPolicy (type APIKey) requires the key to be named 'apiKey'.
+  apiKey: sk-stub-datum-playground-key
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: BackendSecurityPolicy
+metadata:
+  name: stub-llm-auth
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  targetRefs:
+    - group: aigateway.envoyproxy.io
+      kind: AIServiceBackend
+      name: patch-stub
+  type: APIKey
+  apiKey:
+    secretRef:
+      name: stub-llm-apikey

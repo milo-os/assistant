@@ -1,0 +1,44 @@
+[
+  {
+    "apiVersion": "services.miloapis.com/v1alpha1",
+    "kind": "AgentBinding",
+    "metadata": {
+      "name": "streamco-playground-binding",
+      "namespace": "demo-project"
+    },
+    "spec": {
+      "serviceRef": { "name": "streaming-streamco-example" },
+      "serviceName": "streaming.streamco.example",
+      "serviceAgentRef": { "name": "streamco-streaming-agent" },
+      "configurationVersion": "v1-playground",
+      "knowledge": {
+        "concepts": [
+          { "gvk": { "group": "streaming.streamco.example", "kind": "Stream" }, "summary": "A live media stream" }
+        ]
+      },
+      "tools": {
+        "mcpServers": [
+          {
+            "name": "streamco",
+            "endpoint": "__GATEWAY_MCP_URL__",
+            "toolSelector": {
+              "include": [
+                "streamco-backend__streams_list",
+                "streamco-backend__streams_get",
+                "streamco-backend__pipeline_diagnose"
+              ]
+            },
+            "mutating": []
+          }
+        ]
+      },
+      "authority": {
+        "reads": [{ "gvk": { "group": "streaming.streamco.example", "kind": "*" } }],
+        "maxTaskDurationSeconds": 60
+      }
+    },
+    "status": {
+      "conditions": [{ "type": "Ready", "status": "True", "reason": "AllAgentGatesOpen" }]
+    }
+  }
+]

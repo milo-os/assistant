@@ -9,3 +9,8 @@ dist/
 /patch
 /assistant
 
+# Playground bring-up artifacts (rendered manifests, port-forward pidfiles,
+# host-compiled binary staged for the image build).
+/deploy/.build/
+/deploy/playground/.run/
+
