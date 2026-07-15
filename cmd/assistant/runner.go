@@ -39,16 +39,15 @@ func newAgentRunner(cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRun
 		Logger:     log,
 	})
 
+	// StepLimit and MaxOutputTokens are left at zero: the agent layer applies
+	// the TS-parity defaults (step limit 8, MaxOutputTokens 4096) — that policy
+	// lives in internal/agent, where the TS agent/loop.ts had it.
 	conv := agent.New(agent.Deps{
 		Model:     model,
 		ModelMode: string(cfg.Model.Mode),
 		Source:    source,
 		Emitter:   emitter,
 		Logger:    log,
-		// StepLimit 0 uses the agentcore default (8). MaxOutputTokens is set
-		// explicitly to match the TS service, which always sent 4096; leaving
-		// it zero would defer to each provider's own (differing) default.
-		MaxOutputTokens: 4096,
 	})
 	return conversationRunner{conv: conv}, nil
 }
