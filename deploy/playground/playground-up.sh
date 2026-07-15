@@ -421,7 +421,8 @@ cat <<EOF
     kubectl -n $EG_NS logs -l gateway.envoyproxy.io/owning-gateway-name=$GW -f
 
   See usage CloudEvents captured by the sink (proof P6):
-    kubectl -n $NS exec deploy/sink -- wget -qO- http://localhost:7811/events
+    kubectl -n $NS port-forward svc/sink 7811:7811 &   # then:
+    curl -s http://localhost:7811/events | jq .        # (sink image has no wget)
 
   Inspect workloads:
     kubectl -n $NS get pods

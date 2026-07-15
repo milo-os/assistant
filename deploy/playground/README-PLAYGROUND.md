@@ -90,7 +90,7 @@ assistant is keyless in both.
 |---|---|
 | **Token metering + attribution (P4)** | `kubectl -n envoy-gateway-system logs -l gateway.envoyproxy.io/owning-gateway-name=patch-playground -f` — one JSON line per model call with `gen_ai.usage.*_tokens` and `x_datum_project/conversation/agent`. |
 | **MCP allow-list enforcement** | The same log shows `log.type: mcp` lines for `pipeline_diagnose`; `streams_delete` is absent from the gateway's tool list and blocked, while still reachable on a direct-to-StreamCo connection. |
-| **Usage capture (P6)** | `kubectl -n patch-playground exec deploy/sink -- wget -qO- http://localhost:7811/events` — the CloudEvents the assistant emitted for your chats. |
+| **Usage capture (P6)** | `kubectl -n patch-playground port-forward svc/sink 7811:7811 &` then `curl -s http://localhost:7811/events \| jq .` — the CloudEvents the assistant emitted for your chats. (The sink image has no shell/wget, so read it over a port-forward, or `kubectl -n patch-playground logs deploy/sink` for the accepted-batch lines.) |
 | **Keyless assistant** | `kubectl -n patch-playground exec deploy/assistant -- printenv \| grep -i anthropic` prints nothing; the model key lives only in the gateway's `stub-llm-apikey` Secret. |
 
 ## Optional: a real model
