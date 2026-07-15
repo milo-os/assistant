@@ -17,6 +17,12 @@ import (
 // attribution header (gateway mode only).
 const AgentAttributionName = "patch"
 
+// DefaultMaxOutputTokens is the per-request output-token cap applied when
+// [Deps].MaxOutputTokens is unset. It matches the TypeScript service, which
+// always sent 4096; agentcore itself imposes no default (0 defers to the
+// provider), so this service-level policy lives here.
+const DefaultMaxOutputTokens = 4096
+
 // State is the terminal state of a conversation task.
 type State string
 
@@ -140,13 +146,17 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		Logger: c.logger,
 	})
 
+	maxOutputTokens := c.deps.MaxOutputTokens
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = DefaultMaxOutputTokens
+	}
 	inner := agentcore.Run(ctx, agentcore.LoopOptions{
 		Model:           c.deps.Model,
 		System:          BuildSystemPrompt(composed.SystemPromptAddendum),
 		Messages:        []agentcore.Message{agentcore.UserMessage(params.UserText)},
 		Tools:           composed.Tools,
 		StepLimit:       c.deps.StepLimit,
-		MaxOutputTokens: c.deps.MaxOutputTokens,
+		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),
 	})
 

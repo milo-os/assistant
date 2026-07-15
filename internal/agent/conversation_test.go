@@ -147,11 +147,15 @@ func TestFullMockToolPath(t *testing.T) {
 }
 
 // cacheModel is a one-step model that reports cache read/write tokens.
-type cacheModel struct{ headers map[string]string }
+type cacheModel struct {
+	headers   map[string]string
+	maxTokens int
+}
 
 func (m *cacheModel) ModelID() string { return "cache-pin" }
 func (m *cacheModel) Stream(_ context.Context, req agentcore.Request) (agentcore.StreamReader, error) {
 	m.headers = req.Headers
+	m.maxTokens = req.MaxOutputTokens
 	return &partReader{parts: []agentcore.StreamPart{
 		{Kind: agentcore.StreamPartTextDelta, Text: "ok"},
 		{Kind: agentcore.StreamPartStepFinish, FinishReason: agentcore.FinishStop,
@@ -224,6 +228,24 @@ func TestNoProjectSkipsMetering(t *testing.T) {
 	drainEvents(t, stream)
 	if len(stream.Result().UsageEvents) != 0 {
 		t.Fatalf("want no usage events without a project, got %d", len(stream.Result().UsageEvents))
+	}
+}
+
+// TestDefaultMaxOutputTokens verifies the 4096 TS-parity default is applied
+// when Deps leaves MaxOutputTokens unset, and an explicit value wins.
+func TestDefaultMaxOutputTokens(t *testing.T) {
+	defModel := &cacheModel{}
+	drainEvents(t, New(Deps{Model: defModel, ModelMode: "mock", Emitter: noopEmitter()}).
+		Run(context.Background(), Params{UserText: "hi", ProjectName: "p", ContextID: "c"}))
+	if defModel.maxTokens != DefaultMaxOutputTokens {
+		t.Fatalf("default max tokens = %d, want %d", defModel.maxTokens, DefaultMaxOutputTokens)
+	}
+
+	explicitModel := &cacheModel{}
+	drainEvents(t, New(Deps{Model: explicitModel, ModelMode: "mock", Emitter: noopEmitter(), MaxOutputTokens: 512}).
+		Run(context.Background(), Params{UserText: "hi", ProjectName: "p", ContextID: "c"}))
+	if explicitModel.maxTokens != 512 {
+		t.Fatalf("explicit max tokens = %d, want 512", explicitModel.maxTokens)
 	}
 }
 
