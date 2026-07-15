@@ -84,3 +84,12 @@ rewrite — but I flag them so mismatches surface before Phase 2.
 - Pre-install baseline captured (`snapshot.sh baseline`) for byte-restore-style
   diffing; additive labeled installs only; resource preflight (>80% mem abort).
 - macOS has no `timeout` — all waits are poll loops.
+- **Control-plane health gate**: the shared cluster's controller-manager +
+  scheduler chronically crashloop under VM contention. Cluster-dependent proofs
+  call `cluster_health()` first — if either component is not `running`+`ready`
+  (e.g. `CrashLoopBackOff`) or restarted within `CP_STABLE_WINDOW` (120s), the
+  proof reports **HELD (CP unstable)** with a concrete reason instead of a false
+  failure (honesty over green: a held proof measures the cluster, not the
+  playground). Snapshot check (~0.1s), timing-independent. pg-infra's "BASE up"
+  is the definitive go; the gate is a conservative backstop. Override with
+  `SKIP_CLUSTER_HEALTH=1`.

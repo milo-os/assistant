@@ -81,6 +81,61 @@ warn() { printf 'WARN: %s\n' "$*" >&2; }
 kc()   { kubectl --kubeconfig "${KCFG}" "$@"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Control-plane health gate. The shared cluster's controller-manager + scheduler
+# chronically crashloop under VM contention ("leaderelection lost"); when they
+# are down, nothing schedules and a proof would measure the CLUSTER, not the
+# playground. The AUTHORITATIVE signal is the container's CURRENT state: a
+# healthy CP component is state=running AND ready=true; an unhealthy one is
+# waiting (CrashLoopBackOff) / not-ready — a timing-independent snapshot, so we
+# don't have to guess where we sit in the ~minutes-long restart cadence. We also
+# HOLD if it restarted within CP_STABLE_WINDOW (may be briefly running+ready
+# right after a restart, about to flip again). Override: SKIP_CLUSTER_HEALTH=1.
+# pg-infra's "BASE up" is the definitive go — this gate is a conservative backstop.
+CP_STABLE_WINDOW="${CP_STABLE_WINDOW:-120}"
+# Emit "<ready>|<runningStartedAt>|<waitingReason>|<restartCount>" for a CP
+# component (empty fields where unreadable).
+cp_status() {
+  kc -n kube-system get pods -l "$1" -o jsonpath='{range .items[0].status.containerStatuses[0]}{.ready}|{.state.running.startedAt}|{.state.waiting.reason}|{.restartCount}{end}' 2>/dev/null
+}
+# Assess one component; append to the global `reasons` if unhealthy.
+assess_cp() {
+  local name="$1" sel="$2" st ready started waiting
+  st=$(cp_status "${sel}")
+  [ -z "${st}" ] && { reasons="${reasons} ${name} status unreadable;"; return; }
+  ready="${st%%|*}"; st="${st#*|}"; started="${st%%|*}"; st="${st#*|}"; waiting="${st%%|*}"
+  if [ "${ready}" != "true" ] || [ -n "${waiting}" ]; then
+    reasons="${reasons} ${name} not ready (ready=${ready:-?} state=${waiting:-non-running});"
+    return
+  fi
+  # Ready+running: also HOLD if it just restarted (may flip again shortly).
+  if [ -n "${started}" ]; then
+    local s now; s=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "${started}" +%s 2>/dev/null || echo "")
+    if [ -n "${s}" ]; then now=$(date -u +%s); local age=$(( now - s ))
+      [ "${age}" -lt "${CP_STABLE_WINDOW}" ] && reasons="${reasons} ${name} restarted ${age}s ago (< ${CP_STABLE_WINDOW}s);"
+    fi
+  fi
+}
+cluster_health() {
+  [ "${SKIP_CLUSTER_HEALTH:-0}" = 1 ] && { echo "ok: cluster health gate SKIPPED (SKIP_CLUSTER_HEALTH=1)"; return 0; }
+  kc cluster-info >/dev/null 2>&1 || { note "cluster API unreachable via ${KCFG}"; return 1; }
+  reasons=""
+  assess_cp controller-manager 'component=kube-controller-manager'
+  assess_cp scheduler          'component=kube-scheduler'
+  if [ -n "${reasons}" ]; then
+    note "CLUSTER CONTROL PLANE UNSTABLE:${reasons} — proofs would measure the cluster, not the playground. HOLD."
+    return 1
+  fi
+  echo "ok: control plane healthy (controller-manager + scheduler running, ready, stable > ${CP_STABLE_WINDOW}s)"
+  return 0
+}
+# Guard for a cluster-dependent proof: if the CP is unstable, emit a clear
+# NOT-PROVEN reason and short-circuit the proof (returns 2 = held, not failed).
+require_healthy_cluster() {
+  cluster_health && return 0
+  note "$1: NOT PROVEN — held on unstable control plane (re-run when pg-infra confirms BASE up on a stable CP)."
+  return 2
+}
+
 # One-time: build the patch CLI the host consumer uses (P2/P3/P5).
 build_patch() {
   [ -x "${PATCH_CMD}" ] && return 0
@@ -114,6 +169,7 @@ capture_access_log() {
 # ── P1: idempotent + preflight-gated bring-up ───────────────────────────────
 p1() {
   log "P1: idempotent + preflight-gated bring-up"
+  require_healthy_cluster P1 || return 2
   [ -x "${PLAYGROUND_UP_CMD%% *}" ] || { note "playground-up.sh not found at '${PLAYGROUND_UP_CMD}' — NOT PROVEN (pg-infra pending)"; return 1; }
   local up1="${OUT}/p1-up-run1.log" up2="${OUT}/p1-up-run2.log"
   bash -c "${PLAYGROUND_UP_CMD}" 2>&1 | tee "${up1}"; local rc1=${PIPESTATUS[0]}
@@ -129,6 +185,7 @@ p1() {
 # ── P2: host patch CLI chat through the gateway ─────────────────────────────
 p2() {
   log "P2: host patch CLI chat through the gateway"
+  require_healthy_cluster P2 || return 2
   build_patch || true
   curl -fsS -X DELETE "${SINK_URL}/events" >/dev/null 2>&1 || true
   OUT_DIR="${OUT}" SINK_URL="${SINK_URL}" PATCH_URL="${PATCH_URL}" PATCH_TOKEN="${PATCH_TOKEN}" \
@@ -147,6 +204,7 @@ p2() {
 # come from catalog-engineer (env-overridable). Requires --with-catalog up.
 p3() {
   log "P3: OVERLAY live reconfiguration (v1 → v2 narrower → unpublish)"
+  require_healthy_cluster P3 || return 2
   local run="env OUT_DIR=${OUT} SINK_URL=${SINK_URL} PATCH_URL=${PATCH_URL} PATCH_TOKEN=${PATCH_TOKEN} PATCH_CMD=${PATCH_CMD} PROJECT=${PROJECT} CAPABILITY_PROVIDER_URL=${CAPABILITY_PROVIDER_URL}"
   # Stage v1 (default published config assumed already applied by --with-catalog up).
   [ -n "${SAC_APPLY_V1:-}" ] && bash -c "${SAC_APPLY_V1}" 2>&1 | tee "${OUT}/p3-apply-v1.log"
@@ -170,6 +228,7 @@ p3() {
 # ── P4: gateway token attribution ───────────────────────────────────────────
 p4() {
   log "P4: gateway token attribution for our chat"
+  require_healthy_cluster P4 || return 2
   local ctxid; ctxid=$(cat "${OUT}/playground-contextid.txt" 2>/dev/null || echo "")
   [ -z "${ctxid}" ] && { note "no contextId captured — run p2 first"; return 1; }
   [ -s "${OUT}/playground-access.log" ] || capture_access_log "${ctxid}" 2
@@ -182,6 +241,7 @@ p4() {
 # ── P5: OVERLAY entitlement isolation ───────────────────────────────────────
 p5() {
   log "P5: OVERLAY entitlement isolation (unentitled project → no capabilities)"
+  require_healthy_cluster P5 || return 2
   OUT_DIR="${OUT}" PATCH_URL="${PATCH_URL}" PATCH_TOKEN="${PATCH_TOKEN}" PATCH_CMD="${PATCH_CMD}" \
   PROJECT="${PROJECT}" UNENTITLED_PROJECT="${UNENTITLED_PROJECT}" \
   ${UNENTITLED_TOKEN:+UNENTITLED_TOKEN=${UNENTITLED_TOKEN}} \
@@ -193,6 +253,9 @@ p5() {
 # ── P6: service-emitted usage at the sink ───────────────────────────────────
 p6() {
   log "P6: sink shows service-emitted usage for the playground chat"
+  # P6 reads the host sink, but its DATA comes from a chat that needs a healthy
+  # CP — hold it too so a held P2 doesn't surface as a false P6 failure.
+  require_healthy_cluster P6 || return 2
   local ctxid; ctxid=$(cat "${OUT}/playground-contextid.txt" 2>/dev/null || echo "")
   OUT_DIR="${OUT}" SINK_URL="${SINK_URL}" PROJECT="${PROJECT}" EXPECT_CONTEXT_ID="${ctxid}" \
     node "${CHECKS}" sink | tee "${OUT}/p6-sink-console.log"
@@ -221,6 +284,7 @@ p7_catalog() {
 # ── P8: playground-down --dry-run == our labeled resources (NO teardown) ─────
 p8() {
   log "P8: playground-down --dry-run lists EXACTLY our labeled resources (NO teardown)"
+  require_healthy_cluster P8 || return 2
   # Ground truth: everything carrying our attribution label.
   "${SNAP}" labeled | tee "${OUT}/p8-labeled-console.log"
   local truth="${OUT}/labeled-resources.txt"
@@ -245,8 +309,19 @@ p8() {
 }
 
 # ── Phase groupings ─────────────────────────────────────────────────────────
-declare -A VERDICT
-mark() { VERDICT["$1"]=$([ "$2" -eq 0 ] && echo PROVEN || echo "NOT PROVEN"); }
+# Verdict accumulator — plain newline-delimited "proof<TAB>verdict" lines so this
+# stays compatible with macOS's default bash 3.2 (no associative arrays).
+VERDICTS=""
+mark() {
+  local v
+  case "$2" in
+    0) v=PROVEN ;;
+    2) v="HELD (CP unstable)" ;;
+    *) v="NOT PROVEN" ;;
+  esac
+  VERDICTS="${VERDICTS}$(printf '%s\t%s' "$1" "$v")
+"
+}
 runp() { "$1"; mark "$2" "$?"; }
 
 base() {
@@ -262,7 +337,9 @@ overlay() {
 }
 summary() {
   log "PROOF SUMMARY"
-  for k in $(printf '%s\n' "${!VERDICT[@]}" | sort); do printf '  %-14s %s\n' "$k" "${VERDICT[$k]}"; done
+  printf '%s' "${VERDICTS}" | grep -v '^$' | sort | while IFS="$(printf '\t')" read -r k v; do
+    printf '  %-14s %s\n' "$k" "$v"
+  done
 }
 
 main() {
