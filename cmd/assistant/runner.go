@@ -2,19 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
-	"os"
 
-	"github.com/milo-os/assistant/agentcore"
-	"github.com/milo-os/assistant/agentcore/anthropic"
-	"github.com/milo-os/assistant/agentcore/mockmodel"
-	"github.com/milo-os/assistant/agentcore/openaicompat"
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/agent"
 	"github.com/milo-os/assistant/internal/capability"
@@ -26,7 +17,7 @@ import (
 // it resolves the model from config, wires the capability source and usage
 // emitter, constructs the agent orchestrator, and adapts it to the A2A seam.
 func newAgentRunner(cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRunner, error) {
-	model, err := resolveModel(cfg)
+	model, err := agent.ResolveModel(cfg.Model, log)
 	if err != nil {
 		return nil, err
 	}
@@ -56,62 +47,6 @@ func newAgentRunner(cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRun
 		Logger:    log,
 	})
 	return conversationRunner{conv: conv}, nil
-}
-
-// resolveModel selects and constructs the agentcore model from config. The
-// gateway path sends no upstream credential (the gateway injects it) and may
-// use a custom CA or skip TLS verification for local development.
-func resolveModel(cfg *config.Config) (agentcore.Model, error) {
-	switch cfg.Model.Mode {
-	case config.ModelModeMock:
-		return mockmodel.New(), nil
-
-	case config.ModelModeAnthropic:
-		return anthropic.New(anthropic.Options{
-			ModelID: cfg.Model.AnthropicModel,
-			APIKey:  cfg.Model.AnthropicAPIKey,
-		}), nil
-
-	case config.ModelModeGateway:
-		httpClient, err := gatewayHTTPClient(cfg)
-		if err != nil {
-			return nil, err
-		}
-		// APIKey deliberately empty: the Envoy AI Gateway's BackendSecurityPolicy
-		// injects the upstream key, so the service sends no Authorization header.
-		return openaicompat.New(openaicompat.Options{
-			ModelID:    cfg.Model.GatewayModel,
-			BaseURL:    cfg.Model.GatewayURL,
-			HTTPClient: httpClient,
-		}), nil
-
-	default:
-		return nil, fmt.Errorf("unsupported MODEL_MODE %q", cfg.Model.Mode)
-	}
-}
-
-// gatewayHTTPClient builds the HTTP client for gateway mode, honoring the
-// optional custom CA (GATEWAY_CA_CERT) and TLS-skip (GATEWAY_TLS_INSECURE)
-// env settings. It returns nil (the SDK default client) when neither is set.
-func gatewayHTTPClient(cfg *config.Config) (*http.Client, error) {
-	if cfg.Model.GatewayCACert == "" && !cfg.Model.GatewayTLSInsecure {
-		return nil, nil
-	}
-	// #nosec G402 -- InsecureSkipVerify is gated behind an explicit env flag
-	// for local development against a self-signed gateway; never set in prod.
-	tlsConfig := &tls.Config{InsecureSkipVerify: cfg.Model.GatewayTLSInsecure}
-	if cfg.Model.GatewayCACert != "" {
-		pem, err := os.ReadFile(cfg.Model.GatewayCACert)
-		if err != nil {
-			return nil, fmt.Errorf("read GATEWAY_CA_CERT %q: %w", cfg.Model.GatewayCACert, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("GATEWAY_CA_CERT %q: no valid certificates found", cfg.Model.GatewayCACert)
-		}
-		tlsConfig.RootCAs = pool
-	}
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}}, nil
 }
 
 // conversationRunner adapts an [agent.Conversation] to [assistanta2a.AgentRunner]:
