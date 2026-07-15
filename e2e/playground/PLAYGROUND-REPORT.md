@@ -19,11 +19,34 @@ against the persistent playground on the shared `test-infra` kind cluster.
 | QA contextId | `019f6812-7332-746c-8bb6-11243bf6aa36` (all token/sink assertions scoped to it — the user was concurrently using the env) |
 | Driver | `e2e/playground/{run-proofs.sh, playground-checks.mjs, snapshot.sh}` |
 
+## Environmental caveat — shared cluster control-plane instability
+
+Throughout this run the shared `test-infra` cluster's `kube-controller-manager`
+(and intermittently `kube-scheduler`) were **crashlooping** under VM contention
+("leaderelection lost"; 200+ restarts over the cluster's lifetime, oscillating
+on a ~minutes cadence). This is a property of the shared host, not the
+playground. Its effect is scoped: **a crashlooping controller-manager/scheduler
+only blocks scheduling NEW pods; it does not evict or affect already-Running
+pods** (kubelet keeps them serving). Consequently the proofs split by need:
+
+- **Serve-path / read-only proofs — unaffected, run during the flap** (with a
+  documented `SKIP_CLUSTER_HEALTH` where the driver's CP gate would otherwise
+  over-hold): P2 (chat exercises running pods), P4 (reads gateway logs), P6
+  (reads the sink), P7-assistant (host), P8 (read-only dry-run), P5 (reads the
+  adapter pod). All PROVEN — the workloads were Running+Ready the whole time.
+- **Scheduling-dependent proofs — gated on a healthy CP** (the driver's
+  `cluster_health()` reports HELD otherwise): P1's full recreate and the
+  `--with-catalog` env flip (new ReplicaSet). The driver distinguishes the two
+  classes (`require_healthy_workloads` vs `require_healthy_cluster`).
+
+The user also held a "pause the other kind clusters" decision open to relieve
+the contention; these proofs proceeded against the live env meanwhile.
+
 ## Summary verdict
 
 | Proof | Status |
 | --- | --- |
-| P1 — bring-up idempotent + preflight-gated | **PENDING** — needs one `up.sh` re-run (bounces the user's live port-forward; coordinating a window with pg-infra) |
+| P1 — bring-up idempotent + preflight-gated | **NOT PROVEN** — a real idempotency gap: BASE `up.sh` re-run on a catalog-wired env produces a conflicting assistant spec (crash). See below. |
 | P2 — host chat through the gateway | **PROVEN** (3/3) |
 | P3 — live reconfiguration (v1→v2→unpublish) | **PENDING** — assistant is fixture-mode; needs pg-infra to wire `--with-catalog` + a stable-overlay window. Adapter mechanism proven live (see P5). |
 | P4 — gateway token attribution + reconciliation | **PROVEN** (4/4, exact) |
@@ -141,17 +164,32 @@ cross-namespace footprint.
 
 ## Pending proofs (honest gaps)
 
-### P1 — bring-up idempotent + preflight-gated — **PENDING**
+### P1 — bring-up idempotent + preflight-gated — **NOT PROVEN (real idempotency gap found)**
 
-The env is already up (persistent + pg-infra brought it up). The driver's
-low-impact idempotency test is one `playground-up.sh --skip-build` re-run,
-asserting a NO-OP (labeled footprint byte-identical before/after) + exit 0 +
-"Playground is UP" + the preflight memory-% gate ran. This re-run restarts the
-assistant/gateway port-forwards, briefly dropping the user's live `:1986`
-session — so it is being coordinated with pg-infra (who owns bring-up and asked
-to be pinged) rather than run unilaterally while the user is active. The
-preflight gate and idempotency are present in `playground-up.sh` by inspection;
-this proof captures the live re-run evidence once a window opens.
+The preflight gate is present and correct (`up.sh` aborts if node memory
+requests > 80%). Idempotency is **not** clean, and the QA re-run surfaced a
+genuine bug rather than a false failure:
+
+Running BASE `playground-up.sh --skip-build` against an env that had **already**
+had `--with-catalog` applied re-rendered the assistant Deployment
+(`deployment.apps/assistant configured`, not "unchanged") — it re-added
+`CAPABILITY_DOCS_FIXTURE` to the spec **without** clearing the
+`CAPABILITY_PROVIDER_URL` that the catalog flip had set. The two are mutually
+exclusive, so the new pod crashed on startup:
+
+```
+Invalid configuration:
+  - CAPABILITY_PROVIDER_URL: CAPABILITY_PROVIDER_URL and CAPABILITY_DOCS_FIXTURE
+    are mutually exclusive — set at most one capability source
+```
+
+The already-Running (adapter-mode) pod kept serving via RollingUpdate, so the
+env stayed up, but the Deployment was left in a stuck rolling state (reported to
+pg-infra; recovery = `kubectl rollout undo deploy/assistant`). **Fix owed by
+pg-infra**: the BASE `up.sh` assistant render must be mutually-exclusive-aware —
+never set both capability-source envs. Idempotency of a *pure* BASE re-run (on a
+BASE-only env) is untested pending this fix + a clean env; the preflight gate
+itself is proven present.
 
 ### P3 — live reconfiguration — **PENDING (assistant not yet wired)**
 
