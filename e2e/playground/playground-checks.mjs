@@ -201,14 +201,21 @@ async function reconfig() {
   if (stage === 'v1' || stage === 'v2' || stage === 'unpublished') {
     const cap = await fetchCapabilityDocs(PROJECT);
     const tools = toolsFromDocs(cap.docs);
-    // Also run a chat turn so we can later assert the NEXT turn reflects the config.
-    const turn = await chatTurn(PROJECT);
-    const turnTools = [...stringsByKeySubstr(turn.events, 'name')].filter((n) => /__/.test(n)).sort();
+    // Behavioral signal for "next chat turn reflects it": the A2A CLI stream does
+    // NOT expose tool names (only the result text), so we detect whether the turn
+    // actually RAN pipeline_diagnose by its findings in the answer. The prompt
+    // ("Diagnose pipeline p-1") needs pipeline_diagnose; CONSUMER_LAG appears ONLY
+    // when that tool ran. So v1 (has pipeline_diagnose) → diagnosed; v2 (streams_list
+    // only) → NOT diagnosed. Retry once — a turn fired immediately after a reconcile
+    // can transiently miss.
+    let turn = await chatTurn(PROJECT);
+    let diagnosed = /CONSUMER_LAG/.test(turn.text);
+    if (!diagnosed && stage === 'v1') { await new Promise((r) => setTimeout(r, 4000)); turn = await chatTurn(PROJECT); diagnosed = /CONSUMER_LAG/.test(turn.text); }
     writeFileSync(stageFile(stage), JSON.stringify({
-      stage, status: cap.status, ok: cap.ok, tools, turnTools,
+      stage, status: cap.status, ok: cap.ok, tools, diagnosed,
       chatExit: turn.code, contextId: turn.contextId, text: turn.text.slice(0, 2000),
     }, null, 2));
-    console.log(`stage=${stage} adapter-status=${cap.status} tools=[${tools.join(', ')}] turnTools=[${turnTools.join(', ')}]`);
+    console.log(`stage=${stage} adapter-status=${cap.status} tools=[${tools.join(', ')}] chat-diagnosed(pipeline_diagnose ran)=${diagnosed}`);
     return; // orchestrator applies the next stage, then re-invokes with STAGE=compare
   }
 
@@ -230,15 +237,14 @@ async function reconfig() {
     `v1=${v1.tools.length} tools, v2=${v2.tools.length} tools; v1=[${v1.tools.join(', ')}] v2=[${v2.tools.join(', ')}]`);
   record('pg.reconfig.v2_expected', `v2 capability docs match the expected narrowed set [${V2_EXPECTED_TOOLS.join(', ')}]`,
     JSON.stringify(v2.tools) === JSON.stringify(V2_EXPECTED_TOOLS), `v2 tools=[${v2.tools.join(', ')}]`, false);
-  // The NEXT chat turn after v2 must reflect the narrowed capabilities: it must
-  // NOT use a tool that v2 removed. Compare on BARE names — the capability doc
-  // carries bare names, the chat-turn (model-visible) surface namespaces them.
-  const removedBare = v1.tools.filter((t) => !v2.tools.includes(t)).map(bare);
-  const v2TurnBare = (v2.turnTools ?? []).map(bare);
-  const v2TurnUsedRemoved = removedBare.filter((t) => v2TurnBare.includes(t));
-  record('pg.reconfig.next_turn_reflects', 'the chat turn after applying v2 does NOT use a tool v2 removed',
-    v2.chatExit === 0 && v2TurnUsedRemoved.length === 0,
-    `${CHAT_TURN_REQUIRED ? '' : '(assistant fixture-mode — not adapter-wired; informational) '}removed(bare)=[${removedBare.join(', ')}] v2Turn(bare)=[${v2TurnBare.join(', ')}] usedRemoved=[${v2TurnUsedRemoved.join(', ')}] exit=${v2.chatExit}`,
+  // BEHAVIORAL "next chat turn reflects it": the prompt runs pipeline_diagnose,
+  // which v1 has and v2 removes. So the v1 turn diagnoses (CONSUMER_LAG present)
+  // and the v2 turn does NOT — a positive, tool-behavioral observation, not a
+  // vacuous empty-set match. Requires the assistant to be adapter-wired
+  // (CHAT_TURN_REQUIRED); otherwise it's informational.
+  record('pg.reconfig.next_turn_reflects', 'chat turn reflects the change: v1 turn diagnoses (pipeline_diagnose), v2 turn does NOT',
+    v1.diagnosed === true && v2.diagnosed === false,
+    `${CHAT_TURN_REQUIRED ? '' : '(assistant fixture-mode — informational) '}v1-diagnosed=${v1.diagnosed} v2-diagnosed=${v2.diagnosed} (v2 removed pipeline_diagnose → cannot diagnose)`,
     CHAT_TURN_REQUIRED);
   // After unpublish, the project's capability documents (and thus agent tools)
   // are gone: empty tool set AND/OR a 404 from the adapter.

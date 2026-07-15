@@ -297,9 +297,11 @@ POKE_CMD="${POKE_CMD:-kubectl --kubeconfig ${KCFG} annotate serviceentitlement s
 SAC_APPLY_V1="${SAC_APPLY_V1:-kubectl --kubeconfig ${KCFG} apply -f ${SAMPLES}/20-serviceagentconfiguration-v1.yaml}"
 SAC_APPLY_V2="${SAC_APPLY_V2:-kubectl --kubeconfig ${KCFG} apply -f ${SAMPLES}/21-serviceagentconfiguration-v2.yaml}"
 SAC_UNPUBLISH="${SAC_UNPUBLISH:-kubectl --kubeconfig ${KCFG} delete -f ${SAMPLES}/30-serviceentitlement.yaml}"
-# Restore the v1 baseline after the destructive unpublish so the shared overlay
-# is left as we found it (re-create the entitlement + v1 SAC, then poke).
-SAC_RESTORE="${SAC_RESTORE:-kubectl --kubeconfig ${KCFG} apply -f ${SAMPLES}/30-serviceentitlement.yaml && kubectl --kubeconfig ${KCFG} apply -f ${SAMPLES}/20-serviceagentconfiguration-v1.yaml}"
+# Restore the v1 baseline after the destructive stages so the shared overlay is
+# left as pg-catalog froze it. v1/v2 are SEPARATE SAC objects and the binding
+# picks the HIGHEST version — so restoring is DELETE v2 (binding falls back to
+# v1), NOT re-apply v1. Also re-create the entitlement (the unpublish deleted it).
+SAC_RESTORE="${SAC_RESTORE:-kubectl --kubeconfig ${KCFG} apply -f ${SAMPLES}/30-serviceentitlement.yaml && kubectl --kubeconfig ${KCFG} delete -f ${SAMPLES}/21-serviceagentconfiguration-v2.yaml --ignore-not-found}"
 p3() {
   log "P3: OVERLAY live reconfiguration (v1 → v2 narrower → unpublish)"
   require_healthy_adapter P3 || return 2
@@ -312,27 +314,47 @@ p3() {
   esac
   local run="env CHAT_TURN_REQUIRED=${chat_req} OUT_DIR=${OUT} SINK_URL=${SINK_URL} PATCH_URL=${PATCH_URL} PATCH_TOKEN=${PATCH_TOKEN} PATCH_CMD=${PATCH_CMD} PROJECT=${PROJECT} CAPABILITY_PROVIDER_URL=${CAPABILITY_PROVIDER_URL}"
   poke() { bash -c "${POKE_CMD}" 2>&1 | tee -a "${OUT}/p3-poke.log"; }
-  # Stage v1.
+  # Poll the AgentBinding until it reaches $1 (or "gone"); more reliable than a
+  # fixed sleep (mirrors pg-catalog's reconfigure.sh wait_binding_version).
+  wait_binding() {
+    local want="$1"
+    for _ in $(seq 1 30); do
+      local v; v=$(kc get agentbinding streamco-streaming-agent -o jsonpath='{.spec.configurationVersion}' 2>/dev/null || true)
+      if [ "${want}" = gone ]; then kc get agentbinding streamco-streaming-agent >/dev/null 2>&1 || { echo "binding pruned"; return 0; }
+      else [ "${v}" = "${want}" ] && { echo "binding at ${v}"; return 0; }; fi
+      sleep 2
+    done
+    echo "binding wait for '${want}' timed out (last=$(kc get agentbinding streamco-streaming-agent -o jsonpath='{.spec.configurationVersion}' 2>/dev/null))"
+  }
+  # Stage v1 (baseline). Ensure v2 absent so the binding is at v1.
+  kc delete -f "${SAMPLES}/21-serviceagentconfiguration-v2.yaml" --ignore-not-found >/dev/null 2>&1 || true
   bash -c "${SAC_APPLY_V1}" 2>&1 | tee "${OUT}/p3-apply-v1.log"; poke
-  sleep "${RECONCILE_WAIT:-5}"
+  wait_binding 1.0.0
   ${run} STAGE=v1 node "${CHECKS}" reconfig | tee "${OUT}/p3-v1.log"
-  # Stage v2 (narrower toolSelector).
+  # Stage v2 (narrower toolSelector → binding reprojects to 2.0.0).
   bash -c "${SAC_APPLY_V2}" 2>&1 | tee "${OUT}/p3-apply-v2.log"; poke
-  sleep "${RECONCILE_WAIT:-5}"
+  wait_binding 2.0.0
   ${run} STAGE=v2 node "${CHECKS}" reconfig | tee "${OUT}/p3-v2.log"
   # Stage unpublish (delete the entitlement — the watch fires, binding pruned).
   bash -c "${SAC_UNPUBLISH}" 2>&1 | tee "${OUT}/p3-unpublish.log"
-  sleep "${RECONCILE_WAIT:-5}"
+  wait_binding gone
   ${run} STAGE=unpublished node "${CHECKS}" reconfig | tee "${OUT}/p3-unpublished.log"
   # Compare all three stages → verdict.
   ${run} STAGE=compare node "${CHECKS}" reconfig | tee "${OUT}/p3-compare-console.log"; local rc=${PIPESTATUS[0]}
-  # RESTORE the v1 baseline so the shared overlay is left as we found it.
-  log "P3: restoring v1 baseline (re-publish entitlement + v1 SAC)"
+  # RESTORE the v1 baseline (delete v2 so the binding falls back to v1 + re-create
+  # the entitlement). Verify via a DIRECT adapter fetch (don't clobber stage files).
+  log "P3: restoring v1 baseline (delete v2 SAC → binding falls back to v1; re-publish entitlement)"
   bash -c "${SAC_RESTORE}" 2>&1 | tee "${OUT}/p3-restore.log"; poke
-  sleep "${RECONCILE_WAIT:-5}"
-  ${run} STAGE=v1 node "${CHECKS}" reconfig >/dev/null 2>&1 || true
-  local restored; restored=$(node -e 'const s=require("'"${OUT}"'/playground-reconfig-v1.json");process.stdout.write(String((s.tools||[]).length))' 2>/dev/null || echo "?")
-  echo "P3: baseline restored — v1 tool count now=${restored}"
+  local bver=""
+  for _ in $(seq 1 20); do
+    bver=$(kc get agentbinding streamco-streaming-agent -o jsonpath='{.spec.configurationVersion}' 2>/dev/null)
+    [ "${bver}" = "1.0.0" ] && break
+    sleep 2
+  done
+  adapter_port_forward >/dev/null 2>&1 || true
+  local rtools; rtools=$(curl -fsS "${CAPABILITY_PROVIDER_URL}/projects/${PROJECT}/capability-documents" 2>/dev/null \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const docs=JSON.parse(s);const set=new Set();const w=n=>{if(n&&typeof n==="object"){if(n.toolSelector&&Array.isArray(n.toolSelector.include))n.toolSelector.include.forEach(t=>set.add(t));Object.values(n).forEach(w)}};w(docs);process.stdout.write(String([...set].length))}catch{process.stdout.write("?")}})' 2>/dev/null || echo "?")
+  echo "P3: baseline restored — binding version=${bver:-?} adapter tool count=${rtools} (expect 1.0.0 / 3)"
   return "${rc}"
 }
 

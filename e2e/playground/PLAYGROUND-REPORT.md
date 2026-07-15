@@ -48,7 +48,7 @@ the contention; these proofs proceeded against the live env meanwhile.
 | --- | --- |
 | P1 — bring-up idempotent + preflight-gated | **NOT PROVEN** — a real idempotency gap: BASE `up.sh` re-run on a catalog-wired env produces a conflicting assistant spec (crash). See below. |
 | P2 — host chat through the gateway | **PROVEN** (3/3) |
-| P3 — live reconfiguration (v1→v2→unpublish) | **PENDING** — assistant is fixture-mode; needs pg-infra to wire `--with-catalog` + a stable-overlay window. Adapter mechanism proven live (see P5). |
+| P3 — live reconfiguration (v1→v2→unpublish) | **PROVEN** (6/6, behavioral) |
 | P4 — gateway token attribution + reconciliation | **PROVEN** (4/4, exact) |
 | P5 — entitlement isolation | **PROVEN** (3/3) |
 | P6 — service-emitted usage at the sink | **PROVEN** (5/5) |
@@ -191,25 +191,42 @@ never set both capability-source envs. Idempotency of a *pure* BASE re-run (on a
 BASE-only env) is untested pending this fix + a clean env; the preflight gate
 itself is proven present.
 
-### P3 — live reconfiguration — **PENDING (assistant not yet wired)**
+## P3 — live reconfiguration — **PROVEN (6/6, behavioral)**
 
-The demo — `kubectl apply` a narrower `ServiceAgentConfiguration` → the next
-chat turn's capabilities shrink; unpublish → capabilities gone — requires the
-in-cluster assistant to fetch capabilities from the adapter. The live assistant
-is currently **fixture-mode** (`CAPABILITY_DOCS_FIXTURE=/config/…`, no
-`CAPABILITY_PROVIDER_URL`), so a mid-session CR change is not reflected in a chat
-turn. pg-infra must wire the assistant to the adapter (`playground-up.sh
---with-catalog`, which sets `CAPABILITY_PROVIDER_URL` on the deployment). The
-driver (`run-proofs.sh p3`) applies the real v1/v2 SAC samples with pg-catalog's
-required entitlement **poke** after each apply (the AgentBinding reconciler only
-watches `ServiceEntitlement`; without the poke a change waits out the 5-minute
-resync) and **restores the v1 baseline** after the destructive unpublish.
-Additional caveat: the overlay CRs were being actively modified during testing
-(the live v1 capability doc drifted between two fetches), so P3's apply/restore
-needs a window where the overlay is not being changed out from under it.
+`run-proofs.sh p3`, against the adapter-wired assistant, overlay frozen at the
+v1 baseline by pg-catalog. Each stage applies the real cluster-scoped SAC sample,
+**pokes** the `ServiceEntitlement` (the AgentBinding reconciler only watches the
+entitlement — without the poke a change waits out the 5-minute resync), waits for
+the AgentBinding to reproject, then captures the adapter's documents AND runs a
+`patch chat "Diagnose pipeline p-1"` turn. The behavioral signal is whether the
+turn actually ran `pipeline_diagnose` (its `CONSUMER_LAG` finding appears only
+then) — the A2A CLI stream doesn't expose tool names, so findings are the sound
+observable.
 
-The adapter mechanism P3 depends on IS proven live (P5): the adapter serves
-live, entitlement-gated, CR-derived capability documents.
+```
+stage=v1          tools=[…pipeline_diagnose, …streams_get, …streams_list]  chat-diagnosed=true
+stage=v2          tools=[streamco-backend__streams_list]                    chat-diagnosed=false
+stage=unpublished tools=[]                                                  chat-diagnosed=false
+
+PASS  [pg.reconfig.v1_tools]           v1 exposes the broad set (3 tools)
+PASS  [pg.reconfig.v2_narrower]        v2 STRICTLY FEWER + a subset — v1=3, v2=1
+PASS  [pg.reconfig.v2_expected]        v2 = [streamco-backend__streams_list]
+PASS  [pg.reconfig.next_turn_reflects] v1 turn diagnoses (pipeline_diagnose), v2 turn does NOT
+PASS  [pg.reconfig.unpublished_gone]   after unpublish: no capability documents ([])
+```
+
+This is the demo that matters: **`kubectl apply` a narrower ServiceAgentConfiguration
+→ the very next chat turn loses the removed capability** (v2 dropped
+`pipeline_diagnose`, so the assistant can no longer diagnose), and **unpublish →
+all capabilities gone**. The AgentBinding reprojected v1.0.0 → 2.0.0 → pruned;
+the adapter served the matching documents live (per-conversation fetch, no cache);
+the chat behavior followed. Afterward the driver **restored the v1 baseline**
+(deleted the v2 SAC so the binding falls back to v1; re-published the
+entitlement) — verified live: binding `1.0.0`, adapter serving 3 tools.
+
+Prerequisite that was resolved mid-run: the assistant had to be adapter-wired
+(`CAPABILITY_PROVIDER_URL`, no fixture); pg-infra flipped it via `kubectl set
+env`. A plain BASE `up.sh` re-run reverts that (see P1).
 
 ## README quickstart verification (`deploy/playground/README-PLAYGROUND.md`)
 
