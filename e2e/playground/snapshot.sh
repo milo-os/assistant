@@ -45,34 +45,57 @@ capture() {
   helm --kubeconfig "$KCFG" ls -A 2>/dev/null | awk 'NR>1{print $2"/"$1}' | sort || true
 }
 
-# Enumerate every namespaced + cluster-scoped resource kind that supports list,
-# then get -A filtered by our label. Broad on purpose: it must catch a stray
-# labeled object the down-script forgot, not just the kinds we expect. Kinds
-# that error (no permission, subresource-only) are skipped silently.
-labeled() {
-  local out="$OUT/labeled-resources.txt"
+# Enumerate labeled resources by broad api-resources sweep — independent of the
+# down-script's fixed kind list, so it catches a stray the script would miss.
+#
+# SCOPE (P8 is the BASE playground-down.sh proof): playground-down.sh removes the
+# BASE footprint = the `patch-playground` namespace (cascading its contents) +
+# the `patch-pg-gw` GatewayClass. So the BASE truth set is:
+#   * namespaced labeled objects IN namespace $NS (default patch-playground),
+#     EXCLUDING cascade-derived kinds (pods/replicasets/endpointslices/...) which
+#     the down-script deliberately doesn't enumerate (namespace deletion removes
+#     them), and
+#   * the labeled GatewayClass (the one BASE cluster-scoped object).
+# The CATALOG OVERLAY shares the same label but lives in a DIFFERENT namespace
+# (agent-framework-playground) with its own cluster-scoped objects (webhooks,
+# issuers) and is torn down separately (catalog-engineer) — so BASE P8 must NOT
+# count it. Use `labeled-all` to see the full cross-namespace labeled footprint.
+NS="${NS:-patch-playground}"
+DERIVED_RE='^(pods|replicasets|endpointslices|controllerrevisions|events|endpoints|podmetrics)($|\.)'
+labeled() { _labeled scoped; }
+labeled_all() { _labeled all; }
+_labeled() {
+  local mode="$1" out="$OUT/labeled-resources.txt"
+  [ "$mode" = all ] && out="$OUT/labeled-resources.all.txt"
   : > "$out.tmp"
-  # namespaced kinds
-  local nk
-  nk="$(kc api-resources --verbs=list --namespaced -o name 2>/dev/null | sort -u)"
+  local nk; nk="$(kc api-resources --verbs=list --namespaced -o name 2>/dev/null | sort -u)"
   for r in $nk; do
-    kc get "$r" -A -l "$LABEL" \
-      -o custom-columns=K:.kind,NS:.metadata.namespace,N:.metadata.name --no-headers 2>/dev/null \
-      | awk 'NF{print $1"/"$2"/"$3}' >> "$out.tmp" || true
+    [ "$mode" = scoped ] && echo "$r" | grep -qE "$DERIVED_RE" && continue
+    if [ "$mode" = scoped ]; then
+      kc get "$r" -n "$NS" -l "$LABEL" \
+        -o custom-columns=K:.kind,NS:.metadata.namespace,N:.metadata.name --no-headers 2>/dev/null \
+        | awk 'NF{print $1"/"$2"/"$3}' >> "$out.tmp" || true
+    else
+      kc get "$r" -A -l "$LABEL" \
+        -o custom-columns=K:.kind,NS:.metadata.namespace,N:.metadata.name --no-headers 2>/dev/null \
+        | awk 'NF{print $1"/"$2"/"$3}' >> "$out.tmp" || true
+    fi
   done
-  # cluster-scoped kinds (namespace column empty → mark <cluster>)
-  local ck
-  ck="$(kc api-resources --verbs=list --namespaced=false -o name 2>/dev/null | sort -u)"
-  for r in $ck; do
-    kc get "$r" -l "$LABEL" \
-      -o custom-columns=K:.kind,N:.metadata.name --no-headers 2>/dev/null \
+  # Cluster-scoped: BASE owns only the GatewayClass. In `all` mode, sweep every
+  # cluster-scoped kind (surfaces overlay webhooks/issuers too).
+  if [ "$mode" = scoped ]; then
+    kc get gatewayclass -l "$LABEL" -o custom-columns=K:.kind,N:.metadata.name --no-headers 2>/dev/null \
       | awk 'NF{print $1"/<cluster>/"$2}' >> "$out.tmp" || true
-  done
-  # kind may print empty for CRs whose printer lacks .kind — fall back is fine;
-  # sort/uniq for a stable truth set.
+  else
+    local ck; ck="$(kc api-resources --verbs=list --namespaced=false -o name 2>/dev/null | sort -u)"
+    for r in $ck; do
+      kc get "$r" -l "$LABEL" -o custom-columns=K:.kind,N:.metadata.name --no-headers 2>/dev/null \
+        | awk 'NF{print $1"/<cluster>/"$2}' >> "$out.tmp" || true
+    done
+  fi
   grep -v '^/' "$out.tmp" 2>/dev/null | sort -u > "$out" || true
   rm -f "$out.tmp"
-  echo "labeled resources ($LABEL) → $out"
+  echo "labeled resources [$mode] ($LABEL, ns=$([ "$mode" = scoped ] && echo "$NS + GatewayClass" || echo "ALL")) → $out"
   wc -l < "$out" | awk '{print $1" object(s)"}'
 }
 
@@ -91,6 +114,7 @@ case "${1:-}" in
       echo "NOTE: '+' = objects present now, absent at baseline (playground/other new work); '-' = predated us and now gone (investigate)."
     fi ;;
   labeled) labeled ;;
+  labeled-all) labeled_all ;;
   in-baseline)
     [ -f "$BASELINE" ] || exit 0
     case "$2" in

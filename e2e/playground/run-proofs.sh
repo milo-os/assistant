@@ -124,11 +124,36 @@ cluster_health() {
   echo "ok: control plane healthy (controller-manager + scheduler running, ready, stable > ${CP_STABLE_WINDOW}s)"
   return 0
 }
-# Guard for a cluster-dependent proof: if the CP is unstable, emit a clear
-# NOT-PROVEN reason and short-circuit the proof (returns 2 = held, not failed).
+# Guard for a proof that SCHEDULES new pods (P1 bring-up): needs a healthy CP.
 require_healthy_cluster() {
   cluster_health && return 0
-  note "$1: NOT PROVEN — held on unstable control plane (re-run when pg-infra confirms BASE up on a stable CP)."
+  note "$1: held on unstable control plane (bring-up schedules new pods; re-run when the CP is stable)."
+  return 2
+}
+
+# Workload health — the gate for proofs that EXERCISE already-running playground
+# pods (P2 chat, P4 log read, P6 sink read, P8 dry-run). These don't schedule
+# anything, so a control-plane flap doesn't affect them; what matters is that the
+# playground's own pods are Running+Ready. This is why a chat succeeds even while
+# kube-controller-manager crashloops (only NEW scheduling is blocked then).
+workloads_healthy() {
+  [ "${SKIP_CLUSTER_HEALTH:-0}" = 1 ] && { echo "ok: workload health gate SKIPPED"; return 0; }
+  kc cluster-info >/dev/null 2>&1 || { note "cluster API unreachable via ${KCFG}"; return 1; }
+  local d unhealthy=""
+  for d in assistant sink streamco stub-llm; do
+    local ready; ready=$(kc -n "${NS}" get deploy "${d}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+    [ "${ready:-0}" -ge 1 ] 2>/dev/null || unhealthy="${unhealthy} ${d}(ready=${ready:-0})"
+  done
+  if [ -n "${unhealthy}" ]; then
+    note "PLAYGROUND WORKLOADS NOT READY in ns ${NS}:${unhealthy} — is BASE up? HOLD."
+    return 1
+  fi
+  echo "ok: playground workloads Ready (assistant, sink, streamco, stub-llm)"
+  return 0
+}
+require_healthy_workloads() {
+  workloads_healthy && return 0
+  note "$1: held — playground workloads not Ready (need BASE up)."
   return 2
 }
 
@@ -200,10 +225,10 @@ p1() {
 # ── P2: host patch CLI chat through the gateway ─────────────────────────────
 p2() {
   log "P2: host patch CLI chat through the gateway"
-  require_healthy_cluster P2 || return 2
+  require_healthy_workloads P2 || return 2
   build_patch || true
   sink_port_forward || true
-  curl -fsS -X DELETE "${SINK_URL}/events" >/dev/null 2>&1 || true
+  # Do NOT wipe the sink: the user shares this env. P4/P6 filter by our contextId.
   OUT_DIR="${OUT}" SINK_URL="${SINK_URL}" PATCH_URL="${PATCH_URL}" PATCH_TOKEN="${PATCH_TOKEN}" \
   PATCH_CMD="${PATCH_CMD}" PROJECT="${PROJECT}" \
     node "${CHECKS}" chat | tee "${OUT}/p2-chat-console.log"
@@ -244,7 +269,7 @@ p3() {
 # ── P4: gateway token attribution ───────────────────────────────────────────
 p4() {
   log "P4: gateway token attribution for our chat"
-  require_healthy_cluster P4 || return 2
+  require_healthy_workloads P4 || return 2
   local ctxid; ctxid=$(cat "${OUT}/playground-contextid.txt" 2>/dev/null || echo "")
   [ -z "${ctxid}" ] && { note "no contextId captured — run p2 first"; return 1; }
   [ -s "${OUT}/playground-access.log" ] || capture_access_log "${ctxid}" 2
@@ -271,7 +296,7 @@ p6() {
   log "P6: sink shows service-emitted usage for the playground chat"
   # P6 reads the sink, but its DATA comes from a chat that needs a healthy CP —
   # hold it too so a held P2 doesn't surface as a false P6 failure.
-  require_healthy_cluster P6 || return 2
+  require_healthy_workloads P6 || return 2
   sink_port_forward || true
   local ctxid; ctxid=$(cat "${OUT}/playground-contextid.txt" 2>/dev/null || echo "")
   OUT_DIR="${OUT}" SINK_URL="${SINK_URL}" PROJECT="${PROJECT}" EXPECT_CONTEXT_ID="${ctxid}" \
@@ -312,7 +337,7 @@ p8_canon() {
 }
 p8() {
   log "P8: playground-down --dry-run lists EXACTLY our labeled resources (NO teardown)"
-  require_healthy_cluster P8 || return 2
+  require_healthy_workloads P8 || return 2
   # Independent ground truth: my BROAD label sweep across ALL api-resources
   # (catches a stray the down-script's fixed kind list might miss), canonicalized.
   "${SNAP}" labeled | tee "${OUT}/p8-labeled-console.log"

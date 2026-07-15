@@ -53,7 +53,7 @@ const V1_EXPECTED_TOOLS = (process.env.V1_EXPECTED_TOOLS ??
   'pipeline_diagnose,streams_get,streams_list')
   .split(',').map((s) => s.trim()).filter(Boolean).sort();
 const V2_EXPECTED_TOOLS = (process.env.V2_EXPECTED_TOOLS ??
-  'streams_get,streams_list')
+  'streams_list')  // pg-catalog's v2 keeps ONLY streams_list (drops streams_get + pipeline_diagnose)
   .split(',').map((s) => s.trim()).filter(Boolean).sort();
 
 // P4 access log
