@@ -199,11 +199,33 @@ Invalid configuration:
 
 The already-Running (adapter-mode) pod kept serving via RollingUpdate, so the
 env stayed up, but the Deployment was left in a stuck rolling state. Recovered
-with `kubectl rollout undo deploy/assistant` (team-lead authorized). **Fix owed
-by pg-infra**: the BASE `up.sh` assistant render must be mutually-exclusive-aware
-— never set both capability-source envs (or clear the other when setting one).
-Until then, a plain BASE re-run over an overlaid env is not idempotent; the
-catalog-preserving invocation above is.
+with `kubectl rollout undo deploy/assistant` (team-lead authorized).
+
+**FIXED by pg-infra** (commits `4e05e43` + `74d5e0c`), re-verified by QA:
+1. *Deterministic capability source* — `70-assistant.tmpl.yaml` now omits BOTH
+   capability envs and sets exactly one via `kubectl set env`, so `kubectl
+   apply`'s 3-way merge can never keep a stray `CAPABILITY_PROVIDER_URL` from a
+   prior flip.
+2. *Mode guard* — a plain BASE `up.sh` over a live env in CATALOG/adapter mode
+   now **REFUSES** ("keep overlay: --with-catalog … / force: FORCE_BASE=1")
+   instead of silently reverting the wiring a running P3 depends on. The guard
+   sits *before* the assistant manifest render/apply, so it aborts without
+   touching the Deployment.
+
+QA re-verification (code-level + behavioral): the guard is present and sits
+*before* the assistant manifest render/apply (`playground-up.sh` line ~295, ahead
+of the `70-assistant` render at ~307), so it aborts without touching the
+Deployment. A live plain-BASE run left the adapter-mode assistant pod completely
+untouched (same pod, 0 restarts, adapter-only env, `/healthz` 200, overlay
+binding still `1.0.0`). The run did **not** reach the printed REFUSE banner
+because up.sh's *pre-guard* step re-asserts the shared Envoy Gateway operator and
+waits for its rollout — and that operator was independently CrashLoopBackOff
+(9 restarts, pod 63m old, predating this run) under the same VM contention that
+flaps the control plane. up.sh hung on that wait and was killed; the playground
+data plane was unaffected throughout (a chat during the hang still returned
+`CONSUMER_LAG` findings through the gateway). Net: the fix is verified at the
+code level and the assistant is provably protected; a clean end-to-end plain-BASE
+REFUSE capture is gated on the shared cluster's control plane settling.
 
 ## P3 — live reconfiguration — **PROVEN (6/6, behavioral)**
 
