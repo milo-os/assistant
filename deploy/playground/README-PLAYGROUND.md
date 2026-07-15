@@ -107,6 +107,36 @@ kubectl --kubeconfig ~/repos/datum-cloud/test-infra/kubeconfig \
 REAL_MODEL=1 ./deploy/playground/playground-up.sh --skip-build
 ```
 
+## Optional: the catalog overlay
+
+`./deploy/playground/playground-up.sh --with-catalog` brings up the catalog
+control plane + capability-provider adapter (the catalog engineer's
+`CATALOG_UP_CMD`, default
+`~/repos/datum-cloud/service-catalog/hack/playground/catalog-up.sh`) and flips
+the assistant from the fixture ConfigMap to the adapter's HTTP API by setting
+`CAPABILITY_PROVIDER_URL` and unsetting `CAPABILITY_DOCS_FIXTURE` (the two
+sources are mutually exclusive). That one env flip rolls the assistant once.
+
+The adapter lives in its own namespace (`agent-framework-playground`); the
+assistant reaches it cross-namespace at
+`http://capability-provider.agent-framework-playground.svc.cluster.local:8080`.
+The capability documents the adapter serves must point their MCP endpoint at
+**this** gateway so tool calls stay metered and allow-listed:
+
+- MCP endpoint: `${gateway}/mcp` — a **single `/mcp` path**, no per-server URL
+  suffix. The gateway federates backends by tool-name prefix
+  (`streamco-backend__<tool>`), not by path.
+- The managed Envoy service name is generated per-gateway (currently
+  `envoy-patch-playground-patch-playground-<hash>` in `envoy-gateway-system`);
+  resolve it by the `gateway.envoyproxy.io/owning-gateway-name=patch-playground`
+  label rather than hardcoding.
+- StreamCo's in-cluster Service (bypass/enforcement reference only) is
+  `streamco.patch-playground.svc.cluster.local:7810`.
+
+`playground-down.sh` removes only the BASE footprint (namespace
+`patch-playground` + GatewayClass `patch-pg-gw`); the catalog overlay in
+`agent-framework-playground` is torn down by the catalog engineer's own script.
+
 ## Tear down (exactly our layer)
 
 ```bash

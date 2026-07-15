@@ -56,6 +56,14 @@ ASSISTANT_PF_PORT="${ASSISTANT_PF_PORT:-1986}"  # assistant A2A → host (patch 
 DEV_TOKEN="${DEV_TOKEN:-pg-demo-token}"
 PROJECT="${PROJECT:-demo-project}"
 
+# --with-catalog OVERLAY (owned by the catalog engineer; BASE never needs it):
+# the catalog bring-up script + the capability-provider adapter URL the assistant
+# switches to (mutually exclusive with the fixture ConfigMap). The adapter lives
+# in the catalog's own namespace (agent-framework-playground); the assistant
+# reaches it cross-namespace by FQDN.
+CATALOG_UP_CMD="${CATALOG_UP_CMD:-$HOME/repos/datum-cloud/service-catalog/hack/playground/catalog-up.sh}"
+CAPABILITY_PROVIDER_URL="${CAPABILITY_PROVIDER_URL:-http://capability-provider.agent-framework-playground.svc.cluster.local:8080}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"     # assistant repo root
 MANIFESTS="$SCRIPT_DIR/manifests"
@@ -311,6 +319,36 @@ kc -n "$NS" rollout status deploy/assistant --timeout=180s
 ok "assistant + sink ready"
 kc -n "$NS" get aigatewayroute,mcproute 2>/dev/null || true
 
+# ── 6b. CATALOG OVERLAY (optional; flips the capability source) ──
+# BASE composes capabilities from the fixture ConfigMap. --with-catalog brings up
+# the catalog control plane + capability-provider adapter (catalog engineer's
+# script) and switches the assistant to the adapter's HTTP API. The two capability
+# sources are MUTUALLY EXCLUSIVE (config.go rejects both), so we UNSET the fixture
+# env as we set the provider URL. This flip rolls the assistant once — expected in
+# overlay mode. The MCP endpoints the adapter emits should point at THIS gateway;
+# see the adapter contract note printed below.
+if [ "$WITH_CATALOG" = 1 ]; then
+  say "--with-catalog: bring up the catalog overlay + switch capability source"
+  if [ -x "$CATALOG_UP_CMD" ]; then
+    ( "$CATALOG_UP_CMD" ) || warn "catalog bring-up ($CATALOG_UP_CMD) reported an issue"
+  else
+    warn "catalog bring-up script not found/executable at: $CATALOG_UP_CMD"
+    warn "set CATALOG_UP_CMD, or run the catalog engineer's overlay script yourself."
+    warn "continuing to flip the assistant to CAPABILITY_PROVIDER_URL — it will 503"
+    warn "until the capability-provider adapter is reachable."
+  fi
+  echo "  adapter must serve capability docs whose MCP endpoint is THIS gateway:"
+  echo "    MCP base + path : $GATEWAY_MCP_URL   (single /mcp path — NO per-server suffix)"
+  echo "    tool identity   : gateway federates by tool-name prefix 'streamco-backend__<tool>'"
+  echo "    StreamCo direct : streamco.${NS}.svc.cluster.local:7810  (bypass ref only)"
+  # Flip: provider URL in, fixture out (mutually exclusive).
+  kc -n "$NS" set env deploy/assistant \
+    CAPABILITY_DOCS_FIXTURE- \
+    CAPABILITY_PROVIDER_URL="$CAPABILITY_PROVIDER_URL"
+  kc -n "$NS" rollout status deploy/assistant --timeout=180s
+  ok "assistant now sources capabilities from $CAPABILITY_PROVIDER_URL (fixture unset)"
+fi
+
 # ── 7. Expose to host (self-healing port-forwards) ────────────
 start_pf() {  # $1=svc  $2=ns  $3=localport  $4=targetport  $5=pidfile-tag
   local svc="$1" pfns="$2" lport="$3" tport="$4" tag="$5"
@@ -358,12 +396,8 @@ GATEWAY_MCP_URL_IN_CLUSTER=$GATEWAY_MCP_URL
 ENVOY_SVC=$ENVOY_SVC
 EOF
 
-if [ "$WITH_CATALOG" = 1 ]; then
-  warn "--with-catalog: the catalog OVERLAY is owned by the catalog engineer"
-  warn "(service-catalog repo). BASE is up and self-sufficient without it."
-fi
-
-say "Playground is UP (BASE tier)"
+TIER="BASE"; [ "$WITH_CATALOG" = 1 ] && TIER="BASE + CATALOG overlay"
+say "Playground is UP ($TIER tier)"
 cat <<EOF
 
   Try it as a consumer (patch CLI, built from this repo):
