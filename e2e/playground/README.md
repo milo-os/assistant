@@ -50,15 +50,24 @@ the gateway port / URLs / project names follow the live env automatically.
 These are what the driver depends on. Drift is a one-line env override, not a
 rewrite — but I flag them so mismatches surface before Phase 2.
 
-- **Attribution label**: `app.kubernetes.io/part-of=agent-framework-playground`
+- **Attribution label** (CONFIRMED 7f87ace): `app.kubernetes.io/part-of=agent-framework-playground`
   on every playground resource (P8 truth set). — pg-infra
-- **Bring-up scripts**: `deploy/playground-up.sh` / `deploy/playground-down.sh`
-  (override `PLAYGROUND_UP_CMD` / `PLAYGROUND_DOWN_CMD`); `--with-catalog` and
-  `--dry-run` flags; up.sh prints a preflight memory-% line and an "is UP" line;
-  down.sh `--dry-run` prints deletable objects as `kind/ns/name`. — pg-infra
-- **Gateway**: owning-gateway-name label `patch-ai-gateway`, JSON access logs
-  with `x_datum_project`/`x_datum_agent`/`x_datum_conversation` + `input_tokens`
-  /`output_tokens`/`total_tokens`, host port `:1975`. — pg-infra
+- **Bring-up scripts** (CONFIRMED): `deploy/playground/playground-up.sh` /
+  `deploy/playground/playground-down.sh`; `--with-catalog` / `--dry-run` flags;
+  up.sh prints "Resource preflight … memory requests committed: N%" and
+  "Playground is UP (BASE tier)"; up.sh writes `deploy/playground/.run/env`
+  (authoritative `PATCH_URL`/`PATCH_TOKEN`/`GW`/`NS`/`PROJECT`); down.sh
+  `--dry-run` prints the label inventory as `-o name` (`resource.group/name`) —
+  the driver canonicalizes both sides to `kind/name` for the P8 set-diff. — pg-infra
+- **Gateway** (CONFIRMED): owning-gateway-name label `patch-playground`, JSON
+  access logs with `x_datum_project`/`x_datum_agent`/`x_datum_conversation` +
+  `input_tokens`/`output_tokens`/`total_tokens`; assistant port-forwarded to
+  host `:1986`, gateway to `:1985`. — pg-infra
+- **Assistant + sink IN-CLUSTER** (CONFIRMED): assistant reached at
+  `http://localhost:1986` (token `pg-demo-token` → `demo-project`); the sink is
+  a ClusterIP Service NOT forwarded by up.sh — the driver port-forwards
+  `svc/sink` (`sink_port_forward`) to `:7811`. `HOST_ASSISTANT` is unused (no
+  host assistant boot). — pg-infra
 - **Capability provider adapter**: `GET {CAPABILITY_PROVIDER_URL}/projects/
   {name}/capability-documents` returning the doc set (array / `{documents}` /
   `{capabilities}`). Tool allow-list is read from

@@ -43,34 +43,30 @@ KCFG="${KUBECONFIG:-${TEST_INFRA}/kubeconfig}"
 GO_BIN_DIR="${GO_BIN_DIR:-${OUT}/bin}"
 PATCH_CMD="${PATCH_CMD:-${GO_BIN_DIR}/patch}"
 
-# ── Playground scripts (pg-infra owns these; confirm exact paths/flags) ─────
-# Default location assumption: assistant repo deploy/ (contract §Team). Override
-# with PLAYGROUND_UP_CMD / PLAYGROUND_DOWN_CMD once pg-infra confirms.
-PLAYGROUND_UP_CMD="${PLAYGROUND_UP_CMD:-${ASSISTANT_REPO}/deploy/playground-up.sh}"
-PLAYGROUND_DOWN_CMD="${PLAYGROUND_DOWN_CMD:-${ASSISTANT_REPO}/deploy/playground-down.sh}"
+# ── Playground scripts (pg-infra: deploy/playground/, confirmed 7f87ace) ────
+PLAYGROUND_UP_CMD="${PLAYGROUND_UP_CMD:-${ASSISTANT_REPO}/deploy/playground/playground-up.sh}"
+PLAYGROUND_DOWN_CMD="${PLAYGROUND_DOWN_CMD:-${ASSISTANT_REPO}/deploy/playground/playground-down.sh}"
 WITH_CATALOG_FLAG="${WITH_CATALOG_FLAG:---with-catalog}"
 DRYRUN_FLAG="${DRYRUN_FLAG:---dry-run}"
 
-# ── Runtime env (playground-up.sh writes .run/env; we source it if present) ──
-PG_RUN_ENV="${PG_RUN_ENV:-${PG_DIR}/.run/env}"
+# ── Runtime env — playground-up.sh writes deploy/playground/.run/env with the
+# authoritative PATCH_URL/PATCH_TOKEN/GW/NS/PROJECT; source it if present. ─────
+PG_RUN_ENV="${PG_RUN_ENV:-${ASSISTANT_REPO}/deploy/playground/.run/env}"
 [ -f "${PG_RUN_ENV}" ] && { set -a; . "${PG_RUN_ENV}"; set +a; }
 
-PF_PORT="${PF_PORT:-1975}"
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:${PF_PORT}/v1}"
+# Assistant + sink run IN-CLUSTER (manifests 70/80). up.sh port-forwards the
+# assistant to :1986; the SINK is a ClusterIP Service NOT forwarded by up.sh, so
+# this driver forwards svc/sink itself (sink_port_forward). No host assistant.
 PROJECT="${PROJECT:-demo-project}"
 UNENTITLED_PROJECT="${UNENTITLED_PROJECT:-unentitled-project}"
-# Host workloads: the assistant service (gateway mode) + sink. If pg-infra runs
-# the assistant IN-CLUSTER (contract component 1), set ASSISTANT_URL to its
-# NodePort/forward and PATCH_URL to it, and SKIP the host boot (HOST_ASSISTANT=0).
-HOST_ASSISTANT="${HOST_ASSISTANT:-1}"
-ASSISTANT_HOST="${ASSISTANT_HOST:-127.0.0.1}"; ASSISTANT_PORT="${ASSISTANT_PORT:-7820}"
-ASSISTANT_URL="${ASSISTANT_URL:-http://${ASSISTANT_HOST}:${ASSISTANT_PORT}}"
-PATCH_URL="${PATCH_URL:-${ASSISTANT_URL}}"
-PATCH_TOKEN="${PATCH_TOKEN:-e2e-token}"
+ASSISTANT_PF_PORT="${ASSISTANT_PF_PORT:-1986}"
+PATCH_URL="${PATCH_URL:-http://localhost:${ASSISTANT_PF_PORT}}"
+PATCH_TOKEN="${PATCH_TOKEN:-pg-demo-token}"
 SINK_HOST="${SINK_HOST:-127.0.0.1}"; SINK_PORT="${SINK_PORT:-7811}"
 SINK_URL="${SINK_URL:-http://${SINK_HOST}:${SINK_PORT}}"
 CAPABILITY_PROVIDER_URL="${CAPABILITY_PROVIDER_URL:-http://127.0.0.1:8085}"
-GW="${GW:-patch-ai-gateway}"          # owning-gateway-name label value
+GW="${GW:-patch-playground}"          # owning-gateway-name label value (README P4)
+NS="${NS:-patch-playground}"
 EG_NS="${EG_NS:-envoy-gateway-system}"
 CHECKS="${PG_DIR}/playground-checks.mjs"
 SNAP="${PG_DIR}/snapshot.sh"
@@ -146,6 +142,23 @@ build_patch() {
   ( cd "${ASSISTANT_REPO}" && go build -o "${GO_BIN_DIR}/patch" ./cmd/patch ) 2>&1 | tee "${OUT}/go-build.log"
 }
 
+# Port-forward the in-cluster sink Service to the host so the driver can GET
+# /events over HTTP (up.sh forwards the assistant + gateway, but NOT the sink).
+# Self-reaped via pidfile; idempotent. Returns once /healthz answers.
+SINK_PF_PID=""
+sink_port_forward() {
+  curl -fsS --max-time 1 "${SINK_URL}/healthz" >/dev/null 2>&1 && return 0
+  local logf="${OUT}/pf-sink.log"
+  kc -n "${NS}" port-forward svc/sink "${SINK_PORT}:7811" --address 127.0.0.1 >"${logf}" 2>&1 &
+  SINK_PF_PID=$!; disown 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    curl -fsS --max-time 1 "${SINK_URL}/healthz" >/dev/null 2>&1 && { echo "ok: sink forwarded on ${SINK_URL}"; return 0; }
+    sleep 0.5
+  done
+  note "sink port-forward did not become healthy (see ${logf})"; return 1
+}
+stop_sink_pf() { [ -n "${SINK_PF_PID}" ] && kill "${SINK_PF_PID}" 2>/dev/null || true; SINK_PF_PID=""; }
+
 # Capture the gateway access log for a conversation into out/playground-access.log.
 # Recipe proven in the gateway leg: resolve the RUNNING data-plane Envoy pod by
 # owning-gateway-name, `kubectl logs <pod> --all-containers --tail=-1`, then wait
@@ -173,7 +186,9 @@ p1() {
   [ -x "${PLAYGROUND_UP_CMD%% *}" ] || { note "playground-up.sh not found at '${PLAYGROUND_UP_CMD}' — NOT PROVEN (pg-infra pending)"; return 1; }
   local up1="${OUT}/p1-up-run1.log" up2="${OUT}/p1-up-run2.log"
   bash -c "${PLAYGROUND_UP_CMD}" 2>&1 | tee "${up1}"; local rc1=${PIPESTATUS[0]}
-  bash -c "${PLAYGROUND_UP_CMD}" 2>&1 | tee "${up2}"; local rc2=${PIPESTATUS[0]}
+  # Second run reuses already-loaded images (--skip-build) — proves the cluster-
+  # mutation path is idempotent and re-reports UP, without rebuilding images.
+  bash -c "${PLAYGROUND_UP_CMD} --skip-build" 2>&1 | tee "${up2}"; local rc2=${PIPESTATUS[0]}
   # Preflight gate: the memory-% preflight line must be present (proves the
   # >80% abort guardrail ran). Idempotency: run 2 exits 0 and reports UP.
   local preflight=1; grep -qiE 'preflight|memory.*%' "${up1}" || preflight=0
@@ -187,6 +202,7 @@ p2() {
   log "P2: host patch CLI chat through the gateway"
   require_healthy_cluster P2 || return 2
   build_patch || true
+  sink_port_forward || true
   curl -fsS -X DELETE "${SINK_URL}/events" >/dev/null 2>&1 || true
   OUT_DIR="${OUT}" SINK_URL="${SINK_URL}" PATCH_URL="${PATCH_URL}" PATCH_TOKEN="${PATCH_TOKEN}" \
   PATCH_CMD="${PATCH_CMD}" PROJECT="${PROJECT}" \
@@ -253,9 +269,10 @@ p5() {
 # ── P6: service-emitted usage at the sink ───────────────────────────────────
 p6() {
   log "P6: sink shows service-emitted usage for the playground chat"
-  # P6 reads the host sink, but its DATA comes from a chat that needs a healthy
-  # CP — hold it too so a held P2 doesn't surface as a false P6 failure.
+  # P6 reads the sink, but its DATA comes from a chat that needs a healthy CP —
+  # hold it too so a held P2 doesn't surface as a false P6 failure.
   require_healthy_cluster P6 || return 2
+  sink_port_forward || true
   local ctxid; ctxid=$(cat "${OUT}/playground-contextid.txt" 2>/dev/null || echo "")
   OUT_DIR="${OUT}" SINK_URL="${SINK_URL}" PROJECT="${PROJECT}" EXPECT_CONTEXT_ID="${ctxid}" \
     node "${CHECKS}" sink | tee "${OUT}/p6-sink-console.log"
@@ -282,29 +299,43 @@ p7_catalog() {
 }
 
 # ── P8: playground-down --dry-run == our labeled resources (NO teardown) ─────
+# Canonicalize a k8s object reference to `kind/name`, tolerant of both shapes:
+#   my snapshot.sh `labeled`:      Kind/ns/name        (3 fields, CamelCase kind)
+#   down.sh --dry-run (`-o name`): resource.group/name (kind before first '.')
+# kind = lowercase text before the first '.' or '/'; name = last '/'-segment.
+# Drops '##' headers, blanks, and the namespace container line (compared apart).
+p8_canon() {
+  awk -F'/' '
+    /^##/ || /^[[:space:]]*$/ { next }
+    { k=$1; sub(/[.].*$/,"",k); k=tolower(k); n=$NF; if (k!="" && n!="") print k"/"n }
+  ' | sort -u
+}
 p8() {
   log "P8: playground-down --dry-run lists EXACTLY our labeled resources (NO teardown)"
   require_healthy_cluster P8 || return 2
-  # Ground truth: everything carrying our attribution label.
+  # Independent ground truth: my BROAD label sweep across ALL api-resources
+  # (catches a stray the down-script's fixed kind list might miss), canonicalized.
   "${SNAP}" labeled | tee "${OUT}/p8-labeled-console.log"
-  local truth="${OUT}/labeled-resources.txt"
+  local truth="${OUT}/p8-truth-canon.txt"
+  { p8_canon < "${OUT}/labeled-resources.txt"; echo "namespace/${NS}"; } | sort -u > "${truth}"
   [ -x "${PLAYGROUND_DOWN_CMD%% *}" ] || { note "playground-down.sh not found at '${PLAYGROUND_DOWN_CMD}' — NOT PROVEN (pg-infra pending)"; return 1; }
   bash -c "${PLAYGROUND_DOWN_CMD} ${DRYRUN_FLAG}" 2>&1 | tee "${OUT}/p8-dryrun.log"; local rc=${PIPESTATUS[0]}
-  # Extract kind/ns/name tuples the dry-run says it WOULD delete. The down script
-  # should print them in a parseable form; we normalize to the snapshot's
-  # `Kind/ns/name` shape. If it prints a different shape, DRYRUN_PARSE overrides.
-  local parsed="${OUT}/p8-dryrun-parsed.txt"
+  # Parse the objects the dry-run says it WOULD delete. Default: keep only lines
+  # that look like an object ref (contain a '/', not our decorative prose), then
+  # canonicalize. DRYRUN_PARSE overrides the extraction if the format changes.
+  local parsed="${OUT}/p8-dryrun-canon.txt"
   if [ -n "${DRYRUN_PARSE:-}" ]; then
-    bash -c "${DRYRUN_PARSE} < '${OUT}/p8-dryrun.log'" > "${parsed}" 2>/dev/null || true
+    bash -c "${DRYRUN_PARSE} < '${OUT}/p8-dryrun.log'" | p8_canon > "${parsed}" 2>/dev/null || true
   else
-    grep -oiE '[a-z][a-z0-9.-]+/[a-z0-9-]+/[a-z0-9.-]+' "${OUT}/p8-dryrun.log" 2>/dev/null | sort -u > "${parsed}" || true
+    grep -E '^(namespace/|[a-z][a-z0-9.-]*/)' "${OUT}/p8-dryrun.log" 2>/dev/null | p8_canon > "${parsed}" || true
   fi
-  # Compare sets. Absolute equality is the bar; report both directions.
   local only_truth only_dry
-  only_truth=$(comm -23 <(sort -u "${truth}" 2>/dev/null) <(sort -u "${parsed}" 2>/dev/null) | wc -l | tr -d ' ')
-  only_dry=$(comm -13 <(sort -u "${truth}" 2>/dev/null) <(sort -u "${parsed}" 2>/dev/null) | wc -l | tr -d ' ')
-  echo "P8: dry-run rc=${rc} labeled=$(wc -l <"${truth}"|tr -d ' ') dryrun=$(wc -l <"${parsed}"|tr -d ' ') only-in-labeled=${only_truth} only-in-dryrun=${only_dry}"
-  diff -u <(sort -u "${truth}") <(sort -u "${parsed}") > "${OUT}/p8-set.diff" 2>/dev/null || true
+  only_truth=$(comm -23 "${truth}" "${parsed}" | tee "${OUT}/p8-only-labeled.txt" | grep -c . || true)
+  only_dry=$(comm -13 "${truth}" "${parsed}" | tee "${OUT}/p8-only-dryrun.txt" | grep -c . || true)
+  echo "P8: dry-run rc=${rc} labeled=$(grep -c . "${truth}") dryrun=$(grep -c . "${parsed}") only-in-labeled=${only_truth} only-in-dryrun=${only_dry}"
+  [ "${only_truth}" != 0 ] && { echo "  only in labeled truth (down.sh would MISS):"; sed 's/^/    /' "${OUT}/p8-only-labeled.txt"; }
+  [ "${only_dry}" != 0 ] && { echo "  only in dry-run (claims to delete, but unlabeled?):"; sed 's/^/    /' "${OUT}/p8-only-dryrun.txt"; }
+  diff -u "${truth}" "${parsed}" > "${OUT}/p8-set.diff" 2>/dev/null || true
   [ "${rc}" -eq 0 ] && [ "${only_truth}" -eq 0 ] && [ "${only_dry}" -eq 0 ]
 }
 
