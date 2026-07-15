@@ -50,6 +50,23 @@ const CLI_TIMEOUT_MS = Number(process.env.CLI_TIMEOUT_MS ?? 30_000);
 
 mkdirSync(OUT_DIR, { recursive: true });
 
+// Recursively find the first value for `key` anywhere in a nested object/array.
+// A2A v1.0 (a2a-go) nests contextId inside the StreamResponse oneOf envelope
+// (e.g. {statusUpdate:{contextId}}, {task:{contextId}}) and/or a JSON-RPC
+// {result:{...}} wrapper, so a top-level lookup no longer suffices.
+function findKey(node, key) {
+  if (node == null || typeof node !== 'object') return undefined;
+  if (Array.isArray(node)) {
+    for (const el of node) { const r = findKey(el, key); if (r !== undefined) return r; }
+    return undefined;
+  }
+  for (const [k, v] of Object.entries(node)) {
+    if (k === key && (typeof v === 'string' || typeof v === 'number')) return String(v);
+    const r = findKey(v, key); if (r !== undefined) return r;
+  }
+  return undefined;
+}
+
 const results = [];
 function record(item, name, ok, detail, required = true) {
   results.push({ item, name, ok: !!ok, required, detail: String(detail).slice(0, 400) });
@@ -131,7 +148,7 @@ async function cliLeg() {
   const jsonChat = await runCli(['chat', PROMPT, '--project', PROJECT, '--json']);
   writeFileSync(join(OUT_DIR, 'cli-chat-json.txt'), jsonChat.stdout + '\n---STDERR---\n' + jsonChat.stderr);
   const jsonEvents = jsonChat.stdout.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return undefined; } }).filter(Boolean);
-  const jsonCtx = jsonEvents.map((e) => e?.contextId ?? e?.result?.contextId).find(Boolean);
+  const jsonCtx = jsonEvents.map((e) => findKey(e, 'contextId')).find(Boolean);
   record('cli.json', '`patch chat --json` prints parseable A2A events with a contextId', jsonChat.code === 0 && jsonEvents.length >= 1 && !!jsonCtx, `exit=${jsonChat.code} events=${jsonEvents.length} contextId=${jsonCtx}`, false);
 
   // C-badtoken: bad token → non-zero + a clear (non-empty, non-stacktrace) error.

@@ -62,6 +62,22 @@ const CLI_TIMEOUT_MS = Number(process.env.CLI_TIMEOUT_MS ?? 45_000);
 
 mkdirSync(OUT_DIR, { recursive: true });
 
+// Recursively find the first value for `key` anywhere in a nested object/array.
+// A2A v1.0 (a2a-go) nests contextId inside the StreamResponse oneOf envelope
+// and/or a JSON-RPC {result:{...}} wrapper — a top-level lookup no longer works.
+function findKey(node, key) {
+  if (node == null || typeof node !== 'object') return undefined;
+  if (Array.isArray(node)) {
+    for (const el of node) { const r = findKey(el, key); if (r !== undefined) return r; }
+    return undefined;
+  }
+  for (const [k, v] of Object.entries(node)) {
+    if (k === key && (typeof v === 'string' || typeof v === 'number')) return String(v);
+    const r = findKey(v, key); if (r !== undefined) return r;
+  }
+  return undefined;
+}
+
 const results = [];
 function record(item, name, ok, detail, required = true) {
   results.push({ item, name, ok: !!ok, required, detail: String(detail).slice(0, 500) });
@@ -105,7 +121,7 @@ async function chat() {
   const res = await runCli(['chat', PROMPT, '--project', PROJECT, '--json']);
   writeFileSync(join(OUT_DIR, 'gateway-cli-chat.txt'), res.stdout + '\n---STDERR---\n' + res.stderr);
   const events = res.stdout.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return undefined; } }).filter(Boolean);
-  const contextId = events.map((e) => e?.contextId).find(Boolean);
+  const contextId = events.map((e) => findKey(e, 'contextId')).find(Boolean);
   const text = JSON.stringify(events);
   const hits = FINDING_MARKERS.filter((m) => text.includes(m));
   record('gw.chat.exit', 'patch chat (gateway mode) exits 0', res.code === 0, `exit=${res.code}`);
