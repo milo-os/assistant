@@ -323,9 +323,10 @@ async function sink() {
   const serviceSourced = sources.length > 0 && sources.every((s) => /\/a2a$/.test(String(s)));
   record('pg.sink.service_sourced', 'usage events are SERVICE-sourced (source ends in /a2a), not host/CLI-emitted', serviceSourced,
     `sources=[${sources.join(', ')}]`);
+  // CloudEvent `subject` is TOP-LEVEL (e.subject = "projects/<project>"), not data.subject.
   record('pg.sink.subject', `usage events attributed to subject projects/${PROJECT}`,
-    forConv.some((e) => String(e?.data?.subject ?? '').includes(PROJECT)),
-    `subjects=[${[...new Set(forConv.map((e) => e?.data?.subject).filter(Boolean))].join(', ')}]`, false);
+    forConv.some((e) => String(e?.subject ?? '').includes(PROJECT)),
+    `subjects=[${[...new Set(forConv.map((e) => e?.subject).filter(Boolean))].join(', ')}]`);
   finish('sink');
 }
 

@@ -28,7 +28,7 @@ against the persistent playground on the shared `test-infra` kind cluster.
 | P3 — live reconfiguration (v1→v2→unpublish) | **PENDING** — assistant is fixture-mode; needs pg-infra to wire `--with-catalog` + a stable-overlay window. Adapter mechanism proven live (see P5). |
 | P4 — gateway token attribution + reconciliation | **PROVEN** (4/4, exact) |
 | P5 — entitlement isolation | **PROVEN** (3/3) |
-| P6 — service-emitted usage at the sink | **PROVEN** (4/5; the 1 non-required check is a subject-path detail) |
+| P6 — service-emitted usage at the sink | **PROVEN** (5/5) |
 | P7-assistant — go vet + go test | **PROVEN** |
 | P7-catalog — envtest | **PROVEN** |
 | P8 — playground-down --dry-run == labeled footprint | **PROVEN** (26/26 exact, no teardown) |
@@ -94,17 +94,17 @@ entitled control project receives its bound agent — capabilities are gated by
 entitlement, live from the catalog CRs. (This also proves the adapter serves
 live CR-derived documents, the mechanism P3 builds on.)
 
-## P6 — service-emitted usage at the sink — **PROVEN (4/5)**
+## P6 — service-emitted usage at the sink — **PROVEN (5/5)**
 
 `run-proofs.sh p6`. Assertions scoped to the QA contextId (the user's concurrent
 chats also land in the shared sink).
 
 ```
-PASS  [pg.sink.events]          sink captured usage events for the conversation — events=4 (of 11 total)
+PASS  [pg.sink.events]          sink captured usage events for the conversation — events=4
 PASS  [pg.sink.tokens]          sink has input-tokens AND output-tokens meters — [.../input-tokens, .../output-tokens, .../messages, .../tool-invocations]
 PASS  [pg.sink.toolinvocations] sink has tool-invocations meter — present=true
 PASS  [pg.sink.service_sourced] usage events SERVICE-sourced (source ends in /a2a) — sources=[http://localhost:1986/a2a]
-WARN  [pg.sink.subject]         (non-required) subject-path attribution — subjects=[] (attribution proven at the gateway in P4)
+PASS  [pg.sink.subject]         events attributed to subject projects/demo-project — subjects=[projects/demo-project]
 ```
 
 The usage events are emitted by the **service** (CloudEvent `source` = the
