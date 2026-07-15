@@ -228,21 +228,42 @@ capture_access_log() {
 }
 
 # ── P1: idempotent + preflight-gated bring-up ───────────────────────────────
+# Idempotency = re-running bring-up yields the same result and changes nothing.
+# If the env is ALREADY up (the shared cluster is persistent + pg-infra already
+# brought it up), the low-impact, honest test is ONE --skip-build re-run against
+# the up env, proving it's a NO-OP (labeled footprint byte-identical before/
+# after) and still exits 0 + reports UP + ran the preflight gate. This avoids a
+# heavyweight double image-build on the shared cluster while the user is active.
+# Set P1_FORCE_FULL=1 to instead do a full two-run bring-up (fresh env only).
 p1() {
   log "P1: idempotent + preflight-gated bring-up"
   require_healthy_cluster P1 || return 2
   [ -x "${PLAYGROUND_UP_CMD%% *}" ] || { note "playground-up.sh not found at '${PLAYGROUND_UP_CMD}' — NOT PROVEN (pg-infra pending)"; return 1; }
-  local up1="${OUT}/p1-up-run1.log" up2="${OUT}/p1-up-run2.log"
-  bash -c "${PLAYGROUND_UP_CMD}" 2>&1 | tee "${up1}"; local rc1=${PIPESTATUS[0]}
-  # Second run reuses already-loaded images (--skip-build) — proves the cluster-
-  # mutation path is idempotent and re-reports UP, without rebuilding images.
-  bash -c "${PLAYGROUND_UP_CMD} --skip-build" 2>&1 | tee "${up2}"; local rc2=${PIPESTATUS[0]}
-  # Preflight gate: the memory-% preflight line must be present (proves the
-  # >80% abort guardrail ran). Idempotency: run 2 exits 0 and reports UP.
-  local preflight=1; grep -qiE 'preflight|memory.*%' "${up1}" || preflight=0
-  local up_ok=1; { [ "${rc2}" -eq 0 ] && grep -qiE 'is UP|environment is up|ready' "${up2}"; } || up_ok=0
-  echo "P1: run1 rc=${rc1} run2 rc=${rc2} preflight=${preflight} idempotent-up=${up_ok}"
-  [ "${rc1}" -eq 0 ] && [ "${up_ok}" -eq 1 ] && [ "${preflight}" -eq 1 ]
+  if [ "${P1_FORCE_FULL:-0}" = 1 ] || ! workloads_healthy >/dev/null 2>&1; then
+    local up1="${OUT}/p1-up-run1.log" up2="${OUT}/p1-up-run2.log"
+    bash -c "${PLAYGROUND_UP_CMD}" 2>&1 | tee "${up1}"; local rc1=${PIPESTATUS[0]}
+    bash -c "${PLAYGROUND_UP_CMD} --skip-build" 2>&1 | tee "${up2}"; local rc2=${PIPESTATUS[0]}
+    local preflight=1; grep -qiE 'preflight|memory.*%' "${up1}" || preflight=0
+    local up_ok=1; { [ "${rc2}" -eq 0 ] && grep -qiE 'is UP|environment is up|ready' "${up2}"; } || up_ok=0
+    echo "P1(full): run1 rc=${rc1} run2 rc=${rc2} preflight=${preflight} idempotent-up=${up_ok}"
+    [ "${rc1}" -eq 0 ] && [ "${up_ok}" -eq 1 ] && [ "${preflight}" -eq 1 ]
+    return $?
+  fi
+  # Already-up path: capture the labeled footprint, re-run --skip-build, capture
+  # again, assert exit 0 + UP + preflight-ran + footprint UNCHANGED (no-op).
+  note "env already up — proving idempotency via one --skip-build re-run (no-op check). May briefly bounce the port-forwards (self-healing)."
+  "${SNAP}" labeled >/dev/null 2>&1; cp "${OUT}/labeled-resources.txt" "${OUT}/p1-labeled-before.txt" 2>/dev/null
+  local up="${OUT}/p1-up-rerun.log"
+  bash -c "${PLAYGROUND_UP_CMD} --skip-build" 2>&1 | tee "${up}"; local rc=${PIPESTATUS[0]}
+  # port-forwards may bounce; give them a moment to self-heal before re-snapshot.
+  sleep 3
+  "${SNAP}" labeled >/dev/null 2>&1; cp "${OUT}/labeled-resources.txt" "${OUT}/p1-labeled-after.txt" 2>/dev/null
+  local preflight=1; grep -qiE 'preflight|memory.*%' "${up}" || preflight=0
+  local up_ok=1; { [ "${rc}" -eq 0 ] && grep -qiE 'is UP|environment is up|ready' "${up}"; } || up_ok=0
+  local noop=1; diff -q "${OUT}/p1-labeled-before.txt" "${OUT}/p1-labeled-after.txt" >/dev/null 2>&1 || noop=0
+  echo "P1(already-up rerun): rc=${rc} preflight=${preflight} reports-UP=${up_ok} footprint-unchanged=${noop}"
+  [ "${noop}" = 0 ] && { echo "  footprint changed:"; diff "${OUT}/p1-labeled-before.txt" "${OUT}/p1-labeled-after.txt" | sed 's/^/    /'; }
+  [ "${rc}" -eq 0 ] && [ "${up_ok}" -eq 1 ] && [ "${preflight}" -eq 1 ] && [ "${noop}" -eq 1 ]
 }
 
 # ── P2: host patch CLI chat through the gateway ─────────────────────────────
