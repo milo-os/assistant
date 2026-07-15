@@ -54,9 +54,13 @@ spec:
                 secretKeyRef:
                   name: assistant-dev-token
                   key: tokens
-            # ── Capabilities: fixture mounted from a ConfigMap ──────
-            - name: CAPABILITY_DOCS_FIXTURE
-              value: "/config/capability-documents.json"
+            # ── Capabilities ────────────────────────────────────────
+            # The capability SOURCE env is set by playground-up.sh AFTER apply,
+            # not declared here: BASE sets CAPABILITY_DOCS_FIXTURE (the ConfigMap
+            # mounted at /config below); --with-catalog sets CAPABILITY_PROVIDER_
+            # URL instead. The two are mutually exclusive (config.go), so keeping
+            # them out of the applied manifest prevents `kubectl apply`'s 3-way
+            # merge from ever leaving BOTH set on a cross-mode re-run.
             # ── Usage: emit CloudEvents to the in-cluster sink ──────
             - name: USAGE_GATEWAY_URL
               value: "http://sink.patch-playground.svc.cluster.local:7811"

@@ -292,6 +292,20 @@ ASSISTANT_FILE="$RUN_DIR/70-assistant.yaml"
 sed "s#__GATEWAY_URL__#${GATEWAY_URL}#" \
   "$MANIFESTS/70-assistant.tmpl.yaml" > "$ASSISTANT_FILE"
 kc apply -f "$ASSISTANT_FILE"
+# Assert exactly ONE capability source (they're mutually exclusive in config.go).
+# The manifest deliberately omits both so `kubectl apply` never merges a stray
+# value from a prior cross-mode run; we set the authoritative one here. This is
+# idempotent (a re-run in the same mode is a no-op → no roll) and converges
+# cleanly on a mode switch (no both-set crash pod). --with-catalog re-asserts the
+# provider URL in its own block below; setting it here too keeps the intermediate
+# rollout healthy.
+if [ "$WITH_CATALOG" = 1 ]; then
+  kc -n "$NS" set env deploy/assistant \
+    CAPABILITY_DOCS_FIXTURE- CAPABILITY_PROVIDER_URL="$CAPABILITY_PROVIDER_URL" >/dev/null
+else
+  kc -n "$NS" set env deploy/assistant \
+    CAPABILITY_PROVIDER_URL- CAPABILITY_DOCS_FIXTURE=/config/capability-documents.json >/dev/null
+fi
 kc apply -f "$MANIFESTS/80-sink.yaml"
 
 # Optional real-model leg (never stores a key in the repo).
@@ -314,8 +328,13 @@ if [ "${REAL_MODEL:-0}" = "1" ]; then
 fi
 
 say "Wait for assistant + sink ready"
-kc -n "$NS" rollout status deploy/sink --timeout=120s
-kc -n "$NS" rollout status deploy/assistant --timeout=180s
+kc -n "$NS" rollout status deploy/sink --timeout=120s \
+  || kc -n "$NS" wait --for=condition=Available deploy/sink --timeout=120s
+# Tolerant: a flapping kube-controller-manager on the shared node stalls
+# `rollout status` on observedGeneration lag even when the pod is healthy; fall
+# back to the Available condition so a CP flap doesn't fail an otherwise-fine run.
+kc -n "$NS" rollout status deploy/assistant --timeout=120s \
+  || kc -n "$NS" wait --for=condition=Available deploy/assistant --timeout=120s
 ok "assistant + sink ready"
 kc -n "$NS" get aigatewayroute,mcproute 2>/dev/null || true
 
@@ -349,11 +368,14 @@ if [ "$WITH_CATALOG" = 1 ]; then
   echo "    MCP base + path : $GATEWAY_MCP_URL   (single /mcp path — NO per-server suffix)"
   echo "    tool identity   : gateway federates by tool-name prefix 'streamco-backend__<tool>'"
   echo "    StreamCo direct : streamco.${NS}.svc.cluster.local:7810  (bypass ref only)"
-  # Flip: provider URL in, fixture out (mutually exclusive).
+  # Flip: provider URL in, fixture out (mutually exclusive). Redundant with the
+  # apply-time assertion above when already in overlay mode (a no-op re-run), but
+  # kept so a BASE→overlay switch converges here too.
   kc -n "$NS" set env deploy/assistant \
     CAPABILITY_DOCS_FIXTURE- \
     CAPABILITY_PROVIDER_URL="$CAPABILITY_PROVIDER_URL"
-  kc -n "$NS" rollout status deploy/assistant --timeout=180s
+  kc -n "$NS" rollout status deploy/assistant --timeout=120s \
+    || kc -n "$NS" wait --for=condition=Available deploy/assistant --timeout=120s
   ok "assistant now sources capabilities from $CAPABILITY_PROVIDER_URL (fixture unset)"
 fi
 
