@@ -329,14 +329,22 @@ kc -n "$NS" get aigatewayroute,mcproute 2>/dev/null || true
 # see the adapter contract note printed below.
 if [ "$WITH_CATALOG" = 1 ]; then
   say "--with-catalog: bring up the catalog overlay + switch capability source"
-  if [ -x "$CATALOG_UP_CMD" ]; then
-    ( "$CATALOG_UP_CMD" ) || warn "catalog bring-up ($CATALOG_UP_CMD) reported an issue"
-  else
-    warn "catalog bring-up script not found/executable at: $CATALOG_UP_CMD"
-    warn "set CATALOG_UP_CMD, or run the catalog engineer's overlay script yourself."
-    warn "continuing to flip the assistant to CAPABILITY_PROVIDER_URL — it will 503"
-    warn "until the capability-provider adapter is reachable."
-  fi
+  # CATALOG_UP_CMD=skip|none|"" ⇒ the overlay is already up (owned by the catalog
+  # engineer); do NOT re-run their bring-up (it would churn the SAC/entitlement
+  # CRs a live P3 depends on). Just re-assert the assistant's capability source —
+  # this keeps a `--with-catalog --skip-build` re-run idempotent in adapter mode.
+  case "${CATALOG_UP_CMD:-skip}" in
+    skip|none|"") warn "CATALOG_UP_CMD=skip — assuming the overlay is already up; only flipping the assistant" ;;
+    *)
+      if [ -x "$CATALOG_UP_CMD" ]; then
+        ( "$CATALOG_UP_CMD" ) || warn "catalog bring-up ($CATALOG_UP_CMD) reported an issue"
+      else
+        warn "catalog bring-up script not found/executable at: $CATALOG_UP_CMD"
+        warn "set CATALOG_UP_CMD (or =skip if the overlay is already up), or run the"
+        warn "catalog engineer's overlay script yourself. Flipping the assistant to"
+        warn "CAPABILITY_PROVIDER_URL regardless — it 503s until the adapter is reachable."
+      fi ;;
+  esac
   echo "  adapter must serve capability docs whose MCP endpoint is THIS gateway:"
   echo "    MCP base + path : $GATEWAY_MCP_URL   (single /mcp path — NO per-server suffix)"
   echo "    tool identity   : gateway federates by tool-name prefix 'streamco-backend__<tool>'"
