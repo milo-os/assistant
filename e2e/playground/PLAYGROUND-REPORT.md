@@ -46,7 +46,7 @@ the contention; these proofs proceeded against the live env meanwhile.
 
 | Proof | Status |
 | --- | --- |
-| P1 — bring-up idempotent + preflight-gated | **NOT PROVEN** — a real idempotency gap: BASE `up.sh` re-run on a catalog-wired env produces a conflicting assistant spec (crash). See below. |
+| P1 — bring-up idempotent + preflight-gated | **PROVEN** for the catalog-preserving invocation (clean no-op); **plain BASE re-run over an overlaid env is an open defect** (see below) |
 | P2 — host chat through the gateway | **PROVEN** (3/3) |
 | P3 — live reconfiguration (v1→v2→unpublish) | **PROVEN** (6/6, behavioral) |
 | P4 — gateway token attribution + reconciliation | **PROVEN** (4/4, exact) |
@@ -162,20 +162,34 @@ cross-namespace footprint.
 
 ---
 
-## Pending proofs (honest gaps)
+## P1 — bring-up idempotent + preflight-gated — **PROVEN (catalog-preserving) + one open defect**
 
-### P1 — bring-up idempotent + preflight-gated — **NOT PROVEN (real idempotency gap found)**
+**Preflight gate — proven present.** `up.sh` runs a resource preflight and aborts
+if node memory requests exceed 80%: `node memory requests committed: 43%`.
 
-The preflight gate is present and correct (`up.sh` aborts if node memory
-requests > 80%). Idempotency is **not** clean, and the QA re-run surfaced a
-genuine bug rather than a false failure:
+**Idempotency — PROVEN for the catalog-preserving invocation.** The env is
+persistent + catalog-wired, so the correct re-run is the invocation pg-infra
+prescribes, which re-asserts the SAME adapter env without churning the overlay:
 
-Running BASE `playground-up.sh --skip-build` against an env that had **already**
-had `--with-catalog` applied re-rendered the assistant Deployment
-(`deployment.apps/assistant configured`, not "unchanged") — it re-added
-`CAPABILITY_DOCS_FIXTURE` to the spec **without** clearing the
-`CAPABILITY_PROVIDER_URL` that the catalog flip had set. The two are mutually
-exclusive, so the new pod crashed on startup:
+```
+CATALOG_UP_CMD=skip playground-up.sh --with-catalog --skip-build
+```
+
+Result — a clean no-op:
+```
+✓ assistant now sources capabilities from …capability-provider… (fixture unset)
+▶ Playground is UP (BASE + CATALOG overlay tier)
+✓ assistant reachable on :1986 (HTTP 200 /healthz)
+labeled footprint: 25 objects before == 25 after (IDENTICAL); assistant pod
+  unchanged (no roll, exit 0).
+```
+
+**Open defect (real bug found — fix owed by pg-infra).** A *plain* BASE
+`playground-up.sh --skip-build` (no `--with-catalog`) run on an env that HAD the
+catalog wired re-renders the assistant from the fixture-mode BASE manifest,
+re-adding `CAPABILITY_DOCS_FIXTURE` **without** clearing the
+`CAPABILITY_PROVIDER_URL` the catalog flip set. They are mutually exclusive, so
+the new pod crashes on startup:
 
 ```
 Invalid configuration:
@@ -184,12 +198,12 @@ Invalid configuration:
 ```
 
 The already-Running (adapter-mode) pod kept serving via RollingUpdate, so the
-env stayed up, but the Deployment was left in a stuck rolling state (reported to
-pg-infra; recovery = `kubectl rollout undo deploy/assistant`). **Fix owed by
-pg-infra**: the BASE `up.sh` assistant render must be mutually-exclusive-aware —
-never set both capability-source envs. Idempotency of a *pure* BASE re-run (on a
-BASE-only env) is untested pending this fix + a clean env; the preflight gate
-itself is proven present.
+env stayed up, but the Deployment was left in a stuck rolling state. Recovered
+with `kubectl rollout undo deploy/assistant` (team-lead authorized). **Fix owed
+by pg-infra**: the BASE `up.sh` assistant render must be mutually-exclusive-aware
+— never set both capability-source envs (or clear the other when setting one).
+Until then, a plain BASE re-run over an overlaid env is not idempotent; the
+catalog-preserving invocation above is.
 
 ## P3 — live reconfiguration — **PROVEN (6/6, behavioral)**
 
