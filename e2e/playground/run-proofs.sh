@@ -37,7 +37,9 @@ mkdir -p "${OUT}"
 
 # ── Repos / cluster ─────────────────────────────────────────────────────────
 ASSISTANT_REPO="${ASSISTANT_REPO:-/Users/scotwells/repos/milo-os/assistant}"
-CATALOG_REPO="${CATALOG_REPO:-/Users/scotwells/repos/milo-os/service-catalog}"
+# Catalog OVERLAY lives in a WORKTREE on feat/agent-framework-playground.
+CATALOG_REPO="${CATALOG_REPO:-/Users/scotwells/repos/milo-os/service-catalog-playground}"
+CATALOG_NS="${CATALOG_NS:-agent-framework-playground}"   # adapter + CRs live here
 TEST_INFRA="${TEST_INFRA:-/Users/scotwells/repos/datum-cloud/test-infra}"
 KCFG="${KUBECONFIG:-${TEST_INFRA}/kubeconfig}"
 GO_BIN_DIR="${GO_BIN_DIR:-${OUT}/bin}"
@@ -184,6 +186,27 @@ sink_port_forward() {
 }
 stop_sink_pf() { [ -n "${SINK_PF_PID}" ] && kill "${SINK_PF_PID}" 2>/dev/null || true; SINK_PF_PID=""; }
 
+# Port-forward the capability-provider adapter (overlay, ns agent-framework-
+# playground) so P3/P5 can GET /projects/{name}/capability-documents.
+ADAPTER_PF_PID=""
+ADAPTER_PORT="${ADAPTER_PORT:-8085}"
+adapter_port_forward() {
+  curl -fsS --max-time 1 "${CAPABILITY_PROVIDER_URL}/projects/${PROJECT}/capability-documents" >/dev/null 2>&1 && return 0
+  kc -n "${CATALOG_NS}" port-forward svc/capability-provider "${ADAPTER_PORT}:8080" --address 127.0.0.1 >"${OUT}/pf-adapter.log" 2>&1 &
+  ADAPTER_PF_PID=$!; disown 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    curl -fsS --max-time 1 "${CAPABILITY_PROVIDER_URL}/projects/${PROJECT}/capability-documents" >/dev/null 2>&1 && { echo "ok: adapter forwarded on ${CAPABILITY_PROVIDER_URL}"; return 0; }
+    sleep 0.5
+  done
+  note "adapter port-forward not reachable (see ${OUT}/pf-adapter.log)"; return 1
+}
+stop_adapter_pf() { [ -n "${ADAPTER_PF_PID}" ] && kill "${ADAPTER_PF_PID}" 2>/dev/null || true; ADAPTER_PF_PID=""; }
+require_healthy_adapter() {
+  adapter_port_forward && return 0
+  note "$1: held — capability-provider adapter not reachable (is the overlay up?)."
+  return 2
+}
+
 # Capture the gateway access log for a conversation into out/playground-access.log.
 # Recipe proven in the gateway leg: resolve the RUNNING data-plane Envoy pod by
 # owning-gateway-name, `kubectl logs <pod> --all-containers --tail=-1`, then wait
@@ -243,27 +266,52 @@ p2() {
 # Applies the catalog CRs through their stages; between stages the checks driver
 # captures the capability-doc + chat-turn tool set. CR apply/unpublish commands
 # come from catalog-engineer (env-overridable). Requires --with-catalog up.
+# pg-catalog interface: CRs are CLUSTER-SCOPED (no -n). The AgentBinding
+# reconciler only WATCHES ServiceEntitlement — SAC changes need a POKE
+# (annotate the entitlement) or they wait out the 5-min resync. Samples live in
+# ${CATALOG_REPO}/hack/playground/samples/. All commands env-overridable.
+SAMPLES="${SAMPLES:-${CATALOG_REPO}/hack/playground/samples}"
+POKE_CMD="${POKE_CMD:-kubectl --kubeconfig ${KCFG} annotate serviceentitlement streaming-streamco-example playground.internal/poke=\$(date +%s.%N) --overwrite}"
+SAC_APPLY_V1="${SAC_APPLY_V1:-kubectl --kubeconfig ${KCFG} apply -f ${SAMPLES}/20-serviceagentconfiguration-v1.yaml}"
+SAC_APPLY_V2="${SAC_APPLY_V2:-kubectl --kubeconfig ${KCFG} apply -f ${SAMPLES}/21-serviceagentconfiguration-v2.yaml}"
+SAC_UNPUBLISH="${SAC_UNPUBLISH:-kubectl --kubeconfig ${KCFG} delete -f ${SAMPLES}/30-serviceentitlement.yaml}"
+# Restore the v1 baseline after the destructive unpublish so the shared overlay
+# is left as we found it (re-create the entitlement + v1 SAC, then poke).
+SAC_RESTORE="${SAC_RESTORE:-kubectl --kubeconfig ${KCFG} apply -f ${SAMPLES}/30-serviceentitlement.yaml && kubectl --kubeconfig ${KCFG} apply -f ${SAMPLES}/20-serviceagentconfiguration-v1.yaml}"
 p3() {
   log "P3: OVERLAY live reconfiguration (v1 → v2 narrower → unpublish)"
-  require_healthy_cluster P3 || return 2
+  require_healthy_adapter P3 || return 2
+  # P3's "next chat turn reflects it" needs the IN-CLUSTER assistant reading from
+  # the adapter (CAPABILITY_PROVIDER_URL), not a static fixture. Detect + warn.
+  local capsrc; capsrc=$(kc -n "${NS}" get deploy assistant -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value};{end}' 2>/dev/null)
+  case "${capsrc}" in
+    *CAPABILITY_PROVIDER_URL=*) echo "ok: assistant wired to the adapter (CAPABILITY_PROVIDER_URL present)" ;;
+    *) note "assistant is FIXTURE-mode (no CAPABILITY_PROVIDER_URL) — the ADAPTER-LEVEL reconfig proof runs, but the chat-turn reflection sub-check cannot pass until pg-infra wires --with-catalog into the live assistant." ;;
+  esac
   local run="env OUT_DIR=${OUT} SINK_URL=${SINK_URL} PATCH_URL=${PATCH_URL} PATCH_TOKEN=${PATCH_TOKEN} PATCH_CMD=${PATCH_CMD} PROJECT=${PROJECT} CAPABILITY_PROVIDER_URL=${CAPABILITY_PROVIDER_URL}"
-  # Stage v1 (default published config assumed already applied by --with-catalog up).
-  [ -n "${SAC_APPLY_V1:-}" ] && bash -c "${SAC_APPLY_V1}" 2>&1 | tee "${OUT}/p3-apply-v1.log"
-  sleep "${RECONCILE_WAIT:-8}"
+  poke() { bash -c "${POKE_CMD}" 2>&1 | tee -a "${OUT}/p3-poke.log"; }
+  # Stage v1.
+  bash -c "${SAC_APPLY_V1}" 2>&1 | tee "${OUT}/p3-apply-v1.log"; poke
+  sleep "${RECONCILE_WAIT:-5}"
   ${run} STAGE=v1 node "${CHECKS}" reconfig | tee "${OUT}/p3-v1.log"
   # Stage v2 (narrower toolSelector).
-  [ -n "${SAC_APPLY_V2:-}" ] && bash -c "${SAC_APPLY_V2}" 2>&1 | tee "${OUT}/p3-apply-v2.log" \
-    || note "SAC_APPLY_V2 unset — provide the kubectl apply for the v2 ServiceAgentConfiguration (catalog-engineer)"
-  sleep "${RECONCILE_WAIT:-8}"
+  bash -c "${SAC_APPLY_V2}" 2>&1 | tee "${OUT}/p3-apply-v2.log"; poke
+  sleep "${RECONCILE_WAIT:-5}"
   ${run} STAGE=v2 node "${CHECKS}" reconfig | tee "${OUT}/p3-v2.log"
-  # Stage unpublish.
-  [ -n "${SAC_UNPUBLISH:-}" ] && bash -c "${SAC_UNPUBLISH}" 2>&1 | tee "${OUT}/p3-unpublish.log" \
-    || note "SAC_UNPUBLISH unset — provide the unpublish command (delete/withdraw the ServiceAgentConfiguration)"
-  sleep "${RECONCILE_WAIT:-8}"
+  # Stage unpublish (delete the entitlement — the watch fires, binding pruned).
+  bash -c "${SAC_UNPUBLISH}" 2>&1 | tee "${OUT}/p3-unpublish.log"
+  sleep "${RECONCILE_WAIT:-5}"
   ${run} STAGE=unpublished node "${CHECKS}" reconfig | tee "${OUT}/p3-unpublished.log"
   # Compare all three stages → verdict.
-  ${run} STAGE=compare node "${CHECKS}" reconfig | tee "${OUT}/p3-compare-console.log"
-  return "${PIPESTATUS[0]}"
+  ${run} STAGE=compare node "${CHECKS}" reconfig | tee "${OUT}/p3-compare-console.log"; local rc=${PIPESTATUS[0]}
+  # RESTORE the v1 baseline so the shared overlay is left as we found it.
+  log "P3: restoring v1 baseline (re-publish entitlement + v1 SAC)"
+  bash -c "${SAC_RESTORE}" 2>&1 | tee "${OUT}/p3-restore.log"; poke
+  sleep "${RECONCILE_WAIT:-5}"
+  ${run} STAGE=v1 node "${CHECKS}" reconfig >/dev/null 2>&1 || true
+  local restored; restored=$(node -e 'const s=require("'"${OUT}"'/playground-reconfig-v1.json");process.stdout.write(String((s.tools||[]).length))' 2>/dev/null || echo "?")
+  echo "P3: baseline restored — v1 tool count now=${restored}"
+  return "${rc}"
 }
 
 # ── P4: gateway token attribution ───────────────────────────────────────────
@@ -282,11 +330,11 @@ p4() {
 # ── P5: OVERLAY entitlement isolation ───────────────────────────────────────
 p5() {
   log "P5: OVERLAY entitlement isolation (unentitled project → no capabilities)"
-  require_healthy_cluster P5 || return 2
-  OUT_DIR="${OUT}" PATCH_URL="${PATCH_URL}" PATCH_TOKEN="${PATCH_TOKEN}" PATCH_CMD="${PATCH_CMD}" \
-  PROJECT="${PROJECT}" UNENTITLED_PROJECT="${UNENTITLED_PROJECT}" \
-  ${UNENTITLED_TOKEN:+UNENTITLED_TOKEN=${UNENTITLED_TOKEN}} \
-  CAPABILITY_PROVIDER_URL="${CAPABILITY_PROVIDER_URL}" \
+  require_healthy_adapter P5 || return 2
+  local extra=""; [ -n "${UNENTITLED_TOKEN:-}" ] && extra="UNENTITLED_TOKEN=${UNENTITLED_TOKEN}"
+  env OUT_DIR="${OUT}" PATCH_URL="${PATCH_URL}" PATCH_TOKEN="${PATCH_TOKEN}" PATCH_CMD="${PATCH_CMD}" \
+    PROJECT="${PROJECT}" UNENTITLED_PROJECT="${UNENTITLED_PROJECT}" \
+    CAPABILITY_PROVIDER_URL="${CAPABILITY_PROVIDER_URL}" ${extra} \
     node "${CHECKS}" entitlement | tee "${OUT}/p5-entitlement-console.log"
   return "${PIPESTATUS[0]}"
 }
@@ -314,11 +362,12 @@ p7_assistant() {
   [ "${v}" -eq 0 ] && [ "${t}" -eq 0 ]
 }
 p7_catalog() {
-  log "P7 (catalog): envtest suite on the playground branch"
+  log "P7 (catalog): envtest suite on feat/agent-framework-playground"
   [ -d "${CATALOG_REPO}" ] || { note "catalog repo not found at ${CATALOG_REPO}"; return 1; }
   have go || { note "go not found"; return 1; }
-  # service-catalog uses envtest via `make test` (confirm exact target with pg-catalog).
-  local cmd="${CATALOG_TEST_CMD:-make test}"
+  # pg-catalog: NO Makefile; envtest assets via setup-envtest, then go test.
+  # (install once: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.21)
+  local cmd="${CATALOG_TEST_CMD:-export KUBEBUILDER_ASSETS=\"\$(setup-envtest use 1.31.0 -p path)\" && go test -timeout 8m ./... -count=1}"
   ( cd "${CATALOG_REPO}" && bash -c "${cmd}" ) 2>&1 | tee "${OUT}/p7-catalog-test.log"
   return "${PIPESTATUS[0]}"
 }
