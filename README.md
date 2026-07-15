@@ -190,7 +190,8 @@ needed).
 | `OIDC_ISSUER` | — | Required in oidc mode |
 | `OIDC_AUDIENCE` | — | Required in oidc mode |
 | `OIDC_PROJECTS_CLAIM` | `projects` | JWT claim carrying granted projects |
-| `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file; unset ⇒ no provider capabilities |
+| `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file (fixture source); mutually exclusive with `CAPABILITY_PROVIDER_URL` |
+| `CAPABILITY_PROVIDER_URL` | — | Base URL of the capability-provider HTTP API (HTTP source); mutually exclusive with `CAPABILITY_DOCS_FIXTURE`. Both unset ⇒ no provider capabilities |
 | `MODEL_MODE` | `anthropic` if key else `mock` | `anthropic` \| `mock` \| `gateway` |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_MODE=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Anthropic model id |
@@ -283,7 +284,7 @@ unknown fields and rejects invalid documents with clear errors):
     "serviceRef":  { "name": "streamco" },
     "serviceName": "streaming.streamco.example",   // used as the tool-invocation meter dimension
     "knowledge": {
-      "sources":  [{ "type": "url", "url": "https://…/llms-full.txt" }],
+      "sources":  [{ "type": "LLMDocs", "url": "https://…/llms-full.txt" }],
       "concepts": [{ "gvk": { "group": "…", "kind": "Stream" }, "summary": "…" }]
     },
     "tools": {
@@ -297,25 +298,152 @@ unknown fields and rejects invalid documents with clear errors):
 }
 ```
 
-### Capability provider API
+### Capability provider API (published contract, v1)
 
-`CAPABILITY_DOCS_FIXTURE` points at a JSON file of capability documents
-(bare array or a List with `items`). This is the **fixture** provider —
-one implementation of the `CapabilitySource` seam
-(`internal/capability`), which is the stable interface between the
-assistant and wherever capability documents come from:
+Capability documents reach the assistant through the `Source` seam
+(`internal/capability`) — the stable interface between the assistant and
+wherever documents come from:
 
 ```go
-// CapabilitySource yields the capability documents entitled to a project.
+// Source yields the capability documents entitled to a project.
 type Source interface {
     Documents(ctx context.Context, projectName string) ([]CapabilityDocument, error)
 }
 ```
 
-Today the only implementation is the fixture source. A **control-plane /
-HTTP capability source** (documents served by the platform per project,
-instead of a local file) is a follow-up that implements this same
-interface — no changes to composition, the agent loop, or the wire.
+Two implementations ship, selected by env and **mutually exclusive** (the
+config loader rejects setting both):
+
+- **Fixture source** (`CAPABILITY_DOCS_FIXTURE`) — a local JSON file (bare
+  array or a `{"items": […]}` List). Good for local dev and e2e.
+- **HTTP source** (`CAPABILITY_PROVIDER_URL`) — the **capability-provider
+  API** below. Documents are fetched per conversation (no cache in v0).
+
+The schema below is the wire contract for **both** the fixture file and
+the HTTP response body. **The assistant owns this schema** — a capability
+provider (the control-plane adapter) serves documents in this shape; if
+the shape changes, it changes here first.
+
+#### Endpoint
+
+```
+GET {CAPABILITY_PROVIDER_URL}/projects/{projectName}/capability-documents
+Accept: application/json
+```
+
+- `{projectName}` is path-escaped; it is the caller's authenticated
+  project. The provider returns exactly the documents that project is
+  entitled to (server-side scoping — the assistant does not filter).
+- **200** with a JSON body (see schema) is the only success. The body is
+  either a bare array of documents or a `{"items": […]}` List.
+- **Degradation contract:** any transport error, a non-2xx status, an
+  unreadable body, or a malformed root is logged and treated as **no
+  capabilities** (empty set, chat proceeds with built-ins only) — a
+  provider outage never fails a chat. Individual documents that fail
+  validation are **skipped with a warning**; the valid ones still apply.
+  Fetches use a **5s timeout**.
+
+#### Capability document schema (v1)
+
+Derived from the Go types in `internal/capability/document.go`. Unknown
+fields are ignored (forward-compatible); required fields are marked.
+`configurationVersion` is the provider's own config revision, distinct
+from this **document schema version (v1)**.
+
+```jsonc
+{
+  "apiVersion": "services.miloapis.com/v1alpha1", // optional, provenance
+  "kind": "AgentBinding",                          // optional, provenance
+  "metadata": {                                    // optional
+    "name":      "string",
+    "namespace": "string"
+  },
+  "spec": {                                        // REQUIRED
+    "serviceRef":           { "name": "string" },  // REQUIRED, name REQUIRED
+    "serviceName":          "string",              // REQUIRED (tool-invocation meter dimension)
+    "serviceAgentRef":      { "name": "string" },  // REQUIRED, name REQUIRED
+    "configurationVersion": "string",              // REQUIRED (provider config revision)
+
+    "knowledge": {                                 // optional
+      "sources": [{
+        "type":  "LLMDocs | Runbook | Markdown",   // REQUIRED, must be one of the enum
+        "title": "string",                         // optional
+        "url":   "string"                          // REQUIRED
+      }],
+      "concepts": [{
+        "gvk":     { "group": "string", "kind": "string" },
+        "summary": "string"
+      }]
+    },
+
+    "tools": {                                     // optional
+      "mcpServers": [{
+        "name":         "string",                  // REQUIRED
+        "endpoint":     "string",                  // REQUIRED (Streamable HTTP MCP URL)
+        "toolSelector": { "include": ["string"] }, // client-side allow-list
+        "mutating":     ["string"]                 // optional; tools flagged mutating
+      }]
+    },
+
+    "authority": {                                 // optional
+      "reads": [{ "gvk": { "group": "string", "kind": "string" } }],
+      "maxTaskDurationSeconds": 0                   // optional int
+    }
+  },
+
+  "status": {                                      // optional, ignored by the assistant
+    "conditions": [{ "type": "string", "status": "string", "reason": "string", "message": "string" }]
+  }
+}
+```
+
+#### Example response (the StreamCo fixture)
+
+```json
+{
+  "items": [
+    {
+      "apiVersion": "services.miloapis.com/v1alpha1",
+      "kind": "AgentBinding",
+      "metadata": { "name": "streamco-binding", "namespace": "demo-project" },
+      "spec": {
+        "serviceRef": { "name": "streamco" },
+        "serviceName": "streaming.streamco.example",
+        "serviceAgentRef": { "name": "streamco-agent" },
+        "configurationVersion": "v1",
+        "knowledge": {
+          "sources": [
+            { "type": "LLMDocs", "title": "Overview", "url": "http://127.0.0.1:7810/llms-full.txt" }
+          ],
+          "concepts": [
+            { "gvk": { "group": "streaming.streamco.example", "kind": "Stream" }, "summary": "A live stream" }
+          ]
+        },
+        "tools": {
+          "mcpServers": [
+            {
+              "name": "streamco",
+              "endpoint": "http://127.0.0.1:7810/mcp",
+              "toolSelector": { "include": ["streams_list", "streams_get", "pipeline_diagnose"] },
+              "mutating": []
+            }
+          ]
+        },
+        "authority": {
+          "reads": [{ "gvk": { "group": "streaming.streamco.example", "kind": "*" } }],
+          "maxTaskDurationSeconds": 60
+        }
+      },
+      "status": { "conditions": [{ "type": "Ready", "status": "True" }] }
+    }
+  ]
+}
+```
+
+The catalog-side **capability-provider adapter** projects `AgentBinding`
+resources into this shape (rewriting MCP `endpoint`s to the gateway
+MCPRoute URL). Because the assistant owns the schema, the adapter is
+written against **this** contract, not the other way around.
 
 ## Metering
 

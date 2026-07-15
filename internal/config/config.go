@@ -41,18 +41,18 @@ const (
 
 // Defaults mirrored from the TS service.
 const (
-	DefaultPort          = 7820
+	DefaultPort           = 7820
 	DefaultAnthropicModel = "claude-sonnet-4-6"
-	DefaultGatewayModel  = "patch-stub-v1"
-	defaultHost          = "0.0.0.0"
-	defaultProjectsClaim = "projects"
+	DefaultGatewayModel   = "patch-stub-v1"
+	defaultHost           = "0.0.0.0"
+	defaultProjectsClaim  = "projects"
 )
 
 // AuthConfig holds the authentication and authorization settings.
 type AuthConfig struct {
 	Mode AuthMode
 	// DevTokens is the raw AUTH_DEV_TOKENS string, parsed by the dev authenticator.
-	DevTokens string
+	DevTokens    string
 	OIDCIssuer   string
 	OIDCAudience string
 	// OIDCProjectsClaim is the JWT claim carrying the granted project names.
@@ -94,8 +94,14 @@ type Config struct {
 	Auth AuthConfig
 
 	// CapabilityDocsFixture is the path to the capability-documents fixture
-	// (env CAPABILITY_DOCS_FIXTURE). Empty ⇒ no provider capabilities composed.
+	// (env CAPABILITY_DOCS_FIXTURE). Empty ⇒ no fixture source.
 	CapabilityDocsFixture string
+
+	// CapabilityProviderURL is the base URL of the capability-provider HTTP API
+	// (env CAPABILITY_PROVIDER_URL). Empty ⇒ no HTTP source. Mutually exclusive
+	// with CapabilityDocsFixture. With both unset, no provider capabilities are
+	// composed.
+	CapabilityProviderURL string
 
 	Model ModelConfig
 	Usage UsageConfig
@@ -200,6 +206,16 @@ func Load(getenv func(string) string) (*Config, error) {
 		errs = append(errs, FieldError{"GATEWAY_URL", "MODEL_MODE=gateway requires GATEWAY_URL (the Envoy AI Gateway endpoint)"})
 	}
 
+	// ── Capability source ─────────────────────────────────────
+	// The fixture (local file) and HTTP (provider API) sources are mutually
+	// exclusive: they answer the same seam, so configuring both is ambiguous.
+	capabilityDocsFixture := env("CAPABILITY_DOCS_FIXTURE")
+	capabilityProviderURL := strings.TrimRight(env("CAPABILITY_PROVIDER_URL"), "/")
+	if capabilityDocsFixture != "" && capabilityProviderURL != "" {
+		errs = append(errs, FieldError{"CAPABILITY_PROVIDER_URL",
+			"CAPABILITY_PROVIDER_URL and CAPABILITY_DOCS_FIXTURE are mutually exclusive — set at most one capability source"})
+	}
+
 	if len(errs) > 0 {
 		return nil, &Error{Errors: errs}
 	}
@@ -225,7 +241,8 @@ func Load(getenv func(string) string) (*Config, error) {
 			OIDCAudience:      env("OIDC_AUDIENCE"),
 			OIDCProjectsClaim: projectsClaim,
 		},
-		CapabilityDocsFixture: env("CAPABILITY_DOCS_FIXTURE"),
+		CapabilityDocsFixture: capabilityDocsFixture,
+		CapabilityProviderURL: capabilityProviderURL,
 		Model: ModelConfig{
 			Mode:               modelMode,
 			AnthropicAPIKey:    anthropicKey,

@@ -22,14 +22,20 @@ func newAgentRunner(cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRun
 		return nil, err
 	}
 
+	// Source selection (fixture and provider URL are mutually exclusive — the
+	// config loader rejects setting both).
 	var source capability.Source
-	if cfg.CapabilityDocsFixture != "" {
+	switch {
+	case cfg.CapabilityProviderURL != "":
+		source = capability.NewHTTPSource(cfg.CapabilityProviderURL, nil, log)
+		log.Info("agent.capability.source", "type", "http", "url", cfg.CapabilityProviderURL)
+	case cfg.CapabilityDocsFixture != "":
 		source = capability.NewFixtureSource(cfg.CapabilityDocsFixture, log)
 		log.Info("agent.capability.source", "type", "fixture", "path", cfg.CapabilityDocsFixture)
-	} else {
+	default:
 		log.Warn("agent.capability.source",
 			"type", "none",
-			"reason", "CAPABILITY_DOCS_FIXTURE unset — no provider capabilities will be composed")
+			"reason", "neither CAPABILITY_PROVIDER_URL nor CAPABILITY_DOCS_FIXTURE set — no provider capabilities will be composed")
 	}
 
 	emitter := usage.NewEmitter(usage.EmitterConfig{

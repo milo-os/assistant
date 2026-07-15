@@ -77,6 +77,43 @@ func TestLoad_CapabilityDocsFixtureRename(t *testing.T) {
 	}
 }
 
+func TestLoad_CapabilityProviderURL(t *testing.T) {
+	cfg, err := load(t, map[string]string{
+		"AUTH_DEV_TOKENS":         "t:s:*",
+		"CAPABILITY_PROVIDER_URL": "http://capability-adapter/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CapabilityProviderURL != "http://capability-adapter" {
+		t.Errorf("capability provider url = %q (trailing slash not trimmed?)", cfg.CapabilityProviderURL)
+	}
+	if cfg.CapabilityDocsFixture != "" {
+		t.Errorf("fixture should be empty, got %q", cfg.CapabilityDocsFixture)
+	}
+}
+
+func TestLoad_CapabilitySourcesMutuallyExclusive(t *testing.T) {
+	_, err := load(t, map[string]string{
+		"AUTH_DEV_TOKENS":         "t:s:*",
+		"CAPABILITY_DOCS_FIXTURE": "/tmp/caps.json",
+		"CAPABILITY_PROVIDER_URL": "http://capability-adapter",
+	})
+	var cfgErr *Error
+	if !errors.As(err, &cfgErr) {
+		t.Fatalf("want *config.Error, got %v", err)
+	}
+	found := false
+	for _, fe := range cfgErr.Errors {
+		if fe.Field == "CAPABILITY_PROVIDER_URL" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a CAPABILITY_PROVIDER_URL mutual-exclusion error, got %+v", cfgErr.Errors)
+	}
+}
+
 func TestLoad_GatewayTLSInsecureTruthy(t *testing.T) {
 	for _, v := range []string{"1", "true", "TRUE", "yes"} {
 		cfg, err := load(t, map[string]string{
@@ -94,12 +131,12 @@ func TestLoad_GatewayTLSInsecureTruthy(t *testing.T) {
 
 func TestLoad_Errors(t *testing.T) {
 	cases := map[string]map[string]string{
-		"dev mode requires tokens":         {"AUTH_MODE": "dev"},
-		"oidc requires issuer + audience":  {"AUTH_MODE": "oidc"},
-		"anthropic mode requires key":      {"AUTH_DEV_TOKENS": "t:s:*", "MODEL_MODE": "anthropic"},
-		"gateway mode requires url":        {"AUTH_DEV_TOKENS": "t:s:*", "MODEL_MODE": "gateway"},
-		"invalid model mode":               {"AUTH_DEV_TOKENS": "t:s:*", "MODEL_MODE": "bogus"},
-		"invalid port":                     {"AUTH_DEV_TOKENS": "t:s:*", "PORT": "99999"},
+		"dev mode requires tokens":        {"AUTH_MODE": "dev"},
+		"oidc requires issuer + audience": {"AUTH_MODE": "oidc"},
+		"anthropic mode requires key":     {"AUTH_DEV_TOKENS": "t:s:*", "MODEL_MODE": "anthropic"},
+		"gateway mode requires url":       {"AUTH_DEV_TOKENS": "t:s:*", "MODEL_MODE": "gateway"},
+		"invalid model mode":              {"AUTH_DEV_TOKENS": "t:s:*", "MODEL_MODE": "bogus"},
+		"invalid port":                    {"AUTH_DEV_TOKENS": "t:s:*", "PORT": "99999"},
 	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {

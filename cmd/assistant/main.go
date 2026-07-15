@@ -75,6 +75,7 @@ func run() error {
 		"authMode", string(cfg.Auth.Mode),
 		"modelMode", string(cfg.Model.Mode),
 		"capabilityDocsFixture", nullable(cfg.CapabilityDocsFixture),
+		"capabilityProviderUrl", nullable(cfg.CapabilityProviderURL),
 		"usageGateway", nullable(cfg.Usage.GatewayURL),
 	)
 
