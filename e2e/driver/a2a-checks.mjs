@@ -58,12 +58,14 @@ async function rpc(endpoint, method, params, { token, accept } = {}) {
 }
 
 function userMessage(text, { projectName = PROJECT } = {}) {
+  // A2A v1.0 (a2a-go) message shape: role is the ROLE_* enum ("ROLE_USER",
+  // not "user"), content parts are {text} (no `kind` discriminator), and the
+  // Message has no top-level `kind`. projectName rides message.metadata.
   return {
     message: {
-      role: 'user',
-      kind: 'message',
+      role: 'ROLE_USER',
       messageId: randomUUID(),
-      parts: [{ kind: 'text', text }],
+      parts: [{ text }],
       metadata: { projectName },
     },
   };
@@ -109,7 +111,7 @@ async function readStream(endpoint, params, { token }) {
       accept: 'text/event-stream',
       authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'message/stream', params }),
+    body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'SendStreamingMessage', params }),
   });
   const events = [];
   const meta = { status: res.status, contentType: res.headers.get('content-type') ?? '' };
@@ -208,17 +210,17 @@ async function main() {
   }
 
   // ---- Item 3: auth matrix --------------------------------------------------
-  const noAuth = await rpc(a2aEndpoint, 'message/send', userMessage(PROMPT), {});
+  const noAuth = await rpc(a2aEndpoint, 'SendMessage', userMessage(PROMPT), {});
   record('3', 'no token -> 401', noAuth.status === 401, `status=${noAuth.status}`);
   await readText(noAuth);
 
-  const wrongProj = await rpc(a2aEndpoint, 'message/send', userMessage(PROMPT, { projectName: PROJECT }), {
+  const wrongProj = await rpc(a2aEndpoint, 'SendMessage', userMessage(PROMPT, { projectName: PROJECT }), {
     token: WRONGPROJ_TOKEN,
   });
   record('3', 'valid token, unauthorized project -> 403', wrongProj.status === 403, `status=${wrongProj.status}`);
   await readText(wrongProj);
 
-  const goodAuth = await rpc(a2aEndpoint, 'message/send', userMessage(PROMPT), { token: GOOD_TOKEN });
+  const goodAuth = await rpc(a2aEndpoint, 'SendMessage', userMessage(PROMPT), { token: GOOD_TOKEN });
   const goodAuthBody = await readText(goodAuth);
   record('3', 'good token, granted project -> 200', goodAuth.status === 200, `status=${goodAuth.status}`);
   writeFileSync(join(OUT_DIR, 'message-send.json'), goodAuthBody);
@@ -254,7 +256,7 @@ async function main() {
   record('4', 'a taskId is observable in the stream', !!taskId, `taskId=${taskId} contextId=${contextIds[0]}`);
 
   if (taskId) {
-    const getRes = await rpc(a2aEndpoint, 'tasks/get', { id: taskId }, { token: GOOD_TOKEN });
+    const getRes = await rpc(a2aEndpoint, 'GetTask', { id: taskId }, { token: GOOD_TOKEN });
     const getBody = await readText(getRes);
     writeFileSync(join(OUT_DIR, 'tasks-get.json'), getBody);
     let getJson = {};
@@ -277,7 +279,7 @@ async function main() {
     const fresh = await readStream(a2aEndpoint, userMessage(PROMPT), { token: GOOD_TOKEN });
     const freshTaskId = [...harvestByKey(fresh.events, 'taskId')][0] ?? [...harvestByKey(fresh.events, 'id')][0];
     if (freshTaskId) {
-      const cancelRes = await rpc(a2aEndpoint, 'tasks/cancel', { id: freshTaskId }, { token: GOOD_TOKEN });
+      const cancelRes = await rpc(a2aEndpoint, 'CancelTask', { id: freshTaskId }, { token: GOOD_TOKEN });
       const cancelBody = await readText(cancelRes);
       writeFileSync(join(OUT_DIR, 'tasks-cancel.json'), cancelBody);
       let cancelJson = {};
