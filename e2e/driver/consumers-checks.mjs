@@ -119,11 +119,21 @@ async function cliLeg() {
   writeFileSync(join(OUT_DIR, 'cli-card-json.txt'), cardJson.stdout + '\n---STDERR---\n' + cardJson.stderr);
   let cj = {};
   try { cj = JSON.parse(cardJson.stdout); } catch { /* leave {} */ }
-  const cardJsonOk = cardJson.code === 0 && cj.name === 'Patch' && String(cj.protocolVersion) === '1.0'
-    && /\/a2a$/.test(cj.url ?? '') && cj.capabilities?.streaming === true
-    && cj.securitySchemes?.bearer?.scheme === 'bearer'
+  // A2A v1.0 (a2a-go AgentCard): protocolVersion/url/protocolBinding live in
+  // supportedInterfaces[]; bearer scheme is nested under
+  // securitySchemes.bearer.httpAuthSecurityScheme.scheme (tolerate the flat
+  // v0.3 shape + compare the scheme value case-insensitively).
+  const ifaces = Array.isArray(cj.supportedInterfaces) ? cj.supportedInterfaces : [];
+  const iface = ifaces.find((i) => String(i?.protocolBinding).toUpperCase() === 'JSONRPC') ?? ifaces[0];
+  const bearerScheme = cj.securitySchemes?.bearer?.httpAuthSecurityScheme?.scheme ?? cj.securitySchemes?.bearer?.scheme;
+  const cardJsonOk = cardJson.code === 0 && cj.name === 'Patch'
+    && String(iface?.protocolVersion) === '1.0'
+    && /\/a2a$/.test(iface?.url ?? '')
+    && String(iface?.protocolBinding).toUpperCase() === 'JSONRPC'
+    && cj.capabilities?.streaming === true
+    && String(bearerScheme).toLowerCase() === 'bearer'
     && Array.isArray(cj.skills) && cj.skills.some((s) => s?.id === 'project-assistant');
-  record('cli.card.json', '`patch card --json` is a valid A2A AgentCard (name/protocolVersion/url/streaming/bearer/skill)', cardJsonOk, `name=${cj.name} pv=${cj.protocolVersion} url=${cj.url} streaming=${cj.capabilities?.streaming} bearer=${cj.securitySchemes?.bearer?.scheme}`);
+  record('cli.card.json', '`patch card --json` is a valid A2A v1.0 AgentCard (name/supportedInterfaces[protocolVersion,url,JSONRPC]/streaming/bearer/skill)', cardJsonOk, `name=${cj.name} pv=${iface?.protocolVersion} url=${iface?.url} binding=${iface?.protocolBinding} streaming=${cj.capabilities?.streaming} bearer=${bearerScheme}`);
 
   // C-chat: wipe sink, then one plain chat turn.
   await wipeSink();

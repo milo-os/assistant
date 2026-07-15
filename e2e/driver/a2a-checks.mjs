@@ -174,25 +174,37 @@ async function main() {
   writeFileSync(join(OUT_DIR, 'agent-card.json'), cardBody);
   record('2', 'GET agent card returns 200 JSON', cardRes.ok && typeof card === 'object', `status=${cardRes.status}`);
   record('2', 'card.name = "Patch"', card.name === 'Patch', `name=${card.name}`);
-  record('2', 'card.protocolVersion = "1.0"', String(card.protocolVersion) === '1.0', `protocolVersion=${card.protocolVersion}`);
+  // A2A v1.0 (a2a-go AgentCard): the top-level protocolVersion/url/
+  // preferredTransport are GONE — transport+protocol+url now live in
+  // supportedInterfaces[]. Prefer the JSONRPC interface; keep a legacy
+  // top-level fallback so a v0.3 card would still be diagnosable.
+  const ifaces = Array.isArray(card.supportedInterfaces) ? card.supportedInterfaces : [];
+  const jsonrpcIface = ifaces.find((i) => String(i?.protocolBinding).toUpperCase() === 'JSONRPC') ?? ifaces[0];
+  const cardProtoVersion = jsonrpcIface?.protocolVersion ?? card.protocolVersion;
+  const cardUrl = jsonrpcIface?.url ?? card.url;
+  record('2', 'card advertises A2A v1.0 (supportedInterfaces[].protocolVersion = "1.0")', String(cardProtoVersion) === '1.0', `protocolVersion=${cardProtoVersion} interfaces=${ifaces.length}`);
+  record('2', 'card advertises a JSONRPC interface binding', String(jsonrpcIface?.protocolBinding).toUpperCase() === 'JSONRPC', `protocolBinding=${jsonrpcIface?.protocolBinding}`);
   record('2', 'card.capabilities.streaming = true', card.capabilities?.streaming === true, `streaming=${card.capabilities?.streaming}`);
   const provName = card.provider?.organization ?? card.provider?.name ?? card.provider;
   record('2', 'card.provider is Datum', String(provName).toLowerCase().includes('datum'), `provider=${JSON.stringify(card.provider)}`, false);
-  // securitySchemes: A2A v1.0 uses an object map of {type:"http",scheme:"bearer"}.
+  // securitySchemes: A2A v1.0 (a2a-go) discriminates the scheme — bearer lives
+  // under securitySchemes.<name>.httpAuthSecurityScheme.scheme. Tolerate the
+  // flat v0.3 shape too. Scheme value is compared case-insensitively.
   const schemes = card.securitySchemes ?? card.security ?? {};
   const schemeVals = Array.isArray(schemes) ? schemes : Object.values(schemes ?? {});
-  const hasBearer = schemeVals.some(
-    (s) => (s?.type === 'http' && String(s?.scheme).toLowerCase() === 'bearer') || String(s?.scheme).toLowerCase() === 'bearer',
-  );
+  const hasBearer = schemeVals.some((s) => {
+    const inner = s?.httpAuthSecurityScheme ?? s;
+    return String(inner?.scheme).toLowerCase() === 'bearer';
+  });
   record('2', 'card advertises HTTP bearer security scheme', hasBearer, JSON.stringify(schemes).slice(0, 200));
   const skills = Array.isArray(card.skills) ? card.skills : [];
   const hasProjectSkill = skills.some((s) => /project-assistant/i.test(`${s?.id} ${s?.name}`));
   record('2', 'card.skills includes project-assistant', hasProjectSkill, `skills=${skills.map((s) => s?.id).join(', ')}`);
-  if (typeof card.url === 'string' && /^https?:\/\//.test(card.url)) {
-    a2aEndpoint = card.url;
-    record('2', 'card.url points to JSON-RPC endpoint (used for a2a calls)', true, card.url, false);
+  if (typeof cardUrl === 'string' && /^https?:\/\//.test(cardUrl)) {
+    a2aEndpoint = cardUrl;
+    record('2', 'card JSONRPC interface url drives the a2a calls', /\/a2a$/.test(cardUrl), cardUrl, false);
   } else {
-    record('2', 'card.url present (falling back to /a2a)', false, `url=${card.url}`, false);
+    record('2', 'card interface url present (falling back to /a2a)', false, `url=${cardUrl}`, false);
   }
 
   // ---- Item 3: auth matrix --------------------------------------------------
