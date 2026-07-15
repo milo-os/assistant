@@ -3,23 +3,30 @@
 Standalone A2A backend for **Patch**, the Datum Cloud assistant. This is
 the runtime for the already-registered catalog service
 `assistant.miloapis.com`. It was extracted from the cloud-portal, where
-Patch was embedded in the portal's Hono backend and bound to a session
+Patch was embedded in the portal's backend and bound to a session
 cookie — which made the chat path un-scriptable, left conversation state
 in browser `localStorage`, and gave the A2A card and per-project MCP
 surfaces no owner. This service owns them; the portal becomes one client
-of it (the portal conversion is out of scope for this slice).
+of it.
 
-It speaks the **A2A (Agent2Agent) protocol** over JSON-RPC 2.0, composes
-each project's entitled provider capabilities (knowledge + MCP tools)
-from `AgentBinding` objects, runs the model loop with the Vercel AI SDK
-(`ai@6`), and emits usage as CloudEvents on the Milo billing wire.
+It speaks the **A2A (Agent2Agent) protocol v1.0** over JSON-RPC 2.0
+(built on the official [`a2a-go`](https://github.com/a2aproject/a2a-go)
+library), composes each project's entitled provider capabilities
+(knowledge + MCP tools) from **capability documents**, runs the model
+loop in the in-repo `agentcore` package, and emits usage as CloudEvents
+on the Milo billing wire.
+
+> **Ported from TypeScript to Go.** The wire moved to **real A2A v1.0**
+> (a deliberate breaking change from the prior v0.3-shaped wire) — see
+> [A2A v1.0 wire](#a2a-v10-wire). The usage CloudEvent wire is unchanged
+> and byte-verified against the pre-port emitter.
 
 ## Quickstart
 
 ```bash
-bun install
-cp .env.example .env          # the defaults run a mock-model dev server
-bun run start                 # → http://localhost:7820
+go build ./cmd/assistant ./cmd/patch     # → ./assistant and ./patch
+cp .env.example .env                      # the defaults run a mock-model dev server
+env $(grep -v '^#' .env | xargs) ./assistant     # → http://localhost:7820
 ```
 
 Probe it:
@@ -28,26 +35,29 @@ Probe it:
 curl -s localhost:7820/healthz
 curl -s localhost:7820/.well-known/agent-card.json | jq .
 
-# message/send (dev token from .env.example, mock model)
+# SendMessage (dev token from .env.example, mock model). A2A v1.0 shape:
+# PascalCase method, role enum ROLE_USER, content parts {text} (no kind).
 curl -s localhost:7820/a2a \
   -H 'authorization: Bearer dev-token' \
   -H 'content-type: application/json' \
   -d '{
-    "jsonrpc":"2.0","id":1,"method":"message/send",
+    "jsonrpc":"2.0","id":1,"method":"SendMessage",
     "params":{"message":{
-      "kind":"message","role":"user","messageId":"m1",
-      "parts":[{"kind":"text","text":"Diagnose pipeline p-1 for StreamCo"}],
+      "role":"ROLE_USER","messageId":"m1",
+      "parts":[{"text":"Diagnose pipeline p-1 for StreamCo"}],
       "metadata":{"projectName":"demo-project"}
     }}
-  }' | jq .
+  }' | jq '.result.task.status.state'   # → "TASK_STATE_COMPLETED"
 ```
 
 ### Runtime
 
-Written in TypeScript, run with **Bun** (`bun run start`) which executes
-the TS directly. The HTTP layer uses `@hono/node-server`, so `node`
-works too once compiled (or via a TS loader). Tests and typecheck use
-Bun (`bun test`, `bun run typecheck`). Requires Bun ≥ 1.3 or Node ≥ 22.
+Written in **Go** (module `github.com/milo-os/assistant`, see `go.mod`
+for the toolchain version). `go build ./cmd/assistant` produces the
+service binary; `go build ./cmd/patch` produces the `patch` CLI consumer.
+Standard library `net/http` for the mux. Tests and vet use the Go
+toolchain (`go vet ./...`, `go test ./...`). The only remaining bun/Node
+component is the QA acceptance harness under `e2e/`.
 
 ## API surface
 
@@ -59,38 +69,50 @@ Bun (`bun test`, `bun run typecheck`). Requires Bun ≥ 1.3 or Node ≥ 22.
 
 ### JSON-RPC methods (`POST /a2a`)
 
-- **`message/send`** — create a task, run the agent loop to completion,
-  return the final `Task` (with `artifacts` and `history`).
-- **`message/stream`** — same, but stream the run as **Server-Sent
+A2A v1.0 method names are **PascalCase** (a2a-go binding):
+
+- **`SendMessage`** — create a task, run the agent loop to completion,
+  return the final result (a `{task}` with `artifacts` and `history`).
+- **`SendStreamingMessage`** — same, but stream the run as **Server-Sent
   Events**. Each SSE frame is a JSON-RPC response whose `result` is one
-  stream event; the stream closes after the terminal status frame.
-  Sequence: the initial `Task` → `status-update` `working` →
-  `artifact-update`(s) carrying response text → `status-update`
-  `completed` with `final: true`.
-- **`tasks/get`** — `{ id, historyLength? }` → the stored `Task`.
-- **`tasks/cancel`** — `{ id }` → cancels a non-terminal task; a terminal
+  `StreamResponse` (a oneOf: `task` / `statusUpdate` / `artifactUpdate` /
+  `message`). The stream **closes on the terminal status** — there is no
+  `final` flag. Sequence: the initial `task` → `statusUpdate`
+  `TASK_STATE_WORKING` → `artifactUpdate`(s) carrying response text →
+  `statusUpdate` `TASK_STATE_COMPLETED`.
+- **`GetTask`** — `{ id, historyLength? }` → the stored task.
+- **`CancelTask`** — `{ id }` → cancels a non-terminal task; a terminal
   task returns error `-32002` (TaskNotCancelable); an unknown id returns
   `-32001` (TaskNotFound).
 
-Task lifecycle (v0): `submitted → working → completed | failed |
-canceled`.
+### A2A v1.0 wire
 
-### Scoping
+The wire is **real A2A v1.0** via a2a-go, a deliberate breaking change
+from the prior v0.3-shaped TS wire. If you wrote a client against the old
+wire, these are the changes:
 
-- **`contextId`** = the conversation id, and also the name of the
-  `Conversation` metering resource. Supply `message.contextId` to
-  continue a conversation; omitted ⇒ the server mints one.
-- **Project** comes from `message.metadata.projectName` (see deviations).
-  The task runs against that project and all usage is subject-scoped to
-  `projects/<projectName>`.
+- **Method names are PascalCase**: `SendMessage` / `SendStreamingMessage`
+  / `GetTask` / `CancelTask` (not `message/send`, `message/stream`,
+  `tasks/get`, `tasks/cancel` — those now return `-32601`
+  MethodNotFound).
+- **Task states are `TASK_STATE_*` enums**: `TASK_STATE_SUBMITTED`,
+  `TASK_STATE_WORKING`, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`,
+  `TASK_STATE_CANCELED`.
+- **Stream events are a `StreamResponse` oneOf** keyed
+  `task` / `statusUpdate` / `artifactUpdate` / `message`. There is **no
+  `kind` discriminator and no `final` flag** — the stream closes on the
+  terminal state.
+- **Messages** use `role` as the enum `ROLE_USER` / `ROLE_AGENT`, and
+  content parts are `{ "text": "…" }` (no `kind`). The message carries no
+  top-level `kind`.
+- **Agent card** uses `supportedInterfaces[]` — the transport, protocol
+  version, and url live there (`{ url: <base>/a2a, protocolBinding:
+  "JSONRPC", protocolVersion: "1.0" }`), not as top-level fields. The
+  bearer scheme is nested under
+  `securitySchemes.bearer.httpAuthSecurityScheme.scheme`.
 
-### A2A conformance & deviations
+Deviations (intentional, documented):
 
-This service follows the A2A v1.0 method names and object shapes so a
-conformant client works unchanged, with these v0 deviations (all
-intentional, documented here):
-
-- **`protocolVersion: "1.0"`** on the card, per the build contract.
 - **`message.metadata.projectName`** is an **extension field** — A2A has
   no notion of a Milo project. It is required; a request without it is
   rejected with `-32602` (Invalid params).
@@ -98,37 +120,39 @@ intentional, documented here):
   (missing/unknown token → 401; a project the token doesn't grant →
   403). Protocol/validation errors use JSON-RPC error objects with HTTP
   200.
-- **Task states** are limited to the `submitted/working/completed/
-  failed/canceled` subset; `input-required`, `rejected`, and
-  `auth-required` are unused in v0.
-- **`message/stream`** does not surface intermediate `tool-call` events
-  as SSE frames — the metering pipeline and the provider MCP server log
-  are the authoritative record of a tool invocation.
+- **`SendStreamingMessage`** does not surface intermediate tool-call
+  events as SSE frames — the metering pipeline and the provider MCP
+  server log are the authoritative record of a tool invocation.
 - The agent card is **unsigned** (no `signatures`). See Follow-ups.
-- `pushNotifications` is `false`; push and `tasks/resubscribe` are out of
-  scope.
+- Push notifications and `SubscribeToTask` (resubscribe) are unimplemented
+  and rejected cleanly.
+
+### Scoping
+
+- **`contextId`** = the conversation id, and also the name of the
+  `Conversation` metering resource. Supply `message.contextId` to
+  continue a conversation; omitted ⇒ the server mints one.
+- **Project** comes from `message.metadata.projectName`. The task runs
+  against that project and all usage is subject-scoped to
+  `projects/<projectName>`.
 
 ## Auth (authN + authZ are separate seams)
 
-Two independent interfaces (`src/auth/`):
+Two independent interfaces (`internal/auth/`):
 
-- **`Authenticator`** — *who are you*: bearer token → `Principal`
-  (subject + the project grants the credential carries). Selected by
-  `AUTH_MODE`. A bad token is **401**.
-- **`Authorizer`** — *may you act on this project*:
-  `authorizeProject(principal, projectName)`, **403** on deny. It is
-  async so a control-plane call can slot in behind it unchanged.
+- **Authenticator** — *who are you*: bearer token → principal (subject +
+  the project grants the credential carries). Selected by `AUTH_MODE`. A
+  bad token is **401**.
+- **Authorizer** — *may you act on this project*, **403** on deny. It is
+  fail-closed and async so a control-plane call can slot in behind it
+  unchanged.
 
-v0 uses the **`ClaimsAuthorizer`** for both auth modes: it decides from
-the grants the credential carries (dev-token list / OIDC claim). In
-production this seam becomes a **`SubjectAccessReviewAuthorizer`** issuing
+v0 uses a claims authorizer for both auth modes: it decides from the
+grants the credential carries (dev-token list / OIDC claim). In
+production this seam becomes a **SubjectAccessReview authorizer** issuing
 a SAR against the Milo control plane (resolved by the platform's
-OpenFGA-backed webhook, with the assistant IAM role materialized by
-catalog IAM fan-out) — identical 401/403 semantics, swapped in
-`createAuthorizer` with no call-site churn. The dev-token grants are the
-v0 stand-in for that. See Follow-ups.
-
-Pluggable via `AUTH_MODE`. Both authenticators are implemented.
+OpenFGA-backed webhook) — identical 401/403 semantics, swapped with no
+call-site churn. The dev-token grants are the v0 stand-in.
 
 ### `AUTH_MODE=dev` (static bearer tokens)
 
@@ -149,12 +173,9 @@ Verifies the bearer JWT against `OIDC_ISSUER`'s JWKS (default JWKS URI
 `<issuer>/.well-known/jwks.json`) and checks `aud == OIDC_AUDIENCE`.
 Granted projects are read from a JWT claim (`OIDC_PROJECTS_CLAIM`,
 default `projects`; array or space/comma-delimited string). A token with
-no such claim grants no projects. Invalid signature / audience / issuer
-/ expiry → **401**.
-
-> OIDC is implemented and unit-tested with a locally generated key (no
-> live IdP needed); wiring it to a real entitlement source for project
-> grants is a follow-up.
+no such claim grants no projects. Invalid signature / audience / issuer /
+expiry → **401**. Unit-tested with a locally generated key (no live IdP
+needed).
 
 ## Configuration (env)
 
@@ -162,14 +183,14 @@ no such claim grants no projects. Invalid signature / audience / issuer
 | --- | --- | --- |
 | `PORT` | `7820` | HTTP listener port |
 | `HOST` | `0.0.0.0` | HTTP listener host |
-| `PUBLIC_BASE_URL` | `http://localhost:${PORT}` | Base URL for the card `url` (→ `<base>/a2a`) and CloudEvents `source` |
+| `PUBLIC_BASE_URL` | `http://localhost:${PORT}` | Base URL for the card interface `url` (→ `<base>/a2a`) and CloudEvents `source` |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `AUTH_MODE` | `dev` | `dev` \| `oidc` |
 | `AUTH_DEV_TOKENS` | — | Required in dev mode (format above) |
 | `OIDC_ISSUER` | — | Required in oidc mode |
 | `OIDC_AUDIENCE` | — | Required in oidc mode |
 | `OIDC_PROJECTS_CLAIM` | `projects` | JWT claim carrying granted projects |
-| `AGENT_BINDINGS_FIXTURE` | — | Path to an AgentBinding JSON file; unset ⇒ no provider capabilities |
+| `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file; unset ⇒ no provider capabilities |
 | `MODEL_MODE` | `anthropic` if key else `mock` | `anthropic` \| `mock` \| `gateway` |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_MODE=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Anthropic model id |
@@ -185,216 +206,229 @@ no such claim grants no projects. Invalid signature / audience / issuer
 
 ## Model modes
 
-- **`anthropic`** — `@ai-sdk/anthropic` over `ANTHROPIC_API_KEY`.
-- **`mock`** — a scripted `MockLanguageModelV3` (from `ai/test`). It
+The model/loop layer is the in-repo **`agentcore`** package — a
+provider-neutral library (unified stream parts, a tool loop with
+per-step usage aggregation, and adapters). Modes:
+
+- **`anthropic`** — `agentcore/anthropic` over the official
+  `anthropic-sdk-go`, keyed by `ANTHROPIC_API_KEY`. Full usage fidelity
+  including cache read/write tokens.
+- **`mock`** — `agentcore/mockmodel`, a scripted in-process model. It
   exists so the **full** chat path — a provider tool call over real MCP,
   the tool result folded into the final answer, usage reported — is
   provable with **no API key and no model-provider network**.
-- **`gateway`** — routes model calls through the **Envoy AI Gateway** (see
-  below).
+- **`gateway`** — `agentcore/openaicompat` over the official `openai-go`,
+  routed through the **Envoy AI Gateway** (see below).
 
 ### Gateway mode
 
 `MODEL_MODE=gateway` points the model client at the Envoy AI Gateway's
-OpenAI-compatible endpoint (`GATEWAY_URL`) with model `GATEWAY_MODEL`
-(default `patch-stub-v1`). It exists to exercise the production
-metering/policy path: token usage is counted **at the gateway**
-(`llmRequestCosts`) and upstream credentials are injected **by the
-gateway** (`BackendSecurityPolicy`).
+OpenAI-compatible endpoint (`GATEWAY_URL`) with model `GATEWAY_MODEL`. It
+exercises the production metering/policy path: token usage is counted **at
+the gateway** (`llmRequestCosts`) and upstream credentials are injected
+**by the gateway** (`BackendSecurityPolicy`).
 
 Two properties this mode guarantees from the service side:
 
 - **No upstream credential in the service.** The client sends **no
-  `Authorization` header** (no `apiKey` is configured) — the gateway owns
-  the real key. There is no model API key in the service env in this mode.
+  `Authorization` header** — the gateway owns the real key. There is no
+  model API key in the service env in this mode.
 - **Consumer attribution on every model call.** Each request carries
   `x-datum-project: <projectName>`, `x-datum-conversation: <contextId>`,
   and `x-datum-agent: patch`, so the gateway can meter and attribute usage
   per consumer. (These are attached only in gateway mode — the service
   never leaks project/conversation ids to the real Anthropic API.)
 
-Client: **`@ai-sdk/openai-compatible`** (pinned `2.0.59` — the line that
-targets `@ai-sdk/provider` v3 / `ai@6`; the `3.x` line is for `ai@7`). The
-gateway speaks OpenAI-compatible, so this is the cleanest client shape. For
-local TLS, use plain `http://` (simplest) or set `GATEWAY_CA_CERT` /
-`GATEWAY_TLS_INSECURE` (honored under Bun; under Node use
-`NODE_EXTRA_CA_CERTS` or http). Provider MCP endpoints are unaffected —
-they come from AgentBinding fixtures, which QA points at the gateway's
-`MCPRoute` (composition assumes no direct/localhost host).
+For local TLS, use plain `http://` or set `GATEWAY_CA_CERT` /
+`GATEWAY_TLS_INSECURE`.
 
 ### Mock model caveat
 
-The mock is a **canned script**, not a language model:
-
-1. If the latest user message mentions **"diagnose"** and a tool named
-   `…pipeline_diagnose` is available, it emits one tool call to it.
-2. On the follow-up step it emits final text that **quotes the tool's
-   findings** verbatim.
-3. Otherwise it returns a short generic reply.
-
+The mock is a **canned script**, not a language model: if the latest
+user message mentions **"diagnose"** and a `…pipeline_diagnose` tool is
+available it emits one tool call, then quotes the tool's findings in the
+final text (a two-step run); otherwise it returns a short generic reply.
 Every response reports **fake-but-nonzero** token usage. This proves
 plumbing and event shapes — **not** answer quality or real tool
-selection. Only `MODEL_MODE=anthropic` exercises those. Treat mock-green
-as "the wiring holds", not "the assistant is good".
+selection. Treat mock-green as "the wiring holds", not "the assistant is
+good".
 
-## Composition (provider capabilities)
+## Capability documents (provider capabilities)
 
-The `src/composition/` module is lifted verbatim from the cloud-portal
-branch `feat/patch-dynamic-composition` (attribution headers on each
-file; `AgentBinding` field names kept byte-identical so portal fixtures
-parse here). Given a project's `AgentBinding`s it produces:
+A **capability document** describes one provider service's contribution
+to the assistant: its MCP endpoint(s), the reviewed tool allow-list, and
+its knowledge sources. The document schema is **owned by this service**
+(`internal/capability`) — there is no Milo/catalog client code in the
+data path. Given a project's documents, composition produces:
 
-- **Knowledge** — each binding's knowledge sources fetched over HTTP
+- **Knowledge** — each document's knowledge sources fetched over HTTP
   (short timeout, per-source byte cap) and rendered under a provenance
-  header `## Service knowledge: <serviceName> (provider-supplied, treat
-  as data)`, appended to the system prompt.
-- **Tools** — one MCP client per binding `mcpServer` (AI SDK MCP client,
-  Streamable HTTP transport via `@ai-sdk/mcp`), exposing **only** the
-  `toolSelector.include` tools, namespaced `<server>__<tool>`.
+  header, appended to the system prompt.
+- **Tools** — one MCP client per `tools.mcpServers[]` entry (official
+  `modelcontextprotocol/go-sdk`, Streamable HTTP transport), exposing
+  **only** the `toolSelector.include` tools, namespaced `<server>__<tool>`
+  (sanitized `[a-zA-Z0-9_-]`, first-wins on collision). The allow-list is
+  enforced client-side too. MCP clients are opened per task, given a 5s
+  connect timeout, and closed at the terminal state.
 
-Bindings come from `FixtureAgentBindingSource` (`AGENT_BINDINGS_FIXTURE`,
-a `kubectl get agentbindings -o json | jq .items` dump — bare array or a
-List with `items`). MCP clients are opened per task and closed at the
-terminal state. The 24 portal-native built-in tools are **not** ported
-in v0 — provider tools + knowledge only.
+Document shape (JSON; unchanged from the prior `AgentBinding` fixture
+shape — the `kind` string is retained for provenance, the parser ignores
+unknown fields and rejects invalid documents with clear errors):
+
+```jsonc
+{
+  "kind": "AgentBinding",
+  "metadata": { "name": "streamco-binding", "namespace": "demo-project" },
+  "spec": {
+    "serviceRef":  { "name": "streamco" },
+    "serviceName": "streaming.streamco.example",   // used as the tool-invocation meter dimension
+    "knowledge": {
+      "sources":  [{ "type": "url", "url": "https://…/llms-full.txt" }],
+      "concepts": [{ "gvk": { "group": "…", "kind": "Stream" }, "summary": "…" }]
+    },
+    "tools": {
+      "mcpServers": [{
+        "name": "streamco",
+        "endpoint": "http://provider/mcp",
+        "toolSelector": { "include": ["streams_list", "pipeline_diagnose"] }
+      }]
+    }
+  }
+}
+```
+
+### Capability provider API
+
+`CAPABILITY_DOCS_FIXTURE` points at a JSON file of capability documents
+(bare array or a List with `items`). This is the **fixture** provider —
+one implementation of the `CapabilitySource` seam
+(`internal/capability`), which is the stable interface between the
+assistant and wherever capability documents come from:
+
+```go
+// CapabilitySource yields the capability documents entitled to a project.
+type Source interface {
+    Documents(ctx context.Context, projectName string) ([]CapabilityDocument, error)
+}
+```
+
+Today the only implementation is the fixture source. A **control-plane /
+HTTP capability source** (documents served by the platform per project,
+instead of a local file) is a follow-up that implements this same
+interface — no changes to composition, the agent loop, or the wire.
 
 ## Metering
 
-Usage is emitted as CloudEvents to `<USAGE_GATEWAY_URL>/cloudevents`
-(a JSON array, ≤100/batch, optional `x-api-key`), matching the portal
-emitter wire shape exactly. Emission is a no-op when the gateway is
-unset and **never throws** (it can't fail a chat). Per completed task:
+Usage is emitted as CloudEvents to `<USAGE_GATEWAY_URL>/cloudevents` (a
+JSON array, ≤100/batch, optional `x-api-key`). The wire is
+**byte-identical** to the prior TS emitter (verified by a golden test and
+by the e2e sink byte-diff — do not "improve" it). Emission is a no-op
+when the gateway is unset and **never throws** (it can't fail a chat).
+Per completed task:
 
 - **token meters** — `assistant.miloapis.com/conversation/{input-tokens,
   output-tokens, messages}` (+ cache meters when the provider reports
   them), `dimensions.model`, resource `{group: assistant.miloapis.com,
-  kind: Conversation, name: <contextId>}`.
+  kind: Conversation, name: <contextId>}`. Values are int64 strings.
+  Multi-step usage is aggregated into the total (per-step usage is not
+  dropped — a fix pinned by tests after a prior under-billing bug).
 - **`assistant.miloapis.com/conversation/tool-invocations`** — one per
-  provider tool call, `dimensions.service = <binding serviceName>`.
-- **subject** — `projects/<projectName>` on every event (no project ⇒ no
-  events; the gateway attributes billing via `projectRef`).
-
-## Testing
-
-```bash
-bun run typecheck   # tsc --noEmit, strict; must exit 0
-bun test            # unit + integration
-```
-
-Coverage highlights:
-
-- `src/composition/mcp-integration.test.ts` — a **real `@ai-sdk/mcp`
-  Streamable HTTP round-trip** against an in-process MCP server.
-- `src/server.test.ts` — full HTTP integration through the real Hono
-  app: agent card, auth (401/403/200), **`message/send`** driving a tool
-  call over real MCP with the result reaching the final text and usage
-  events landing at an in-process sink, the **`message/stream`** SSE
-  path, and `tasks/get` / `tasks/cancel`.
-- `src/auth/auth.test.ts` — dev tokens and the **OIDC path with a
-  locally generated key** (valid / wrong-aud / wrong-iss / expired /
-  unknown-key all covered).
-- `src/usage/emitter.test.ts` — CloudEvents wire shape, batching, no-op,
-  never-throws.
-- `cli/*.test.ts` — CLI arg parsing, stream rendering against a **recorded
-  SSE transcript** (`cli/fixtures/chat-stream.sse.txt`), and an
-  end-to-end run of the CLI against an in-process service instance.
+  provider tool call, `dimensions.service = <serviceName>`.
+- **subject** — `projects/<projectName>` on every event.
 
 ## Consumers — the `patch` CLI
 
 The portal is just one client of this service; the `patch` CLI is a
 second, minimal consumer that proves the boundary. It is built on the
-shared **`src/a2a/client.ts`** (`A2AClient`), which reuses the service's
-own A2A types and JSON-RPC framing — there is no duplicate protocol code.
-
-Run it with Bun (no build step). `PATCH_URL` / `PATCH_TOKEN` configure the
-target; `--url` / `--token` flags override them.
+official `a2a-go` client (`a2aclient`) — no duplicate protocol code.
 
 ```bash
-# via the package script…
-bun run patch card
-# …or directly…
-bun run cli/main.ts card
-# …or install the `patch` bin onto PATH for this checkout:
-bun link   # then: patch card
-
+go build ./cmd/patch          # → ./patch
 export PATCH_URL=http://localhost:7820
 export PATCH_TOKEN=dev-token
 
-patch card                                             # fetch + print the agent card
-patch chat "Diagnose pipeline p-1 for StreamCo" \
-  --project demo-project                               # stream a reply
-patch task get <taskId>
-patch task cancel <taskId>
+./patch card                                          # fetch + print the agent card
+./patch chat "Diagnose pipeline p-1 for StreamCo" \
+  --project demo-project                              # stream a reply
+./patch task get <taskId>
+./patch task cancel <taskId>
 ```
 
 Behaviour:
 
-- **`patch card`** — fetches `/.well-known/agent-card.json` and
-  pretty-prints it (`--json` for raw).
-- **`patch chat "<msg>" --project <p>`** — opens `message/stream`. The
-  assistant's **answer streams to stdout**; **status transitions
-  (`working` → `completed`) go to stderr**, so `patch chat … > answer.txt`
-  captures just the reply. Exit code is **0** on `completed`, **non-zero**
-  on a failed/canceled task. `--json` emits the raw A2A events (one JSON
+- **`patch card`** — fetches the agent card and pretty-prints it (`--json`
+  for raw).
+- **`patch chat "<msg>" --project <p>`** — opens `SendStreamingMessage`.
+  The **answer streams to stdout**; **status transitions go to stderr**,
+  so `patch chat … > answer.txt` captures just the reply. Exit code is
+  **0** on completed, **1** on a failed/canceled task or transport error,
+  **2** on a usage error. `--json` emits the raw A2A events (one JSON
   object per line) to stdout instead.
 - **`patch task get|cancel <id>`** — the corresponding A2A methods.
 - Auth/transport failures print a clear `patch: …` message to stderr and
   exit non-zero (401 → "unauthorized", 403 → "forbidden").
 
-> Packaging as a **`datumctl` plugin** is the production distribution
-> path — see Follow-ups. For now the CLI ships in-repo and runs under Bun.
-
 ## Repo layout
 
 ```
-src/
-  index.ts            boot (loads config, starts @hono/node-server)
-  server.ts           Hono app + /a2a dispatch; buildApp() wiring
-  config.ts           env → Config (the only reader of process.env)
-  logger.ts           minimal JSON logger
-  agent-deps.ts       Config → AgentDeps (binding source, model, emitter)
-  a2a/
-    types.ts          A2A protocol types
-    jsonrpc.ts        JSON-RPC 2.0 framing + A2A error codes
-    agent-card.ts     agent card builder
-    tasks.ts          TaskStore interface + InMemoryTaskStore
-    sse.ts            SSE framing for message/stream (server side)
-    client.ts         A2AClient — shared client used by consumers (CLI)
-    methods.ts        A2AService: message/send, message/stream, tasks/*
-  auth/               Authenticator (dev tokens + OIDC/jose) + Authorizer
-                      (ClaimsAuthorizer; SAR-ready interface)
-  agent/
-    prompt.ts         base Patch persona + knowledge assembly
-    mock-model.ts     scripted MockLanguageModelV3
-    model.ts          MODEL_MODE resolver
-    loop.ts           the agent loop (compose → streamText → meter)
-  composition/        lifted verbatim from the portal branch
-  usage/              CloudEvents builders + emitter (portal wire shape)
-cli/                  the `patch` CLI consumer (args, render, main)
-e2e/                  QA-owned end-to-end suite
+cmd/
+  assistant/          service binary: config → runner → server
+  patch/              the `patch` CLI consumer (on a2aclient)
+agentcore/            extractable model/loop library (no env, no internal/ imports)
+  model.go, usage.go, loop.go   unified stream parts, usage, tool loop
+  anthropic/          adapter on anthropic-sdk-go
+  openaicompat/       adapter on openai-go (gateway mode)
+  mockmodel/          scripted in-process model
+  mcptool/            MCP go-sdk client → agentcore ToolSet adapter
+internal/
+  capability/         capability documents: schema, fixture source, compose
+  agent/              run-conversation orchestration (prompt, loop, usage events)
+  a2a/                a2asrv AgentExecutor glue, task store wiring
+  auth/               dev tokens + OIDC, fail-closed authorizer seam
+  usage/              CloudEvents emitter (byte-identical to the TS wire)
+  config/             env → Config
+  server/             net/http mux: /healthz, agent-card, /a2a
+  logger/             slog setup
+fixtures/             capability-documents.json (sample)
+e2e/                  QA-owned end-to-end acceptance harness (bun/Node)
 ```
 
-## Follow-ups (out of scope for v0)
+## Testing
 
-- **SAR/OpenFGA caller authorization** — replace `ClaimsAuthorizer` with
-  a `SubjectAccessReviewAuthorizer` that issues a SubjectAccessReview
-  against the Milo control plane (resolved by the OpenFGA-backed
-  webhook). The `Authorizer` interface is already the seam.
-- **Catalog-fanned assistant IAM role** — the SAR above checks a role
-  materialized by the catalog IAM fan-out; wire the service to that role
-  once it lands.
-- **OAuth token exchange (RFC 8693)** — perform on-behalf-of token
-  exchange for downstream (control-plane / provider) calls instead of
-  forwarding the caller's raw token.
+```bash
+go vet ./...
+go test ./...
+```
+
+Highlights: an in-process MCP round-trip in `internal/capability` /
+`agentcore/mcptool`; full httptest integration through the real mux
+(agent card, auth 401/403/200, `SendMessage`/`SendStreamingMessage`
+driving a tool call over real MCP with usage landing at an in-process
+sink, `GetTask`/`CancelTask`); OIDC with a locally generated key; the
+usage emitter golden test against the recorded TS wire; and the agent
+loop's exit/usage-aggregation rules pinned against the mock model.
+
+The **e2e acceptance harness** (`e2e/`, bun) drives the built binaries
+end to end (core + consumers + gateway legs) and byte-diffs the sink wire
+against the pre-port golden — see `e2e/E2E-REPORT.md`.
+
+## Follow-ups
+
+- **Portal client v1.0 update** — the cloud-portal thin client
+  (`feat/portal-assistant-client`) is still v0.3-shaped and gets
+  `-32601` MethodNotFound against the v1.0 service; update its method
+  names and SSE parsing.
+- **HTTP `CapabilitySource`** — documents served by the control plane per
+  project instead of a fixture file (the `Source` interface is the seam).
+- **SAR/OpenFGA caller authorization** — replace the claims authorizer
+  with a SubjectAccessReview authorizer against the Milo control plane.
+- **OAuth token exchange (RFC 8693)** — on-behalf-of exchange for
+  downstream calls instead of forwarding the caller's raw token.
 - **`patch` CLI as a `datumctl` plugin** — the production distribution
-  path for the CLI consumer; today it ships in-repo and runs under Bun.
+  path for the CLI consumer.
 - **Agent card signing** — the card is currently unsigned.
-- **Port the 24 built-in portal tools** — v0 exposes provider tools +
-  knowledge only.
-- **Durable task store** — `InMemoryTaskStore` is behind the `TaskStore`
+- **Durable task store** — the in-memory task store is behind an
   interface; swap for a persistent backend (tasks are lost on restart).
-- **`ControlPlaneAgentBindingSource`** — still a stub; implement the
-  control-plane list call so bindings come from Milo instead of a
-  fixture file.
-- **SSRF hardening** — knowledge fetches trust operator-reviewed binding
+- **SSRF hardening** — knowledge fetches trust operator-reviewed document
   URLs; add an egress allow-list at the gateway for production.
+```
