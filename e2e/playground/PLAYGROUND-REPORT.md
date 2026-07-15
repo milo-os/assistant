@@ -252,6 +252,6 @@ Followed the "Try it as a consumer" quickstart literally as a new consumer:
 | `PATCH_URL=…:1986 PATCH_TOKEN=pg-demo-token patch chat "Diagnose pipeline p-1 for StreamCo" --project demo-project` | ✅ streams the real StreamCo diagnosis (CONSUMER_LAG on vod-transcode) |
 | no/invalid token → rejected | ✅ `401 Unauthorized` (auth boundary is real) |
 | keyless assistant (`exec deploy/assistant -- printenv \| grep -i anthropic`) | ✅ no model key in the assistant env |
-| **usage via `exec deploy/sink -- wget -qO- …/events`** | ❌ **fails** — the sink image has no `wget` (`failed to start exec "…wget"`). The events ARE captured (`/data/captured-events.jsonl` had 15 lines). **Suggested README fix**: inspect the sink via a port-forward instead — `kubectl -n patch-playground port-forward svc/sink 7811:7811 & curl -s localhost:7811/events` (this is what P6 uses, and it works). |
+| usage inspection | ❌→✅ **fixed**. As originally written (`exec deploy/sink -- wget -qO- …/events`) it failed — the sink image has no `wget` (`failed to start exec "…wget"`), though events WERE being captured. Reported to pg-infra, who committed the fix (`1a86676`): the README + up.sh banner now use `kubectl -n patch-playground port-forward svc/sink 7811:7811 & curl -s localhost:7811/events | jq .` (with `kubectl logs deploy/sink` as the shell-free alternative). Verified working. |
 
-Reported the sink-command fix to pg-infra.
+Net: the quickstart now works end-to-end as written.
