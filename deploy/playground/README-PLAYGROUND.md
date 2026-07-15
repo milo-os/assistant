@@ -137,6 +137,15 @@ The capability documents the adapter serves must point their MCP endpoint at
 `patch-playground` + GatewayClass `patch-pg-gw`); the catalog overlay in
 `agent-framework-playground` is torn down by the catalog engineer's own script.
 
+**Switching modes is explicit.** BASE and overlay set mutually-exclusive
+capability sources (`CAPABILITY_DOCS_FIXTURE` vs `CAPABILITY_PROVIDER_URL`), so
+the assistant manifest declares neither — `playground-up.sh` sets exactly one
+after apply, and `kubectl apply` can never merge a stray value into a both-set
+(crashing) spec. To guard against an accidental teardown of live overlay wiring,
+a plain (BASE) `playground-up.sh` **refuses** when the live assistant is already
+in adapter mode; re-run with `--with-catalog` to stay in overlay mode, or
+`FORCE_BASE=1 playground-up.sh …` to deliberately revert to the fixture source.
+
 ## Tear down (exactly our layer)
 
 ```bash

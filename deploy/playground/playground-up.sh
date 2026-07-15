@@ -288,6 +288,22 @@ kc -n "$NS" create configmap assistant-capabilities \
 kc -n "$NS" label configmap assistant-capabilities \
   app.kubernetes.io/part-of=agent-framework-playground --overwrite >/dev/null
 
+# Mode guard: a plain BASE run over a live env that's in CATALOG/adapter mode
+# must NOT silently revert it to the fixture — that would tear down live overlay
+# wiring (e.g. a running P3). Refuse with a clear message unless FORCE_BASE=1.
+# (--with-catalog intends the switch; a fresh install has no live Deployment.)
+if [ "$WITH_CATALOG" = 0 ] && [ "${FORCE_BASE:-0}" != "1" ]; then
+  live_provider="$(kc -n "$NS" get deploy assistant \
+    -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="CAPABILITY_PROVIDER_URL")]}{.value}{end}' 2>/dev/null || true)"
+  if [ -n "$live_provider" ]; then
+    echo "REFUSING: the live assistant is in CATALOG/adapter mode (CAPABILITY_PROVIDER_URL is set)." >&2
+    echo "A plain BASE run would revert it to the fixture source and break the overlay wiring." >&2
+    echo "  • keep overlay mode:  re-run with --with-catalog  (add CATALOG_UP_CMD=skip if the overlay is already up)" >&2
+    echo "  • force BASE (revert to fixture):  FORCE_BASE=1 $0 ${*:-}" >&2
+    exit 1
+  fi
+fi
+
 ASSISTANT_FILE="$RUN_DIR/70-assistant.yaml"
 sed "s#__GATEWAY_URL__#${GATEWAY_URL}#" \
   "$MANIFESTS/70-assistant.tmpl.yaml" > "$ASSISTANT_FILE"
@@ -296,9 +312,9 @@ kc apply -f "$ASSISTANT_FILE"
 # The manifest deliberately omits both so `kubectl apply` never merges a stray
 # value from a prior cross-mode run; we set the authoritative one here. This is
 # idempotent (a re-run in the same mode is a no-op → no roll) and converges
-# cleanly on a mode switch (no both-set crash pod). --with-catalog re-asserts the
-# provider URL in its own block below; setting it here too keeps the intermediate
-# rollout healthy.
+# cleanly on an intentional mode switch (no both-set crash pod). --with-catalog
+# re-asserts the provider URL in its own block below; setting it here too keeps
+# the intermediate rollout healthy.
 if [ "$WITH_CATALOG" = 1 ]; then
   kc -n "$NS" set env deploy/assistant \
     CAPABILITY_DOCS_FIXTURE- CAPABILITY_PROVIDER_URL="$CAPABILITY_PROVIDER_URL" >/dev/null
