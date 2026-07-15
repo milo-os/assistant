@@ -1,0 +1,33 @@
+@startuml context
+!include <C4/C4_Context>
+
+title Patch Assistant Service — System Context (C4 Level 1)
+
+Person(user, "End User / Developer", "Uses Patch to operate their services")
+Person(provider, "Service Provider", "Publishes agent knowledge + MCP tools")
+
+System(assistant, "Patch Assistant Service", "Standalone A2A v1.0 agent runtime (Go)")
+
+System_Ext(portal, "Datum Cloud Portal", "Web consumer (A2A client mode)")
+System_Ext(cli, "patch CLI", "Terminal consumer (A2A client)")
+System_Ext(gateway, "Envoy AI Gateway", "AI data plane: token metering, tool allow-lists, credential injection")
+System_Ext(llm, "Model Provider", "Anthropic (or any OpenAI-compatible upstream)")
+System_Ext(mcp, "Provider MCP Servers", "Service-owned tools (e.g. StreamCo)")
+System_Ext(billing, "Usage / Billing Pipeline", "CloudEvents collector -> metering -> invoices")
+System_Ext(catalog, "Service Catalog (optional)", "CRD registration -> entitlement-gated capability projection")
+System_Ext(iam, "Milo IAM", "OIDC authn; SubjectAccessReview authz")
+
+Rel(user, portal, "chats via")
+Rel(user, cli, "chats via")
+Rel(portal, assistant, "A2A v1.0", "JSON-RPC + SSE")
+Rel(cli, assistant, "A2A v1.0", "JSON-RPC + SSE")
+Rel(assistant, gateway, "model + MCP calls", "attributed: x-datum-*")
+Rel(gateway, llm, "chat completions", "gateway-held credential")
+Rel(gateway, mcp, "tools/list + tools/call", "allow-listed")
+Rel(assistant, billing, "usage CloudEvents")
+Rel(catalog, assistant, "capability documents", "assistant's published contract")
+Rel(provider, catalog, "registers ServiceAgent + configuration")
+Rel(assistant, iam, "verify tokens / SAR checks")
+
+SHOW_LEGEND()
+@enduml

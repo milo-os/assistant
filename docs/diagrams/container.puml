@@ -1,0 +1,37 @@
+@startuml container
+!include <C4/C4_Container>
+
+title Patch Assistant Service — Containers (C4 Level 2)
+
+Person(consumer, "Consumer", "Portal, patch CLI, or any A2A client")
+
+System_Boundary(svc, "Assistant Service (single Go binary)") {
+    Container(a2asrv, "A2A Server", "a2a-go v2 / net/http", "Agent card, JSON-RPC + SSE, task store, bearer-auth middleware, project authz interceptor")
+    Container(orch, "Agent Orchestrator", "internal/agent", "Per-task run: compose capabilities -> drive loop -> stream events -> build usage events")
+    Container(core, "agentcore", "library package", "Provider-neutral model interface + tool loop; Anthropic / OpenAI-compatible / mock adapters; MCP tool adapter; full cache-token usage fidelity")
+    Container(caps, "Capability Sources", "internal/capability", "Published document schema; fixture source today, HTTP provider-API source next; knowledge -> system prompt, MCP servers -> toolset")
+    Container(meter, "Usage Emitter", "internal/usage", "CloudEvents (byte-stable wire), ULID ids, batch + never-throw delivery")
+    Container(auth, "AuthN/Z", "internal/auth", "Dev tokens or OIDC (JWKS); fail-closed authorizer seam (SAR-ready)")
+}
+
+System_Ext(gw, "Envoy AI Gateway", "AIGatewayRoute + llmRequestCosts / MCPRoute + toolSelector / BackendSecurityPolicy")
+System_Ext(model, "Model upstream", "Anthropic API or OpenAI-compatible")
+System_Ext(tools, "Provider MCP servers")
+System_Ext(sink, "Usage collector")
+System_Ext(capsrc, "Capability provider", "fixture file / HTTP API / catalog adapter")
+
+Rel(consumer, a2asrv, "SendMessage / SendStreamingMessage / GetTask / CancelTask")
+Rel(a2asrv, auth, "authenticate + authorize project")
+Rel(a2asrv, orch, "AgentRunner seam")
+Rel(orch, caps, "load + compose documents")
+Rel(orch, core, "Run(loop) with composed toolset")
+Rel(orch, meter, "token + tool-invocation events")
+Rel(core, gw, "gateway mode: keyless + x-datum-* headers")
+Rel(gw, model, "credential injected at gateway")
+Rel(gw, tools, "allow-listed tool calls")
+Rel(core, model, "anthropic mode: direct (no attribution headers)")
+Rel(meter, sink, "POST /cloudevents")
+Rel(caps, capsrc, "GET capability documents")
+
+SHOW_LEGEND()
+@enduml
