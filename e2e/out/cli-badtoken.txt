@@ -1,3 +1,0 @@
-
----STDERR---
-patch: unauthorized: Unknown or invalid bearer token (check PATCH_TOKEN / --token) [HTTP 401]

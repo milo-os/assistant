@@ -2,39 +2,10 @@
   "name": "@milo-os/assistant",
   "version": "0.1.0",
   "private": true,
-  "description": "Patch \u2014 standalone A2A assistant backend service (assistant.miloapis.com)",
-  "type": "module",
-  "engines": {
-    "node": ">=22.0.0"
-  },
-  "bin": {
-    "patch": "./cli/main.ts"
-  },
-  "scripts": {
-    "start": "bun run src/index.ts",
-    "dev": "bun run --watch src/index.ts",
-    "patch": "bun run cli/main.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "bun test"
-  },
-  "dependencies": {
-    "@ai-sdk/anthropic": "3.0.85",
-    "@ai-sdk/mcp": "1.0.61",
-    "@ai-sdk/openai-compatible": "2.0.59",
-    "@hono/node-server": "2.0.0",
-    "ai": "6.0.208",
-    "hono": "4.12.26",
-    "jose": "6.1.0",
-    "zod": "4.4.3"
-  },
-  "devDependencies": {
-    "@types/bun": "1.3.10",
-    "@types/node": "22.10.2",
-    "typescript": "5.7.3"
-  },
+  "description": "Patch — standalone A2A assistant backend service (assistant.miloapis.com). Go service; build with `go build ./cmd/assistant` and `./cmd/patch`. The e2e acceptance harness (e2e/) is the only remaining bun/Node component — see e2e/package.json.",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/milo-os/assistant.git"
-  },
-  "license": "AGPL-3.0-only"
+  }
 }
