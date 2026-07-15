@@ -140,9 +140,10 @@ async function readStream(endpoint, params, { token }) {
         }
       }
       // Stop once we observe a terminal marker to avoid hanging on a
-      // server that keeps the connection open.
+      // server that keeps the connection open. A2A v1.0 (a2a-go v2): there is
+      // NO `final` flag — the stream closes on a terminal TASK_STATE_* enum.
       const rawSoFar = JSON.stringify(events);
-      if (/"final"\s*:\s*true/.test(rawSoFar) || /"state"\s*:\s*"(completed|failed|canceled|cancelled)"/.test(rawSoFar)) {
+      if (/"state"\s*:\s*"TASK_STATE_(COMPLETED|CANCELED|FAILED|REJECTED)"/.test(rawSoFar)) {
         break;
       }
       if (Date.now() > deadline) break;
@@ -218,9 +219,18 @@ async function main() {
   record('4', 'message/stream responds text/event-stream', /event-stream/.test(meta.contentType), `contentType=${meta.contentType} status=${meta.status}`);
   record('4', 'stream produced >=1 event', events.length > 0, `events=${events.length}`);
   const rawAll = JSON.stringify(events);
-  record('4', 'stream shows a working (non-terminal) state', /"state"\s*:\s*"working"/.test(rawAll) || /working/.test(rawAll), 'looked for state=working');
-  record('4', 'stream reaches terminal state completed', /"state"\s*:\s*"completed"/.test(rawAll), 'looked for state=completed');
-  record('4', 'stream signals final=true at terminal', /"final"\s*:\s*true/.test(rawAll), 'looked for final=true', false);
+  // A2A v1.0 wire (a2a-go v2): task lifecycle states are TASK_STATE_* enums,
+  // stream events are a StreamResponse oneOf envelope (task / statusUpdate /
+  // artifactUpdate / message), and the v0.3-shaped `kind` discriminator and
+  // `final` flag are GONE (deliberate breaking change vs the TS wire).
+  record('4', 'stream shows a working (non-terminal) state (TASK_STATE_WORKING)', /"state"\s*:\s*"TASK_STATE_WORKING"/.test(rawAll), 'looked for state=TASK_STATE_WORKING');
+  record('4', 'stream reaches terminal state (TASK_STATE_COMPLETED)', /"state"\s*:\s*"TASK_STATE_COMPLETED"/.test(rawAll), 'looked for state=TASK_STATE_COMPLETED');
+  // The v1.0 break, asserted positively: the oneOf envelope key is present and
+  // the removed v0.3 fields are absent — the server closes on terminal state.
+  const hasOneOf = /"(statusUpdate|artifactUpdate|task|message)"\s*:/.test(rawAll);
+  const noKind = !/"kind"\s*:/.test(rawAll);
+  const noFinal = !/"final"\s*:/.test(rawAll);
+  record('4', 'stream is A2A v1.0-shaped (oneOf StreamResponse, no kind/final)', hasOneOf && noKind && noFinal, `oneOf=${hasOneOf} noKind=${noKind} noFinal=${noFinal}`);
   const streamText = harvestText(events).join('\n');
   const markerHits = FINDING_MARKERS.filter((m) => streamText.includes(m));
   record('4', 'artifact/message text surfaces canned findings', markerHits.length > 0, `matched markers: [${markerHits.join(', ')}]`);
@@ -242,7 +252,7 @@ async function main() {
       /* */
     }
     const gotSameTask = JSON.stringify(getJson).includes(taskId);
-    const completedState = /"state"\s*:\s*"completed"/.test(getBody);
+    const completedState = /"state"\s*:\s*"TASK_STATE_COMPLETED"/.test(getBody);
     record('4', 'tasks/get retrieves the task record', getRes.status === 200 && gotSameTask, `status=${getRes.status} sameId=${gotSameTask} completed=${completedState}`);
   } else {
     record('4', 'tasks/get retrieves the task record', false, 'no taskId observed to query');
@@ -266,7 +276,7 @@ async function main() {
       }
       const sane =
         cancelRes.status < 500 &&
-        (/"state"\s*:\s*"(canceled|cancelled)"/.test(cancelBody) || cancelJson.error != null || cancelRes.status === 200);
+        (/"state"\s*:\s*"TASK_STATE_CANCELED"/.test(cancelBody) || cancelJson.error != null || cancelRes.status === 200);
       record('4', 'tasks/cancel behaves sanely (canceled or documented error, no 5xx)', sane, `status=${cancelRes.status} body=${cancelBody.slice(0, 160)}`);
     } else {
       record('4', 'tasks/cancel behaves sanely', false, 'could not obtain a fresh taskId to cancel');

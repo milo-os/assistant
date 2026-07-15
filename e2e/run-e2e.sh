@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Assistant service — end-to-end runner (QA-owned).
 #
+# GO PORT (slice 5): the harness now drives the BUILT Go binaries — build_go()
+# compiles cmd/assistant + cmd/patch into ${OUT}/bin before each live leg, and
+# the boot/CLI commands default to those binaries (no bun in the core/gateway
+# legs). The A2A stream assertions in driver/a2a-checks.mjs are A2A v1.0-shaped
+# (TASK_STATE_* enums, StreamResponse oneOf, no kind/final). The capability-doc
+# fixture env was renamed AGENT_BINDINGS_FIXTURE → CAPABILITY_DOCS_FIXTURE.
+# run_full additionally byte-diffs the sink CloudEvents against the pre-port TS
+# golden (golden/sink-cloudevents.golden.jsonl) via golden/normalize-sink.mjs.
+#
 # Proves CONTRACT-ASSISTANT.md "Definition of done / QA" items 1-6 against the
 # REAL running assistant service over HTTP with a dev bearer token. All model
 # inference is MOCKED unless ANTHROPIC_API_KEY is set (contract: real-model
@@ -13,8 +22,10 @@
 #
 # Subcommands:
 #   selftests   StreamCo + sink standalone selftests (no assistant needed)
-#   full        boot all three + run the A2A assertion driver (items 2-5)
-#   repo-tests  `bun test` + typecheck in the assistant repo (item 6)
+#   full        build Go binaries + boot all three + run the A2A assertion
+#               driver (items 2-5) + sink golden byte-diff
+#   repo-tests  `go vet ./...` + `go test ./...` in the assistant repo (item 6)
+#   go-build    just build cmd/assistant + cmd/patch (Phase-2 smoke)
 #   all         full + repo-tests   (default)
 #   consumers   boot the stack + prove the consumers (task #12): the patch CLI,
 #               the portal client-mode path, and no-double-metering. The portal
@@ -43,15 +54,22 @@ OTHER_PROJECT="${OTHER_PROJECT:-other-project}"
 GOOD_TOKEN="${GOOD_TOKEN:-e2e-token}"
 WRONGPROJ_TOKEN="${WRONGPROJ_TOKEN:-wrong-token}"
 
-FIXTURE="${AGENT_BINDINGS_FIXTURE:-${E2E_DIR}/fixtures/agent-bindings.fixture.json}"
+# Go port: the capability-document fixture env was renamed
+# AGENT_BINDINGS_FIXTURE → CAPABILITY_DOCS_FIXTURE (contract inversion). The QA
+# fixture files keep their names (JSON shape is unchanged); accept either env
+# override so an operator can point at a different doc set.
+FIXTURE="${CAPABILITY_DOCS_FIXTURE:-${AGENT_BINDINGS_FIXTURE:-${E2E_DIR}/fixtures/agent-bindings.fixture.json}}"
 STREAMCO_URL="http://${STREAMCO_HOST}:${STREAMCO_PORT}"
 SINK_URL="http://${SINK_HOST}:${SINK_PORT}"
 ASSISTANT_URL="http://${ASSISTANT_HOST}:${ASSISTANT_PORT}"
 STREAMCO_LOG="${OUT}/streamco.log"
 
-ASSISTANT_REPO="${ASSISTANT_REPO:-/Users/scotwells/repos/datum-cloud/assistant}"
-# Default boot command — reconcile with the engineer's README in Phase 2.
-ASSISTANT_START_CMD="${ASSISTANT_START_CMD:-bun run start}"
+ASSISTANT_REPO="${ASSISTANT_REPO:-/Users/scotwells/repos/milo-os/assistant}"
+# Go port: the harness drives the BUILT Go binaries (cmd/assistant + cmd/patch),
+# not bun. build_go() compiles them into GO_BIN_DIR before each live leg; the
+# boot/CLI commands default to those binaries. Override to test another build.
+GO_BIN_DIR="${GO_BIN_DIR:-${OUT}/bin}"
+ASSISTANT_START_CMD="${ASSISTANT_START_CMD:-${GO_BIN_DIR}/assistant}"
 
 # Dev-token env for the assistant. Format (confirmed, src/auth/dev.ts):
 # "token:subject:projA,projB;..." — ';'-separated entries, 3 ':'-fields,
@@ -62,9 +80,9 @@ AUTH_DEV_TOKENS="${AUTH_DEV_TOKENS:-${GOOD_TOKEN}:e2e-user:${PROJECT};${WRONGPRO
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-http://${ASSISTANT_HOST}:${ASSISTANT_PORT}}"
 
 # ── Consumers config (task #12 / CONTRACT-CONSUMERS.md Workstream C) ──────────
-# CLI (Workstream B): patch CLI invocation (confirmed with assistant-engineer —
-# `bun run cli/main.ts <args>`, honors PATCH_URL/PATCH_TOKEN, answer on stdout).
-PATCH_CMD="${PATCH_CMD:-bun run ${ASSISTANT_REPO}/cli/main.ts}"
+# CLI (Workstream C): the patch CLI is now the built Go binary (cmd/patch),
+# honors PATCH_URL/PATCH_TOKEN, answer on stdout.
+PATCH_CMD="${PATCH_CMD:-${GO_BIN_DIR}/patch}"
 PATCH_TOKEN="${PATCH_TOKEN:-${GOOD_TOKEN}}"
 BAD_TOKEN="${BAD_TOKEN:-not-a-real-token}"
 # Portal (Workstream A): live-service integration test on the client-mode branch.
@@ -160,6 +178,34 @@ ensure_tools() {
   for t in node curl jq; do command -v "${t}" >/dev/null || fail "required tool not found: ${t}"; done
 }
 
+# Go port: build the assistant service + patch CLI binaries the harness drives.
+# Run before every live leg. Fails loudly (not silently) if the Go sources are
+# not yet present — during the port that means the engineers haven't landed
+# cmd/assistant or cmd/patch on feat/go-port yet.
+build_go() {
+  command -v go >/dev/null || fail "go not found (required to build cmd/assistant + cmd/patch)"
+  [[ -d "${ASSISTANT_REPO}" ]] || fail "assistant repo not found at ${ASSISTANT_REPO}"
+  [[ -f "${ASSISTANT_REPO}/go.mod" ]] || fail "no go.mod in ${ASSISTANT_REPO} — Go port not landed yet (run against feat/go-port once cmd/assistant + cmd/patch exist)"
+  mkdir -p "${GO_BIN_DIR}"
+  log "Building Go binaries (go build ./cmd/assistant ./cmd/patch → ${GO_BIN_DIR})"
+  ( cd "${ASSISTANT_REPO}" && go build -o "${GO_BIN_DIR}/assistant" ./cmd/assistant ) 2>&1 | tee "${OUT}/go-build.log" || fail "go build ./cmd/assistant failed (see ${OUT}/go-build.log)"
+  ( cd "${ASSISTANT_REPO}" && go build -o "${GO_BIN_DIR}/patch" ./cmd/patch ) 2>&1 | tee -a "${OUT}/go-build.log" || fail "go build ./cmd/patch failed (see ${OUT}/go-build.log)"
+  echo "ok: built ${GO_BIN_DIR}/assistant and ${GO_BIN_DIR}/patch"
+}
+
+# Byte-diff the sink's received CloudEvents against the golden recorded from the
+# TS emitter BEFORE the port (contract: usage wire must be byte-compatible). The
+# normalizer masks only volatile fields (ULID id, time, contextId); everything
+# else — type, source, subject, value, dimensions, resource — is the contract.
+check_sink_golden() {
+  local golden="${E2E_DIR}/golden/sink-cloudevents.golden.jsonl"
+  local cap="${OUT}/captured-events.jsonl"
+  [[ -f "${golden}" ]] || { note "no sink golden at ${golden} — skipping byte-diff"; return 0; }
+  [[ -f "${cap}"    ]] || { note "no captured events at ${cap} — cannot byte-diff sink wire"; return 1; }
+  log "Byte-diffing sink CloudEvents vs the TS golden (${golden})"
+  node "${E2E_DIR}/golden/normalize-sink.mjs" --check "${cap}" "${golden}" 2>&1 | tee "${OUT}/sink-golden-check.log"
+}
+
 boot_streamco() {
   log "Booting StreamCo demo provider on ${STREAMCO_URL}"
   ( cd "${E2E_DIR}/streamco" && STREAMCO_HOST="${STREAMCO_HOST}" STREAMCO_PORT="${STREAMCO_PORT}" \
@@ -190,7 +236,7 @@ boot_assistant() {
       && PORT="${ASSISTANT_PORT}" \
          AUTH_MODE="${AUTH_MODE:-dev}" \
          AUTH_DEV_TOKENS="${AUTH_DEV_TOKENS}" \
-         AGENT_BINDINGS_FIXTURE="${FIXTURE}" \
+         CAPABILITY_DOCS_FIXTURE="${FIXTURE}" \
          MODEL_MODE="${MODEL_MODE:-mock}" \
          USAGE_GATEWAY_URL="${SINK_URL}" \
          PUBLIC_BASE_URL="${PUBLIC_BASE_URL}" \
@@ -224,22 +270,24 @@ run_driver() {
 
 run_full() {
   ensure_tools
+  build_go
   boot_streamco
   boot_sink
   boot_assistant
   run_driver
+  # Additional proof: the Go emitter's sink wire is byte-compatible with the TS
+  # golden. Non-fatal (loudly logged) — I read the result for the report.
+  check_sink_golden || note "sink CloudEvent golden DRIFT (see ${OUT}/sink-golden-check.log)"
 }
 
 run_repo_tests() {
   [[ -d "${ASSISTANT_REPO}" ]] || fail "assistant repo not found at ${ASSISTANT_REPO}"
-  command -v bun >/dev/null || fail "bun not found (required for repo tests)"
-  log "Assistant repo: bun test"
-  ( cd "${ASSISTANT_REPO}" && bun test ) 2>&1 | tee "${OUT}/repo-bun-test.log"
-  log "Assistant repo: typecheck"
-  # Prefer a package script; fall back to tsc --noEmit.
-  if ( cd "${ASSISTANT_REPO}" && bun run --silent typecheck ) 2>&1 | tee "${OUT}/repo-typecheck.log"; then :; else
-    ( cd "${ASSISTANT_REPO}" && bunx tsc --noEmit ) 2>&1 | tee "${OUT}/repo-typecheck.log"
-  fi
+  command -v go >/dev/null || fail "go not found (required for repo tests)"
+  [[ -f "${ASSISTANT_REPO}/go.mod" ]] || fail "no go.mod in ${ASSISTANT_REPO} — Go port not landed yet"
+  log "Assistant repo: go vet ./..."
+  ( cd "${ASSISTANT_REPO}" && go vet ./... ) 2>&1 | tee "${OUT}/repo-govet.log"
+  log "Assistant repo: go test ./..."
+  ( cd "${ASSISTANT_REPO}" && go test ./... ) 2>&1 | tee "${OUT}/repo-gotest.log"
 }
 
 # ── Consumers leg (task #12 / CONTRACT-CONSUMERS.md Workstream C) ─────────────
@@ -285,15 +333,19 @@ run_consumer_portal() {
 
 run_consumers() {
   ensure_tools
-  command -v bun >/dev/null || fail "bun not found (required for the patch CLI consumer)"
+  build_go   # the patch CLI consumer is now the built Go binary
   boot_streamco
   boot_sink
   boot_assistant
   run_consumer_cli
-  if git -C "${CP_REPO}" rev-parse --verify "refs/heads/${PORTAL_BRANCH}" >/dev/null 2>&1 && [[ -n "${PORTAL_E2E_TEST_CMD}" ]]; then
+  # The portal client-mode sub-leg still runs on bun. NOTE (contract): the portal
+  # translator (cloud-portal feat/portal-assistant-client) is v0.3-shaped and
+  # needs a v1.0 update before it can drive the Go service — a documented
+  # follow-up. Only run it if bun + the branch are present.
+  if command -v bun >/dev/null && git -C "${CP_REPO}" rev-parse --verify "refs/heads/${PORTAL_BRANCH}" >/dev/null 2>&1 && [[ -n "${PORTAL_E2E_TEST_CMD}" ]]; then
     run_consumer_portal
   else
-    note "Portal client-mode leg SKIPPED — branch ${PORTAL_BRANCH} not present or PORTAL_E2E_TEST_CMD unset (task #10 pending). Ran the CLI leg only."
+    note "Portal client-mode leg SKIPPED — bun/branch ${PORTAL_BRANCH} absent, or the portal translator still needs its A2A v1.0 update (follow-up). Ran the CLI leg only."
   fi
 }
 
@@ -308,11 +360,11 @@ gw_port_forward() {
 
 run_gateway() {
   ensure_tools
-  command -v bun >/dev/null || fail "bun required for gateway leg"
   command -v kubectl >/dev/null || fail "kubectl required for gateway leg"
   command -v docker >/dev/null || fail "docker required for gateway leg"
   [[ -d "${TEST_INFRA}" ]] || fail "test-infra not found at ${TEST_INFRA}"
   [[ -f "${GW_UP_CMD%% *}" ]] || fail "gateway up.sh not found (${GW_UP_CMD}); infra-engineer owns e2e/gateway/"
+  build_go   # service (gateway mode) + patch CLI are the built Go binaries
 
   # G1: bring up the gateway env (idempotent). Track test-infra cleanliness.
   local ti_before; ti_before=$(git -C "${TEST_INFRA}" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
@@ -332,7 +384,7 @@ run_gateway() {
   note "GATEWAY_URL=${GATEWAY_URL} model=${GATEWAY_MODEL} fixture=${GW_FIXTURE}"
   ( cd "${ASSISTANT_REPO}" \
       && PORT="${ASSISTANT_PORT}" AUTH_MODE=dev AUTH_DEV_TOKENS="${AUTH_DEV_TOKENS}" \
-         AGENT_BINDINGS_FIXTURE="${GW_FIXTURE}" USAGE_GATEWAY_URL="${SINK_URL}" \
+         CAPABILITY_DOCS_FIXTURE="${GW_FIXTURE}" USAGE_GATEWAY_URL="${SINK_URL}" \
          PUBLIC_BASE_URL="${PUBLIC_BASE_URL}" \
          MODEL_MODE=gateway GATEWAY_URL="${GATEWAY_URL}" GATEWAY_MODEL="${GATEWAY_MODEL}" \
          bash -c "${ASSISTANT_START_CMD}" ) >"${OUT}/assistant-gateway.log" 2>&1 &
@@ -408,8 +460,9 @@ main() {
     repo-tests) run_repo_tests ;;
     consumers)  run_consumers ;;
     gateway)    run_gateway ;;
+    go-build)   build_go ;;
     all)        run_full; run_repo_tests ;;
-    *) fail "unknown subcommand '${cmd}' (use: selftests | full | repo-tests | consumers | gateway | all)" ;;
+    *) fail "unknown subcommand '${cmd}' (use: selftests | full | repo-tests | consumers | gateway | go-build | all)" ;;
   esac
   log "Done (${cmd}). Evidence in ${OUT}/"
 }
