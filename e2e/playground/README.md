@@ -61,8 +61,12 @@ rewrite — but I flag them so mismatches surface before Phase 2.
   /`output_tokens`/`total_tokens`, host port `:1975`. — pg-infra
 - **Capability provider adapter**: `GET {CAPABILITY_PROVIDER_URL}/projects/
   {name}/capability-documents` returning the doc set (array / `{documents}` /
-  `{capabilities}`); tool names appear as `mcpServers[].toolSelector.include[]`
-  or `tools[].name`. — pg-catalog
+  `{capabilities}`). Tool allow-list is read from
+  `spec.tools.mcpServers[].toolSelector.include[]` (BARE tool names; confirmed
+  by pg-assistant against the HTTPCapabilitySource). `mcpServers[].name` is the
+  SERVER name, not a tool. The model-visible surface namespaces tools
+  `<server>__<tool>` — the driver normalizes to bare names for cross-surface
+  comparison. — pg-catalog (adapter shape) / pg-assistant (field path)
 - **Catalog CRs** (P3): commands to apply v1 / apply v2-narrower / unpublish the
   `ServiceAgentConfiguration` — set `SAC_APPLY_V1` / `SAC_APPLY_V2` /
   `SAC_UNPUBLISH`; expected tool sets `V1_EXPECTED_TOOLS` / `V2_EXPECTED_TOOLS`. — pg-catalog

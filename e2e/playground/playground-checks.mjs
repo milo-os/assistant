@@ -45,13 +45,15 @@ const CLI_TIMEOUT_MS = Number(process.env.CLI_TIMEOUT_MS ?? 45_000);
 const CAPABILITY_PROVIDER_URL = (process.env.CAPABILITY_PROVIDER_URL ?? 'http://127.0.0.1:8085').replace(/\/$/, '');
 
 // P3 reconfig expectations: after applying the v2 (narrower) config, the tool
-// set should SHRINK relative to v1. The exact tool names come from the catalog
-// sample CRs (catalog-engineer); default to the gateway-namespaced StreamCo set.
+// set should SHRINK relative to v1. The raw capability doc carries BARE tool
+// names (toolSelector.include[]); exact names come from pg-catalog's sample CRs
+// and are confirmed live (these exact-match checks are informational — the
+// required proof is the structural narrowing, not the literal names).
 const V1_EXPECTED_TOOLS = (process.env.V1_EXPECTED_TOOLS ??
-  'streamco-backend__pipeline_diagnose,streamco-backend__streams_get,streamco-backend__streams_list')
+  'pipeline_diagnose,streams_get,streams_list')
   .split(',').map((s) => s.trim()).filter(Boolean).sort();
 const V2_EXPECTED_TOOLS = (process.env.V2_EXPECTED_TOOLS ??
-  'streamco-backend__streams_get,streamco-backend__streams_list')
+  'streams_get,streams_list')
   .split(',').map((s) => s.trim()).filter(Boolean).sort();
 
 // P4 access log
@@ -143,21 +145,30 @@ async function fetchCapabilityDocs(project) {
   } catch (e) { return { ok: false, status: 0, docs: [], body: `threw: ${e.message}`, url }; }
 }
 
-// Pull the tool-name set out of a capability-doc response (adapter contract:
-// mcpServers[].toolSelector.include[], OR a flat tools[].name). Best-effort and
-// order-independent.
+// Pull the tool allow-list out of a capability-doc response. Per pg-assistant
+// (code-confirmed): the tools live at spec.tools.mcpServers[].toolSelector.
+// include[]. mcpServers[].name is the SERVER name, NOT a tool — do not harvest
+// it. include[] entries are BARE tool names in the raw doc; the model-visible
+// surface namespaces them <server>__<tool>. Best-effort, order-independent: we
+// collect every toolSelector.include[] array anywhere in the payload.
 function toolsFromDocs(docs) {
   const set = new Set();
   const walk = (n) => {
     if (n == null || typeof n !== 'object') return;
     if (Array.isArray(n)) { n.forEach(walk); return; }
-    if (Array.isArray(n.include)) n.include.forEach((t) => typeof t === 'string' && set.add(t));
-    if (typeof n.name === 'string' && /__/.test(n.name)) set.add(n.name);
+    // toolSelector.include[] is the authoritative tool list.
+    if (n.toolSelector && Array.isArray(n.toolSelector.include)) {
+      n.toolSelector.include.forEach((t) => typeof t === 'string' && set.add(t));
+    }
     for (const v of Object.values(n)) walk(v);
   };
   walk(docs);
   return [...set].sort();
 }
+// Normalize a tool name to its bare form (strip any <server>__ namespacing), so
+// a raw capability-doc name (bare) and a model-visible name (<server>__<tool>)
+// compare equal. Used only for the cross-surface next-turn check.
+function bare(name) { const i = String(name).lastIndexOf('__'); return i >= 0 ? String(name).slice(i + 2) : String(name); }
 
 // ── P2: chat through the gateway ────────────────────────────────────────────
 async function chat() {
@@ -200,20 +211,26 @@ async function reconfig() {
     `v1=${!!v1} v2=${!!v2} unpublished=${!!un}`);
   if (!v1 || !v2 || !un) return finish('reconfig');
 
-  record('pg.reconfig.v1_tools', `v1 capability docs expose the broad tool set [${V1_EXPECTED_TOOLS.join(', ')}]`,
-    JSON.stringify(v1.tools) === JSON.stringify(V1_EXPECTED_TOOLS), `v1 tools=[${v1.tools.join(', ')}]`);
-  record('pg.reconfig.v2_narrower', 'v2 (narrower toolSelector) exposes STRICTLY FEWER tools than v1',
-    v2.tools.length < v1.tools.length && v2.tools.every((t) => v1.tools.includes(t)),
-    `v1=${v1.tools.length} tools, v2=${v2.tools.length} tools; v2=[${v2.tools.join(', ')}]`);
+  // Exact-name expectations are INFORMATIONAL (non-required): the concrete tool
+  // names come from pg-catalog's sample CRs and the adapter's namespacing, which
+  // I confirm live. The PROOF is the structural narrowing below, which holds
+  // regardless of the exact names.
+  record('pg.reconfig.v1_tools', `v1 capability docs expose the expected broad set [${V1_EXPECTED_TOOLS.join(', ')}]`,
+    JSON.stringify(v1.tools) === JSON.stringify(V1_EXPECTED_TOOLS), `v1 tools=[${v1.tools.join(', ')}]`, false);
+  record('pg.reconfig.v2_narrower', 'v2 (narrower toolSelector) exposes STRICTLY FEWER tools than v1, all a subset',
+    v1.tools.length > 0 && v2.tools.length < v1.tools.length && v2.tools.every((t) => v1.tools.includes(t)),
+    `v1=${v1.tools.length} tools, v2=${v2.tools.length} tools; v1=[${v1.tools.join(', ')}] v2=[${v2.tools.join(', ')}]`);
   record('pg.reconfig.v2_expected', `v2 capability docs match the expected narrowed set [${V2_EXPECTED_TOOLS.join(', ')}]`,
     JSON.stringify(v2.tools) === JSON.stringify(V2_EXPECTED_TOOLS), `v2 tools=[${v2.tools.join(', ')}]`, false);
   // The NEXT chat turn after v2 must reflect the narrowed capabilities: it must
-  // NOT use a tool that v2 removed.
-  const removed = v1.tools.filter((t) => !v2.tools.includes(t));
-  const v2TurnUsedRemoved = removed.filter((t) => (v2.turnTools ?? []).includes(t));
+  // NOT use a tool that v2 removed. Compare on BARE names — the capability doc
+  // carries bare names, the chat-turn (model-visible) surface namespaces them.
+  const removedBare = v1.tools.filter((t) => !v2.tools.includes(t)).map(bare);
+  const v2TurnBare = (v2.turnTools ?? []).map(bare);
+  const v2TurnUsedRemoved = removedBare.filter((t) => v2TurnBare.includes(t));
   record('pg.reconfig.next_turn_reflects', 'the chat turn after applying v2 does NOT use a tool v2 removed',
     v2.chatExit === 0 && v2TurnUsedRemoved.length === 0,
-    `removed=[${removed.join(', ')}] usedInV2Turn=[${v2TurnUsedRemoved.join(', ')}] exit=${v2.chatExit}`);
+    `removed(bare)=[${removedBare.join(', ')}] v2Turn(bare)=[${v2TurnBare.join(', ')}] usedRemoved=[${v2TurnUsedRemoved.join(', ')}] exit=${v2.chatExit}`);
   // After unpublish, the project's capability documents (and thus agent tools)
   // are gone: empty tool set AND/OR a 404 from the adapter.
   record('pg.reconfig.unpublished_gone', 'after unpublish the project has NO capability documents',
