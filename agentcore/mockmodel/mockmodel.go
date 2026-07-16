@@ -39,6 +39,7 @@ var Usage = agentcore.Usage{Input: 42, Output: 23}
 
 var (
 	recallRe       = regexp.MustCompile(`(?i)what did i (say|ask)`)
+	skillRe        = regexp.MustCompile("(?i)use the `?([a-zA-Z0-9_-]+)`? skill")
 	diagnoseRe     = regexp.MustCompile(`(?i)diagnose`)
 	pipelineToolRe = regexp.MustCompile(`(?i)pipeline_diagnose`)
 	explicitIDRe   = regexp.MustCompile(`(?i)\bp-[a-z0-9]+\b`)
@@ -63,13 +64,19 @@ func (m *Model) Stream(_ context.Context, req agentcore.Request) (agentcore.Stre
 }
 
 func (m *Model) script(req agentcore.Request) []agentcore.StreamPart {
-	if result, ok := latestToolResult(req.Messages); ok {
+	if name, result, ok := latestToolResultNamed(req.Messages); ok {
+		if name == "load_skill" {
+			return textParts(summarizeSkill(result))
+		}
 		return textParts(summarizeToolResult(result))
 	}
 
 	userText := latestUserText(req.Messages)
 	if recallRe.MatchString(userText) {
 		return textParts(recallReply(priorUserTexts(req.Messages)))
+	}
+	if m := skillRe.FindStringSubmatch(userText); len(m) > 1 && hasTool(req.Tools, "load_skill") {
+		return loadSkillParts(m[1])
 	}
 	if diagnoseRe.MatchString(userText) {
 		if name, ok := findDiagnoseTool(req.Tools); ok {
@@ -100,18 +107,28 @@ func latestUserText(messages []agentcore.Message) string {
 	return ""
 }
 
-// latestToolResult returns the text of the most recent tool result in the
-// conversation, or ok=false if the model has not yet seen a tool result.
-func latestToolResult(messages []agentcore.Message) (string, bool) {
+// latestToolResultNamed returns the tool name and text of the most recent
+// tool result in the conversation, or ok=false if the model has not yet seen
+// a tool result.
+func latestToolResultNamed(messages []agentcore.Message) (string, string, bool) {
 	for i := len(messages) - 1; i >= 0; i-- {
 		content := messages[i].Content
 		for j := len(content) - 1; j >= 0; j-- {
 			if content[j].Kind == agentcore.ContentToolResult && content[j].ToolResult != nil {
-				return content[j].ToolResult.Content, true
+				return content[j].ToolResult.Name, content[j].ToolResult.Content, true
 			}
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+func hasTool(tools []agentcore.ToolDefinition, name string) bool {
+	for _, t := range tools {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // priorUserTexts returns the text of every user message BEFORE the latest
@@ -187,6 +204,16 @@ func recallReply(prior []string) string {
 	return "Earlier in this conversation you said: " + strings.Join(quoted, ", then ") + "."
 }
 
+// summarizeSkill quotes a loaded skill body — deterministic proof that the
+// body round-tripped through load_skill into the prompt.
+func summarizeSkill(body string) string {
+	compact := strings.Join(strings.Fields(body), " ")
+	if len(compact) > 800 {
+		compact = compact[:800]
+	}
+	return "Loaded the skill. Following its procedure: " + compact
+}
+
 func genericReply(userText string) string {
 	if userText == "" {
 		return "I'm Patch, the Datum Cloud assistant. Ask me about this project, its resources, or a provider service entitled to it."
@@ -217,6 +244,26 @@ func textParts(text string) []agentcore.StreamPart {
 		FinishReason: agentcore.FinishStop,
 	})
 	return parts
+}
+
+// loadSkillParts emits a call to the built-in skill loader.
+func loadSkillParts(skillName string) []agentcore.StreamPart {
+	input, _ := json.Marshal(map[string]string{"skill": skillName})
+	return []agentcore.StreamPart{
+		{
+			Kind: agentcore.StreamPartToolCall,
+			ToolCall: &agentcore.ToolCall{
+				ID:    "mock-skill-call-0",
+				Name:  "load_skill",
+				Input: input,
+			},
+		},
+		{
+			Kind:         agentcore.StreamPartStepFinish,
+			Usage:        Usage,
+			FinishReason: agentcore.FinishToolCalls,
+		},
+	}
 }
 
 // toolCallParts emits a single tool call plus a tool-calls step-finish.

@@ -60,6 +60,10 @@ type ComposeOptions struct {
 	KnowledgeMaxSourcesPerService int
 	// MCPConnectTimeout overrides [DefaultMCPConnectTimeout] when > 0.
 	MCPConnectTimeout time.Duration
+	// SkillTimeout and SkillMaxBytes override the skill-body fetch defaults
+	// when > 0 (see DefaultSkillTimeout / DefaultSkillMaxBytes).
+	SkillTimeout  time.Duration
+	SkillMaxBytes int
 	// connect is the MCP connector seam. Nil uses the real mcptool client.
 	connect mcpConnector
 	// OnToolInvocation, if set, fires once at the start of every provider-tool
@@ -110,6 +114,21 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 	})
 
 	tools, sessions := connectTools(ctx, docs, opts, logger)
+
+	// Skills: descriptions into the prompt, bodies behind the built-in
+	// load_skill tool (progressive disclosure).
+	skills := collectSkills(docs, logger)
+	if len(skills) > 0 {
+		index := buildSkillsIndex(skills)
+		if addendum == "" {
+			addendum = index
+		} else {
+			addendum = addendum + "\n\n" + index
+		}
+		if _, exists := tools[LoadSkillToolName]; !exists {
+			tools[LoadSkillToolName] = newLoadSkillTool(skills, opts, logger)
+		}
+	}
 
 	closed := false
 	return &Composed{

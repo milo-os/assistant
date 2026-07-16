@@ -80,6 +80,20 @@ type Tools struct {
 	MCPServers []MCPServer `json:"mcpServers,omitempty"`
 }
 
+// Skill is a provider-published, reviewed procedure the assistant may follow
+// — the middle rung between knowledge (facts) and tools (callable endpoints).
+// Only Name and Description enter the prompt; the body at Source is fetched
+// on demand via the built-in load_skill tool (progressive disclosure), so a
+// provider can publish many skills at near-zero prompt cost. A skill never
+// grants privileges: it can only direct the model toward tools that are
+// independently allow-listed.
+type Skill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// Source is the HTTP(S) URL of the skill body (markdown/plain text).
+	Source string `json:"source"`
+}
+
 // AuthorityRead names a resource kind the agent is authorized to read.
 type AuthorityRead struct {
 	GVK GVKRef `json:"gvk"`
@@ -105,6 +119,7 @@ type CapabilitySpec struct {
 	ConfigurationVersion string     `json:"configurationVersion"`
 	Knowledge            *Knowledge `json:"knowledge,omitempty"`
 	Tools                *Tools     `json:"tools,omitempty"`
+	Skills               []Skill    `json:"skills,omitempty"`
 	Authority            *Authority `json:"authority,omitempty"`
 }
 
@@ -165,6 +180,17 @@ func (d *CapabilityDocument) Validate() error {
 			if srv.Endpoint == "" {
 				return fmt.Errorf("spec.tools.mcpServers[%d].endpoint: required", i)
 			}
+		}
+	}
+	for i, sk := range s.Skills {
+		if sk.Name == "" {
+			return fmt.Errorf("spec.skills[%d].name: required", i)
+		}
+		if sk.Description == "" {
+			return fmt.Errorf("spec.skills[%d].description: required", i)
+		}
+		if sk.Source == "" {
+			return fmt.Errorf("spec.skills[%d].source: required", i)
 		}
 	}
 	if s.Knowledge != nil {

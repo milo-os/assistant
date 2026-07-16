@@ -47,3 +47,22 @@ spec:
               echo "${FRESH}" | grep -q "first thing" \
                 || { echo "FAIL: fresh context unexpectedly had memory" >&2; exit 1; }
               echo "PASS: two-turn recall + negative control"
+
+              # Skills (fixture mode only: the catalog projection does not
+              # carry skills yet, so skip when the assistant runs in
+              # capability-provider mode).
+              MODE=$(kubectl -n patch-playground get deploy assistant \
+                -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CAPABILITY_DOCS_FIXTURE")].value}')
+              if [ -z "${MODE}" ]; then
+                echo "SKIP: skill check (assistant is in catalog mode, fixture-only feature)"
+              else
+                SKILL=$(go run ./cmd/patch chat "Use the streaming-streamco-example__lag-triage skill" --project demo-project 2>/dev/null)
+                echo "skill answer: ${SKILL}"
+                echo "${SKILL}" | grep -q "Following its procedure" \
+                  || { echo "FAIL: skill was not loaded/followed" >&2; exit 1; }
+                echo "${SKILL}" | grep -q "Pipeline consumer lag" \
+                  || { echo "FAIL: skill body content missing from the answer" >&2; exit 1; }
+                echo "${SKILL}" | grep -qE "unknown skill|temporarily unavailable" \
+                  && { echo "FAIL: load_skill errored" >&2; exit 1; }
+                echo "PASS: skill load round-trip"
+              fi

@@ -89,6 +89,22 @@ function wantsDiagnose(userText) {
   return /diagnose/i.test(userText);
 }
 
+function wantedSkill(userText) {
+  const m = /use the `?([a-zA-Z0-9_-]+)`? skill/i.exec(userText);
+  return m?.[1];
+}
+
+function findLoadSkillTool(tools) {
+  return (tools ?? []).find((t) => t?.type === 'function' && t.function?.name === 'load_skill')?.function.name;
+}
+
+// summarizeSkill mirrors mockmodel: quote the loaded body so a live check can
+// assert the skill round-tripped through load_skill into the prompt.
+function summarizeSkill(body) {
+  const compact = String(body).replace(/\s+/g, ' ').trim().slice(0, 800);
+  return `Loaded the skill. Following its procedure: ${compact}`;
+}
+
 // Every user message BEFORE the latest one — i.e. what conversation-history
 // replay put back into the prompt (mirrors mockmodel's recall probe).
 function priorUserTexts(messages) {
@@ -149,11 +165,19 @@ function decide(body) {
   const tools = Array.isArray(body.tools) ? body.tools : [];
   const toolResult = latestToolResult(messages);
   if (toolResult !== undefined) {
+    // load_skill results carry the "Skill <name> (published by …" framing.
+    if (/^"?Skill /.test(String(toolResult))) {
+      return { kind: 'text', text: summarizeSkill(toolResult), finish: 'stop' };
+    }
     return { kind: 'text', text: summarizeToolResult(toolResult), finish: 'stop' };
   }
   const userText = latestUserText(messages);
   if (wantsRecall(userText)) {
     return { kind: 'text', text: recallReply(priorUserTexts(messages)), finish: 'stop' };
+  }
+  const skillName = wantedSkill(userText);
+  if (skillName && findLoadSkillTool(tools)) {
+    return { kind: 'tool', toolName: 'load_skill', toolArgs: JSON.stringify({ skill: skillName }), finish: 'tool_calls' };
   }
   const diagnoseTool = wantsDiagnose(userText) ? findDiagnoseTool(tools) : undefined;
   if (diagnoseTool) {

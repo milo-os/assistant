@@ -12,8 +12,9 @@ platform works:
 1. **Providers register services in the catalog.** A service that wants
    to be part of Patch publishes its agent capabilities alongside its
    catalog registration: what the service is, what an assistant should
-   know about it, and which of its tools the assistant may call
-   (a reviewed allow-list — never the whole API).
+   know about it, which of its tools the assistant may call (a reviewed
+   allow-list — never the whole API), and which skills — reviewed,
+   step-by-step procedures — it may follow.
 2. **Entitlements decide who gets what.** When a customer's project is
    entitled to a service, that service's capabilities appear in the
    project's Patch — automatically. No entitlement, no capability;
@@ -329,10 +330,41 @@ invalid documents with clear errors):
         "endpoint": "http://provider/mcp",
         "toolSelector": { "include": ["streams_list", "pipeline_diagnose"] }
       }]
-    }
+    },
+    "skills": [{
+      "name": "lag-triage",
+      "description": "Step-by-step procedure for triaging pipeline consumer lag",
+      "source": "http://provider/runbooks/lag.md"   // body fetched on demand
+    }]
   }
 }
 ```
+
+### Skills (provider procedures, loaded on demand)
+
+A **skill** is a provider-published, reviewed *procedure* — the middle
+rung between knowledge (facts the assistant reads) and tools (endpoints
+it calls): "run this tool, interpret these fields, check X before
+recommending Y."
+
+Skills use **progressive disclosure**: only each skill's name and
+one-line description enter the system prompt (under "Available
+skills"), so a provider can publish many skills at near-zero prompt
+cost. When a request matches, the model calls the built-in
+**`load_skill`** tool, which fetches the body from `source` (5s
+timeout, 64KiB cap, same degrade-gracefully posture as knowledge) and
+returns it framed with provenance.
+
+Security posture: a skill is provider content the model may *follow* —
+which is exactly why it goes through the platform's review gate
+(catalog-published, versioned configurations) before any customer's
+assistant sees it. A skill never grants privileges: it can only direct
+the model toward tools that are independently on the enforced
+allow-list, and the platform prompt scopes it to that provider's
+services. Loading a skill is not a provider tool invocation — no
+`tool-invocations` billing event fires; the tokens it adds are billed
+as input like the rest of the prompt. Executable skill bundles
+(scripts) are deliberately unsupported.
 
 ### Capability provider API (published contract, v1)
 

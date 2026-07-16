@@ -371,6 +371,30 @@ async function main() {
     record('6', 'fresh context has no memory (negative control)', noMemory, freshText.slice(0, 160));
   }
 
+  // ---- Item 7: skills (progressive disclosure via load_skill) ---------------
+  // The fixture publishes the streamco lag-triage skill. Asking to use it makes
+  // the mock model call the built-in load_skill tool; the reply quotes the
+  // fetched body. Loading a skill is NOT a provider tool invocation, so the
+  // sink's tool-invocations count must not grow.
+  {
+    const invBefore = (await fetch(`${SINK_URL}/events`).then((r) => r.json()).catch(() => []))
+      .filter((e) => e?.type === 'assistant.miloapis.com/conversation/tool-invocations').length;
+    const skillTurn = await readStream(a2aEndpoint, userMessage('Use the streaming-streamco-example__lag-triage skill'), { token: GOOD_TOKEN });
+    writeFileSync(join(OUT_DIR, 'skill-turn.json'), JSON.stringify(skillTurn.events, null, 2));
+    const skillText = harvestText(skillTurn.events).join(' ');
+    const loaded =
+      skillText.includes('Following its procedure') &&
+      skillText.includes('Pipeline consumer lag') && // actual runbook body content
+      !skillText.includes('unknown skill') &&
+      !skillText.includes('temporarily unavailable');
+    record('7', 'skill turn loads and follows the skill (load_skill round-trip, body content present)',
+      loaded, skillText.slice(0, 200));
+    const invAfter = (await fetch(`${SINK_URL}/events`).then((r) => r.json()).catch(() => []))
+      .filter((e) => e?.type === 'assistant.miloapis.com/conversation/tool-invocations').length;
+    record('7', 'load_skill does not meter as a provider tool invocation',
+      invAfter === invBefore, `tool-invocation events before=${invBefore} after=${invAfter}`);
+  }
+
   // ---- Summary --------------------------------------------------------------
   const requiredFails = results.filter((r) => r.required && !r.ok);
   const summary = {

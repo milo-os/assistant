@@ -17,7 +17,14 @@
         "mcpServers": [
           { "name": "streamco", "endpoint": "http://127.0.0.1:7810/mcp", "toolSelector": { "include": ["streams_list", "pipeline_diagnose"] } }
         ]
-      }
+      },
+      "skills": [
+        {
+          "name": "lag-triage",
+          "description": "Step-by-step procedure for triaging pipeline consumer lag",
+          "source": "http://127.0.0.1:7810/runbooks/lag.md"
+        }
+      ]
     }
   }
 ]

@@ -32,6 +32,13 @@
           }
         ]
       },
+      "skills": [
+        {
+          "name": "lag-triage",
+          "description": "Step-by-step procedure for triaging pipeline consumer lag",
+          "source": "http://streamco.patch-playground.svc.cluster.local:7810/runbooks/lag.md"
+        }
+      ],
       "authority": {
         "reads": [{ "gvk": { "group": "streaming.streamco.example", "kind": "*" } }],
         "maxTaskDurationSeconds": 60

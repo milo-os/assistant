@@ -7,9 +7,13 @@
       "namespace": "demo-project"
     },
     "spec": {
-      "serviceRef": { "name": "streaming-streamco-example" },
+      "serviceRef": {
+        "name": "streaming-streamco-example"
+      },
       "serviceName": "streaming.streamco.example",
-      "serviceAgentRef": { "name": "streamco-streaming-agent" },
+      "serviceAgentRef": {
+        "name": "streamco-streaming-agent"
+      },
       "configurationVersion": "v1",
       "knowledge": {
         "sources": [
@@ -26,11 +30,17 @@
         ],
         "concepts": [
           {
-            "gvk": { "group": "streaming.streamco.example", "kind": "Stream" },
+            "gvk": {
+              "group": "streaming.streamco.example",
+              "kind": "Stream"
+            },
             "summary": "A named, partitioned event stream ingesting records at some rate (rps); degraded streams report a non-zero lagSeconds."
           },
           {
-            "gvk": { "group": "streaming.streamco.example", "kind": "Pipeline" },
+            "gvk": {
+              "group": "streaming.streamco.example",
+              "kind": "Pipeline"
+            },
             "summary": "A processing pipeline that consumes one or more Streams through a consumer group; Pipelines are the unit of diagnosis (e.g. p-1 vod-transcode)."
           }
         ]
@@ -40,18 +50,44 @@
           {
             "name": "streamco",
             "endpoint": "http://127.0.0.1:7810/mcp",
-            "toolSelector": { "include": ["streams_list", "streams_get", "pipeline_diagnose"] },
+            "toolSelector": {
+              "include": [
+                "streams_list",
+                "streams_get",
+                "pipeline_diagnose"
+              ]
+            },
             "mutating": []
           }
         ]
       },
       "authority": {
-        "reads": [{ "gvk": { "group": "streaming.streamco.example", "kind": "*" } }],
+        "reads": [
+          {
+            "gvk": {
+              "group": "streaming.streamco.example",
+              "kind": "*"
+            }
+          }
+        ],
         "maxTaskDurationSeconds": 60
-      }
+      },
+      "skills": [
+        {
+          "name": "lag-triage",
+          "description": "Step-by-step procedure for triaging pipeline consumer lag",
+          "source": "http://127.0.0.1:7810/runbooks/lag.md"
+        }
+      ]
     },
     "status": {
-      "conditions": [{ "type": "Ready", "status": "True", "reason": "AllAgentGatesOpen" }]
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "AllAgentGatesOpen"
+        }
+      ]
     }
   }
 ]
