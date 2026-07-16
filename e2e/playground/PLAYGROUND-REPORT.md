@@ -46,7 +46,7 @@ the contention; these proofs proceeded against the live env meanwhile.
 
 | Proof | Status |
 | --- | --- |
-| P1 — bring-up idempotent + preflight-gated | **PROVEN** for the catalog-preserving invocation (clean no-op); **plain BASE re-run over an overlaid env is an open defect** (see below) |
+| P1 — bring-up idempotent + preflight-gated | **PROVEN** — catalog-preserving re-run is a true no-op; plain-BASE-over-overlay now **refuses** by design (the crash I first hit was a real bug, fixed + both forms verified live) |
 | P2 — host chat through the gateway | **PROVEN** (3/3) |
 | P3 — live reconfiguration (v1→v2→unpublish) | **PROVEN** (6/6, behavioral) |
 | P4 — gateway token attribution + reconciliation | **PROVEN** (4/4, exact) |
@@ -162,34 +162,47 @@ cross-namespace footprint.
 
 ---
 
-## P1 — bring-up idempotent + preflight-gated — **PROVEN (catalog-preserving) + one open defect**
+## P1 — bring-up idempotent + preflight-gated — **PROVEN (both forms, live)**
 
 **Preflight gate — proven present.** `up.sh` runs a resource preflight and aborts
 if node memory requests exceed 80%: `node memory requests committed: 43%`.
 
-**Idempotency — PROVEN for the catalog-preserving invocation.** The env is
-persistent + catalog-wired, so the correct re-run is the invocation pg-infra
-prescribes, which re-asserts the SAME adapter env without churning the overlay:
+**(a) Idempotency — PROVEN (catalog-preserving re-run is a true no-op).** The env
+is persistent + catalog-wired, so the correct re-run re-asserts the SAME adapter
+env without churning the overlay:
 
 ```
 CATALOG_UP_CMD=skip playground-up.sh --with-catalog --skip-build
-```
 
-Result — a clean no-op:
-```
+✓ node memory requests committed: 43%          (preflight ran)
 ✓ assistant now sources capabilities from …capability-provider… (fixture unset)
 ▶ Playground is UP (BASE + CATALOG overlay tier)
-✓ assistant reachable on :1986 (HTTP 200 /healthz)
-labeled footprint: 25 objects before == 25 after (IDENTICAL); assistant pod
-  unchanged (no roll, exit 0).
+P1(already-up rerun): rc=0 preflight=1 reports-UP=1 footprint-unchanged=1
 ```
+Labeled footprint identical before/after; assistant Deployment `generation`
+unchanged (gen 6 → 6, no roll) — a true no-op.
 
-**Open defect (real bug found — fix owed by pg-infra).** A *plain* BASE
-`playground-up.sh --skip-build` (no `--with-catalog`) run on an env that HAD the
-catalog wired re-renders the assistant from the fixture-mode BASE manifest,
-re-adding `CAPABILITY_DOCS_FIXTURE` **without** clearing the
-`CAPABILITY_PROVIDER_URL` the catalog flip set. They are mutually exclusive, so
-the new pod crashes on startup:
+**(b) Mode-switch guard — PROVEN (plain BASE over the overlay refuses cleanly).**
+
+```
+$ playground-up.sh --skip-build            # over the adapter-mode env
+REFUSING: the live assistant is in CATALOG/adapter mode (CAPABILITY_PROVIDER_URL is set).
+A plain BASE run would revert it to the fixture source and break the overlay wiring.
+  • keep overlay mode:  re-run with --with-catalog  (add CATALOG_UP_CMD=skip if the overlay is already up)
+  • force BASE (revert to fixture):  FORCE_BASE=1 …/playground-up.sh --skip-build
+$ echo $?
+1
+```
+Exit 1, refused **before** touching the Deployment (assistant pod unchanged, gen
+6, adapter-only env). `FORCE_BASE=1` is the documented deliberate mode switch.
+
+### Incident + fix narrative (honesty over green)
+
+The *first* P1 re-run I attempted surfaced a **real idempotency bug**: a plain
+BASE `up.sh --skip-build` on an env that had been flipped to `--with-catalog`
+re-rendered the assistant from the fixture-mode BASE manifest, re-adding
+`CAPABILITY_DOCS_FIXTURE` **without** clearing the `CAPABILITY_PROVIDER_URL` the
+catalog flip set — mutually exclusive, so the new pod crashed:
 
 ```
 Invalid configuration:
@@ -197,35 +210,13 @@ Invalid configuration:
     are mutually exclusive — set at most one capability source
 ```
 
-The already-Running (adapter-mode) pod kept serving via RollingUpdate, so the
-env stayed up, but the Deployment was left in a stuck rolling state. Recovered
-with `kubectl rollout undo deploy/assistant` (team-lead authorized).
-
-**FIXED by pg-infra** (commits `4e05e43` + `74d5e0c`), re-verified by QA:
-1. *Deterministic capability source* — `70-assistant.tmpl.yaml` now omits BOTH
-   capability envs and sets exactly one via `kubectl set env`, so `kubectl
-   apply`'s 3-way merge can never keep a stray `CAPABILITY_PROVIDER_URL` from a
-   prior flip.
-2. *Mode guard* — a plain BASE `up.sh` over a live env in CATALOG/adapter mode
-   now **REFUSES** ("keep overlay: --with-catalog … / force: FORCE_BASE=1")
-   instead of silently reverting the wiring a running P3 depends on. The guard
-   sits *before* the assistant manifest render/apply, so it aborts without
-   touching the Deployment.
-
-QA re-verification (code-level + behavioral): the guard is present and sits
-*before* the assistant manifest render/apply (`playground-up.sh` line ~295, ahead
-of the `70-assistant` render at ~307), so it aborts without touching the
-Deployment. A live plain-BASE run left the adapter-mode assistant pod completely
-untouched (same pod, 0 restarts, adapter-only env, `/healthz` 200, overlay
-binding still `1.0.0`). The run did **not** reach the printed REFUSE banner
-because up.sh's *pre-guard* step re-asserts the shared Envoy Gateway operator and
-waits for its rollout — and that operator was independently CrashLoopBackOff
-(9 restarts, pod 63m old, predating this run) under the same VM contention that
-flaps the control plane. up.sh hung on that wait and was killed; the playground
-data plane was unaffected throughout (a chat during the hang still returned
-`CONSUMER_LAG` findings through the gateway). Net: the fix is verified at the
-code level and the assistant is provably protected; a clean end-to-end plain-BASE
-REFUSE capture is gated on the shared cluster's control plane settling.
+The already-Running adapter-mode pod kept serving via RollingUpdate, so the env
+stayed up; the Deployment was left mid-roll. Recovered with `kubectl rollout undo
+deploy/assistant` (team-lead authorized). **Fixed by pg-infra** (`4e05e43`
+deterministic source — the manifest declares neither env, `up.sh` sets exactly
+one per mode via `kubectl set env`; `74d5e0c` the mode-switch guard above; plus
+CP-flap-tolerant rollout waits that fall back to the `Available` condition).
+Both fixes are verified live by (a) and (b). My finding drove the fix.
 
 ## P3 — live reconfiguration — **PROVEN (6/6, behavioral)**
 
