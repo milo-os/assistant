@@ -55,7 +55,7 @@ the contention; these proofs proceeded against the live env meanwhile.
 | P7-assistant — go vet + go test | **PROVEN** |
 | P7-catalog — envtest | **PROVEN** |
 | P8 — BASE playground-down --dry-run == labeled footprint | **PROVEN** (26/26 exact, no teardown) |
-| P8-overlay — catalog-down --dry-run scoped to the overlay | **NOT PROVEN** — the overlay teardown over-reaches into the BASE namespace (see below) |
+| P8-overlay — catalog-down --dry-run scoped to the overlay | **PROVEN** (18/18, BASE ns excluded — after the fix I drove) |
 
 ## How to reproduce
 
@@ -163,38 +163,29 @@ cross-namespace footprint.
 
 ---
 
-## P8-overlay — catalog-down --dry-run — **NOT PROVEN (cross-tier teardown bug found)**
+## P8-overlay — catalog-down --dry-run — **PROVEN (after a cross-tier teardown bug found + fixed)**
 
-`catalog-down.sh --dry-run` (service-catalog-playground) is read-only and lists
-19 resources — the overlay's CRDs, cluster roles/bindings, webhooks, demo CRs,
-and `namespace/agent-framework-playground`. **But it also lists
-`namespace/patch-playground` — the BASE namespace, which is foreign to the
-overlay.** That is not cosmetic: `catalog-down.sh` deletes namespaces *by label*
+`catalog-down.sh --dry-run` (service-catalog-playground; read-only, kubectl get
+by label + by name, no deletes) now lists **exactly 18** overlay resources:
+`namespace/agent-framework-playground`, 7 CRDs, 2 clusterroles + 2
+clusterrolebindings, validating + mutating webhookconfigurations, and 4 demo CRs
+(service, serviceagent, serviceagentconfiguration-v1, serviceentitlement — the
+projected agentbinding is reclaimed via CRD delete, not swept). No foreign
+resource; `namespace/patch-playground` (BASE) is **not** a delete target (it
+appears only in an explicit "deliberately excluded" note).
 
-```
-LABEL="app.kubernetes.io/part-of=agent-framework-playground"
-kubectl delete namespace -l "${LABEL}" --ignore-not-found --wait=true   # line 73
-```
-
-and **both** namespaces carry that label:
-
-```
-NAME                         PART-OF
-patch-playground             agent-framework-playground     ← BASE
-agent-framework-playground   agent-framework-playground     ← overlay
-```
-
-So a real `catalog-down.sh` (overlay teardown) would delete `namespace/patch-playground`
-too, tearing down the **entire BASE playground** (assistant, gateway, sink,
-StreamCo, stub-LLM) — not just the overlay. The two tiers are meant to be
-independently usable/removable; this teardown is not isolated. (The BASE
-`playground-down.sh` is fine — it deletes `patch-playground` *by name*, not by
-the shared label, so it never touches the overlay.)
-
-**Fix owed (catalog-engineer):** scope `catalog-down.sh`'s namespace deletion to
-`agent-framework-playground` by name (or add a tier-distinguishing label), so the
-overlay teardown can't reap the BASE namespace. Verified DRY-RUN ONLY — nothing
-was deleted.
+**The bug this proof first caught (now fixed).** The initial `--dry-run` listed
+**19** resources, including `namespace/patch-playground` — the BASE namespace —
+because `catalog-down.sh` deleted namespaces *by label*
+(`kubectl delete namespace -l part-of=agent-framework-playground`), and BOTH the
+BASE and overlay namespaces carry that program-wide label. A real
+`catalog-down.sh` would therefore have deleted the BASE namespace too, tearing
+down the **entire BASE playground** — the tiers are meant to be independently
+removable. (BASE `playground-down.sh` was always fine: it deletes
+`patch-playground` *by name*, not by the shared label.) Fixed by catalog-engineer
+(`adfbdd3`): the overlay teardown now targets the overlay namespace + singleton
+cluster-scoped infra BY NAME and uses the label only for instances of its OWN
+CRDs (which BASE cannot have). Re-verified: 18/clean, BASE namespace excluded.
 
 ## P1 — bring-up idempotent + preflight-gated — **PROVEN (both forms, live)**
 
