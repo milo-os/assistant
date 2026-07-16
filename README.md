@@ -1,27 +1,56 @@
 # Patch — Assistant Service
 
-**Patch** is Datum Cloud's AI operator: a conversational agent that
-answers questions and diagnoses problems using the live capabilities of
-the services a customer is entitled to. This repository is Patch's
-runtime — a standalone Go backend (catalog service
-`assistant.miloapis.com`) that any consumer reaches over an open
-protocol: the Cloud Portal, the bundled `patch` CLI, or any other agent.
+**Patch** is the Datum Cloud assistant: ask it about your project in
+plain language — "why is my pipeline lagging?" — and it answers using
+the real state of your services, running their own diagnostic tools and
+explaining what it finds.
 
-What it does:
+Patch is itself a service in the **Milo service catalog**
+(`assistant.miloapis.com`), and it works the way everything on the
+platform works:
 
-- Speaks the **A2A (Agent2Agent) protocol v1.0** over JSON-RPC 2.0 on
-  the official [`a2a-go`](https://github.com/a2aproject/a2a-go) library
-  — consumers integrate against a standard, not a Datum API.
-- Composes each project's entitled provider capabilities — knowledge
-  and MCP tools — per conversation from **capability documents**, a
-  schema this service owns and publishes. Providers plug in without the
-  assistant redeploying.
-- Holds **durable, project-scoped conversation memory**: follow-up
-  messages in the same context are answered with the prior exchange in
-  the prompt, backed by Postgres.
-- Meters every model call and provider tool invocation as CloudEvents
-  on the Milo billing wire, aggregated across all agentic steps with
-  full cache-token detail — designed to be gateway-verifiable.
+1. **Providers register services in the catalog.** A service that wants
+   to be part of Patch publishes its agent capabilities alongside its
+   catalog registration: what the service is, what an assistant should
+   know about it, and which of its tools the assistant may call
+   (a reviewed allow-list — never the whole API).
+2. **Entitlements decide who gets what.** When a customer's project is
+   entitled to a service, that service's capabilities appear in the
+   project's Patch — automatically. No entitlement, no capability;
+   revoke it and the next conversation turn no longer has it.
+3. **Every conversation is composed per project.** Patch assembles the
+   knowledge and tools of exactly the services *your* project is
+   entitled to, remembers your conversation (durably, scoped to the
+   project), and does the work.
+4. **Usage is metered like any other catalog service.** Every model
+   call and every provider tool invocation lands on the platform's
+   billing pipeline, attributed to the project and conversation — the
+   same metrics-to-billing path the rest of the catalog uses.
+
+Who gets what out of it:
+
+| Audience | What Patch gives them |
+|---|---|
+| Customers / developers | An operator that can *do things* with their services — diagnose, inspect, explain — across every service their project is entitled to. |
+| Service providers | A distribution channel: publish knowledge + tools once through the catalog, reach every entitled customer's assistant. |
+| The platform | Usage-based bill-back, model-vendor independence, and one enforced boundary for what agents may touch. |
+
+This repository is Patch's runtime: a standalone Go backend that any
+consumer talks to over open standards — the Cloud Portal, the bundled
+`patch` CLI, or any other agent. **A2A** (Agent2Agent) is the protocol
+consumers use to chat with Patch; **MCP** (Model Context Protocol) is
+how Patch calls provider tools; **capability documents** are the small
+JSON contract through which the catalog (or anything else) tells Patch
+what a project is entitled to. Nothing here is a proprietary Datum API,
+and the assistant runs standalone — the catalog is one producer of its
+configuration, not a dependency.
+
+The deeper platform design (CRDs, entitlement projection, the AI
+gateway data plane) lives in the
+[AI Agent Framework enhancement](https://github.com/datum-cloud/enhancements/tree/main/enhancements/platform/ai-agent-framework)
+and [`docs/product-architecture.md`](docs/product-architecture.md).
+Everything below is the service reference: how to run it, its API, and
+how to operate it.
 
 ## Quickstart
 
@@ -257,11 +286,16 @@ good".
 
 ## Capability documents (provider capabilities)
 
-A **capability document** describes one provider service's contribution
-to the assistant: its MCP endpoint(s), the reviewed tool allow-list, and
-its knowledge sources. The document schema is **owned by this service**
-(`internal/capability`) — there is no Milo/catalog client code in the
-data path. Given a project's documents, composition produces:
+A **capability document** is how a provider service's contribution
+reaches Patch: its tool endpoint(s), the reviewed tool allow-list, and
+its knowledge sources. In the platform, these documents are produced by
+the **service catalog** — a provider registers agent capabilities with
+its service, and entitlement decides which projects receive them. The
+document schema itself is **owned and published by this service**
+(`internal/capability`), so the catalog conforms to Patch's contract
+(never the reverse), and any other producer — a fixture file in dev, a
+different control plane — can feed it the same way. Given a project's
+documents, composition produces:
 
 - **Knowledge** — each document's knowledge sources fetched over HTTP
   (short timeout, per-source byte cap) and rendered under a provenance
