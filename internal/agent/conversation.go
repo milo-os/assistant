@@ -10,6 +10,7 @@ import (
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/capability"
+	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/usage"
 )
 
@@ -22,6 +23,12 @@ const AgentAttributionName = "patch"
 // always sent 4096; agentcore itself imposes no default (0 defers to the
 // provider), so this service-level policy lives here.
 const DefaultMaxOutputTokens = 4096
+
+// DefaultHistoryTokenBudget caps the estimated tokens of replayed history per
+// turn when [Deps].HistoryTokenBudget is unset. Replayed turns are billed
+// input tokens on every subsequent request, so an unbounded conversation
+// would grow cost quadratically; oldest turns are dropped first.
+const DefaultHistoryTokenBudget = 6000
 
 // State is the terminal state of a conversation task.
 type State string
@@ -47,9 +54,15 @@ type Deps struct {
 	Emitter *usage.Emitter
 	// HTTPClient fetches provider knowledge. Nil uses the default client.
 	HTTPClient *http.Client
+	// History replays and records conversation turns per (project, contextId),
+	// making follow-up messages in the same A2A context conversational. Nil
+	// disables memory: every turn is answered standalone.
+	History history.Store
 	// StepLimit and MaxOutputTokens override the loop defaults when > 0.
-	StepLimit       int
-	MaxOutputTokens int
+	// HistoryTokenBudget overrides DefaultHistoryTokenBudget when > 0.
+	StepLimit          int
+	MaxOutputTokens    int
+	HistoryTokenBudget int
 	// Logger receives orchestration logs. Nil discards them.
 	Logger *slog.Logger
 }
@@ -150,10 +163,12 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = DefaultMaxOutputTokens
 	}
+	messages := append(history.Messages(c.loadHistory(ctx, params)),
+		agentcore.UserMessage(params.UserText))
 	inner := agentcore.Run(ctx, agentcore.LoopOptions{
 		Model:           c.deps.Model,
 		System:          BuildSystemPrompt(composed.SystemPromptAddendum),
-		Messages:        []agentcore.Message{agentcore.UserMessage(params.UserText)},
+		Messages:        messages,
 		Tools:           composed.Tools,
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
@@ -170,6 +185,26 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		invMu:       &mu,
 		state:       StateCompleted,
 	}
+}
+
+// loadHistory returns the conversation's prior turns, truncated to the token
+// budget. Any store failure degrades to an empty memory (the turn is still
+// answered) rather than failing the chat.
+func (c *Conversation) loadHistory(ctx context.Context, params Params) []history.Turn {
+	if c.deps.History == nil || params.ContextID == "" {
+		return nil
+	}
+	turns, err := c.deps.History.Turns(ctx, params.ProjectName, params.ContextID)
+	if err != nil {
+		c.logger.Warn("agent.history.load_failed",
+			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
+		return nil
+	}
+	budget := c.deps.HistoryTokenBudget
+	if budget <= 0 {
+		budget = DefaultHistoryTokenBudget
+	}
+	return history.Truncate(turns, budget)
 }
 
 // loadDocuments fetches the project's capability documents, degrading to none
@@ -292,6 +327,8 @@ func (s *Stream) finalize() {
 	// best-effort, and must not be skipped just because the run was aborted.
 	res := s.conv.deps.Emitter.Emit(context.WithoutCancel(s.ctx), events)
 
+	s.recordHistory()
+
 	s.result = &Result{
 		State:       s.state,
 		Text:        s.text.String(),
@@ -306,6 +343,27 @@ func (s *Stream) finalize() {
 			ToolInvocationEventCount: len(*s.invocations),
 			Emitted:                  res.OK && !res.Noop,
 		},
+	}
+}
+
+// recordHistory appends the finished exchange to conversation memory. Only a
+// completed turn with an actual answer is worth remembering: a failed or
+// canceled run produced nothing the user saw as an answer, and recording it
+// would replay a half-exchange into every later prompt.
+func (s *Stream) recordHistory() {
+	store := s.conv.deps.History
+	if store == nil || s.params.ContextID == "" || s.state != StateCompleted {
+		return
+	}
+	answer := s.text.String()
+	if answer == "" {
+		return
+	}
+	err := store.Append(context.WithoutCancel(s.ctx), s.params.ProjectName, s.params.ContextID,
+		history.Turn{UserText: s.params.UserText, AssistantText: answer})
+	if err != nil {
+		s.conv.logger.Warn("agent.history.append_failed",
+			"projectName", s.params.ProjectName, "contextId", s.params.ContextID, "error", err.Error())
 	}
 }
 

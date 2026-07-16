@@ -445,6 +445,31 @@ resources into this shape (rewriting MCP `endpoint`s to the gateway
 MCPRoute URL). Because the assistant owns the schema, the adapter is
 written against **this** contract, not the other way around.
 
+## Conversation memory (multi-turn chat)
+
+A2A groups related turns under a **`contextId`**: send a follow-up
+message carrying the `contextId` from an earlier response and the service
+treats it as the same conversation — the prior turns are **replayed into
+the model prompt**, so "what about the second one?" works. A message
+without a `contextId` starts a fresh conversation (the service assigns
+one, visible on every streamed event).
+
+Semantics:
+
+- **What is remembered**: the user's text and the assistant's final
+  answer per completed turn. Tool transcripts are not replayed; failed
+  or canceled turns are not recorded.
+- **Scope**: history is keyed by **(project, contextId)** — the project
+  is the authorization boundary, so a guessed `contextId` from another
+  project inherits nothing.
+- **Truncation**: replayed history is capped by an estimated token
+  budget (default 6000; oldest turns drop first, whole turns at a time),
+  bounding the input-token cost of long conversations. Replayed tokens
+  are real input tokens and are metered as such.
+- **Durability**: in-memory — history lives for the service process
+  lifetime. A durable conversation store (and with it, conversation
+  listing for consumers like the portal) is a documented follow-up.
+
 ## Metering
 
 Usage is emitted as CloudEvents to `<USAGE_GATEWAY_URL>/cloudevents` (a
@@ -478,6 +503,9 @@ export PATCH_TOKEN=dev-token
 ./patch card                                          # fetch + print the agent card
 ./patch chat "Diagnose pipeline p-1 for StreamCo" \
   --project demo-project                              # stream a reply
+./patch chat -i --project demo-project                # interactive multi-turn session
+./patch chat "and the second finding?" \
+  --project demo-project --context-id <c>             # continue a conversation
 ./patch task get <taskId>
 ./patch task cancel <taskId>
 ```
@@ -492,6 +520,12 @@ Behaviour:
   **0** on completed, **1** on a failed/canceled task or transport error,
   **2** on a usage error. `--json` emits the raw A2A events (one JSON
   object per line) to stdout instead.
+  A one-shot chat prints `context: <id>` to stderr — pass it back with
+  `--context-id` to continue that conversation with memory.
+- **`patch chat -i --project <p>`** — interactive session (REPL): each
+  line is a turn, the conversation id is threaded automatically, so the
+  whole session shares memory. `Ctrl-D` or `/quit` to leave. An optional
+  positional message is sent as the first turn.
 - **`patch task get|cancel <id>`** — the corresponding A2A methods.
 - Auth/transport failures print a clear `patch: …` message to stderr and
   exit non-zero (401 → "unauthorized", 403 → "forbidden").
@@ -557,6 +591,11 @@ against the pre-port golden — see `e2e/E2E-REPORT.md`.
 - **Agent card signing** — the card is currently unsigned.
 - **Durable task store** — the in-memory task store is behind an
   interface; swap for a persistent backend (tasks are lost on restart).
+- **Durable conversation store** — conversation history (see
+  "Conversation memory") is in-memory behind the `history.Store`
+  interface; the durable design under evaluation is Conversation as a
+  KRM resource (aggregated apiserver) with messages in Postgres behind a
+  subresource, which also gives consumers a conversation list.
 - **SSRF hardening** — knowledge fetches trust operator-reviewed document
   URLs; add an egress allow-list at the gateway for production.
 ```

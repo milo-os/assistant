@@ -10,7 +10,8 @@
 // Grammar:
 //
 //	patch card [--json]
-//	patch chat "<message>" --project <p> [--json]
+//	patch chat "<message>" --project <p> [--context-id <c>] [--json]
+//	patch chat -i --project <p> [--context-id <c>]
 //	patch task get <id> [--json]
 //	patch task cancel <id> [--json]
 //
@@ -42,8 +43,10 @@ type command struct {
 	token string
 
 	// chat
-	message string
-	project string
+	message     string
+	project     string
+	contextID   string
+	interactive bool
 
 	// task get / cancel
 	id string
@@ -72,15 +75,19 @@ func parseArgs(argv []string) command {
 		return common
 
 	case "chat":
-		if len(rest) == 0 || rest[0] == "" {
-			return command{kind: cmdError, errMsg: "chat: missing message argument"}
+		if !flags.interactive && (len(rest) == 0 || rest[0] == "") {
+			return command{kind: cmdError, errMsg: "chat: missing message argument (or use --interactive)"}
 		}
 		if flags.project == "" {
 			return command{kind: cmdError, errMsg: "chat: --project <name> is required"}
 		}
 		common.kind = cmdChat
-		common.message = rest[0]
+		if len(rest) > 0 {
+			common.message = rest[0]
+		}
 		common.project = flags.project
+		common.contextID = flags.contextID
+		common.interactive = flags.interactive
 		return common
 
 	case "task":
@@ -114,9 +121,11 @@ func parseArgs(argv []string) command {
 type flags struct {
 	json        bool
 	help        bool
+	interactive bool
 	url         string
 	token       string
 	project     string
+	contextID   string
 	positionals []string
 }
 
@@ -132,6 +141,8 @@ func extractFlags(argv []string) (flags, string) {
 			f.json = true
 		case arg == "--help" || arg == "-h":
 			f.help = true
+		case arg == "--interactive" || arg == "-i":
+			f.interactive = true
 		case arg == "--url" || strings.HasPrefix(arg, "--url="):
 			val, consumed, ok := valueFor(arg, argv, i)
 			if !ok {
@@ -156,6 +167,15 @@ func extractFlags(argv []string) (flags, string) {
 				return f, "--project requires a value"
 			}
 			f.project = val
+			if consumed {
+				i++
+			}
+		case arg == "--context-id" || strings.HasPrefix(arg, "--context-id="):
+			val, consumed, ok := valueFor(arg, argv, i)
+			if !ok {
+				return f, "--context-id requires a value"
+			}
+			f.contextID = val
 			if consumed {
 				i++
 			}
@@ -189,16 +209,21 @@ const usage = `patch — Datum Cloud assistant (A2A) CLI
 
 Usage:
   patch card [--json]
-  patch chat "<message>" --project <name> [--json]
+  patch chat "<message>" --project <name> [--context-id <c>] [--json]
+  patch chat -i --project <name> [--context-id <c>]
   patch task get <id> [--json]
   patch task cancel <id> [--json]
 
 Options:
-  --project <name>   Milo project the task runs against (chat)
-  --url <url>        Service base URL (overrides PATCH_URL)
-  --token <token>    Bearer token (overrides PATCH_TOKEN)
-  --json             Emit raw JSON (events for chat, objects otherwise)
-  -h, --help         Show this help
+  --project <name>    Milo project the task runs against (chat)
+  --context-id <c>    Continue an existing conversation (chat); the service
+                      replays that conversation's history into the turn
+  -i, --interactive   Multi-turn chat session; the conversation id is kept
+                      across turns (Ctrl-D or /quit to leave)
+  --url <url>         Service base URL (overrides PATCH_URL)
+  --token <token>     Bearer token (overrides PATCH_TOKEN)
+  --json              Emit raw JSON (events for chat, objects otherwise)
+  -h, --help          Show this help
 
 Environment:
   PATCH_URL          Service base URL, e.g. http://localhost:7820
@@ -207,5 +232,6 @@ Environment:
 Examples:
   PATCH_URL=http://localhost:7820 PATCH_TOKEN=dev-token \
     patch chat "Diagnose pipeline p-1 for StreamCo" --project demo-project
+  patch chat -i --project demo-project
   patch card --url http://localhost:7820
 `

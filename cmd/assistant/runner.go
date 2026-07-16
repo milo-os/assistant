@@ -10,6 +10,7 @@ import (
 	"github.com/milo-os/assistant/internal/agent"
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/config"
+	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/usage"
 )
 
@@ -48,11 +49,16 @@ func newAgentRunner(cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRun
 	// StepLimit and MaxOutputTokens are left at zero: the agent layer applies
 	// the TS-parity defaults (step limit 8, MaxOutputTokens 4096) — that policy
 	// lives in internal/agent, where the TS agent/loop.ts had it.
+	// Conversation memory: in-process for now (history survives for the
+	// service's lifetime; durability is the conversation-store slice). A
+	// follow-up message with the same A2A contextId gets the prior turns
+	// replayed into its prompt.
 	conv := agent.New(agent.Deps{
 		Model:     model,
 		ModelMode: string(cfg.Model.Mode),
 		Source:    source,
 		Emitter:   emitter,
+		History:   history.NewMemoryStore(),
 		Logger:    log,
 	})
 	return conversationRunner{conv: conv}, nil

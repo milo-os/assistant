@@ -35,11 +35,12 @@ func newClient(ctx context.Context, baseURL, token string) (*a2aclient.Client, e
 
 // buildMessage builds the user message for a chat request: a single text part
 // plus the projectName metadata extension the service uses to select the Milo
-// project. The extension is set on both the message and the request params so
-// either read path resolves it.
-func buildMessage(text, project string) *a2a.Message {
+// project. A non-empty contextID continues that conversation — the service
+// replays its history into the turn's prompt.
+func buildMessage(text, project, contextID string) *a2a.Message {
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(text))
 	msg.SetMeta("projectName", project)
+	msg.ContextID = contextID
 	return msg
 }
 

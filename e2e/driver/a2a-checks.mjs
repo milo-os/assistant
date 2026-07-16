@@ -57,18 +57,19 @@ async function rpc(endpoint, method, params, { token, accept } = {}) {
   return fetch(endpoint, { method: 'POST', headers, body });
 }
 
-function userMessage(text, { projectName = PROJECT } = {}) {
+function userMessage(text, { projectName = PROJECT, contextId } = {}) {
   // A2A v1.0 (a2a-go) message shape: role is the ROLE_* enum ("ROLE_USER",
   // not "user"), content parts are {text} (no `kind` discriminator), and the
   // Message has no top-level `kind`. projectName rides message.metadata.
-  return {
-    message: {
-      role: 'ROLE_USER',
-      messageId: randomUUID(),
-      parts: [{ text }],
-      metadata: { projectName },
-    },
+  // A contextId continues that conversation (history replay server-side).
+  const message = {
+    role: 'ROLE_USER',
+    messageId: randomUUID(),
+    parts: [{ text }],
+    metadata: { projectName },
   };
+  if (contextId) message.contextId = contextId;
+  return { message };
 }
 
 // Recursively harvest every string under a `text`/`content` key (tolerant to
@@ -339,6 +340,36 @@ async function main() {
     tokenMetersGood.length >= 1,
     `token meter events total=${tokenMeters.length} matching=${tokenMetersGood.length} types=[${[...new Set(tokenMeters.map((e) => e.type))].join(', ')}]`,
   );
+
+  // ---- Item 6: multi-turn conversation memory --------------------------------
+  // Turn 1 states a fact; turn 2 reuses the contextId and asks "what did I
+  // say?" — the mock model answers by quoting the user turns it actually saw
+  // in its prompt, so the quote proves history replay reached the model.
+  {
+    const fact = 'My favorite pipeline is p-77';
+    const turn1 = await readStream(a2aEndpoint, userMessage(fact), { token: GOOD_TOKEN });
+    const convId = [...harvestByKey(turn1.events, 'contextId')][0];
+    record('6', 'turn 1 establishes a conversation (contextId observable)', !!convId, `contextId=${convId}`);
+
+    if (convId) {
+      const turn2 = await readStream(a2aEndpoint, userMessage('what did I say?', { contextId: convId }), { token: GOOD_TOKEN });
+      writeFileSync(join(OUT_DIR, 'multiturn-turn2.json'), JSON.stringify(turn2.events, null, 2));
+      const turn2Text = harvestText(turn2.events).join(' ');
+      const recalled = turn2Text.includes(`"${fact}"`);
+      record('6', 'turn 2 (same contextId) recalls turn 1 — history replayed into the prompt', recalled, recalled ? 'answer quotes turn 1' : `answer did not quote turn 1: ${turn2Text.slice(0, 200)}`);
+      const sameContext = [...harvestByKey(turn2.events, 'contextId')].includes(convId);
+      record('6', 'turn 2 events carry the same contextId', sameContext, `contextIds=${[...harvestByKey(turn2.events, 'contextId')].join(',')}`);
+    } else {
+      record('6', 'turn 2 recalls turn 1', false, 'no contextId from turn 1');
+    }
+
+    // Negative control: the same question in a FRESH context must find no
+    // memory — otherwise the recall check above proves nothing.
+    const freshAsk = await readStream(a2aEndpoint, userMessage('what did I say?'), { token: GOOD_TOKEN });
+    const freshText = harvestText(freshAsk.events).join(' ');
+    const noMemory = freshText.includes('first thing') && !freshText.includes(`"${fact}"`);
+    record('6', 'fresh context has no memory (negative control)', noMemory, freshText.slice(0, 160));
+  }
 
   // ---- Summary --------------------------------------------------------------
   const requiredFails = results.filter((r) => r.required && !r.ok);

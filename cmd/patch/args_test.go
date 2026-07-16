@@ -31,7 +31,7 @@ func TestParseArgs(t *testing.T) {
 		{
 			name: "chat missing message",
 			argv: []string{"chat", "--project", "demo"},
-			want: command{kind: cmdError, errMsg: "chat: missing message argument"},
+			want: command{kind: cmdError, errMsg: "chat: missing message argument (or use --interactive)"},
 		},
 		{
 			name: "chat missing project",

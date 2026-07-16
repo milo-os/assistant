@@ -38,6 +38,7 @@ const ModelID = "patch-mock-v0"
 var Usage = agentcore.Usage{Input: 42, Output: 23}
 
 var (
+	recallRe       = regexp.MustCompile(`(?i)what did i (say|ask)`)
 	diagnoseRe     = regexp.MustCompile(`(?i)diagnose`)
 	pipelineToolRe = regexp.MustCompile(`(?i)pipeline_diagnose`)
 	explicitIDRe   = regexp.MustCompile(`(?i)\bp-[a-z0-9]+\b`)
@@ -67,6 +68,9 @@ func (m *Model) script(req agentcore.Request) []agentcore.StreamPart {
 	}
 
 	userText := latestUserText(req.Messages)
+	if recallRe.MatchString(userText) {
+		return textParts(recallReply(priorUserTexts(req.Messages)))
+	}
 	if diagnoseRe.MatchString(userText) {
 		if name, ok := findDiagnoseTool(req.Tools); ok {
 			return toolCallParts(name, extractPipelineID(userText))
@@ -110,6 +114,35 @@ func latestToolResult(messages []agentcore.Message) (string, bool) {
 	return "", false
 }
 
+// priorUserTexts returns the text of every user message BEFORE the latest
+// one — i.e. what conversation-history replay put back into the prompt. A
+// single-turn prompt yields nothing, which is exactly what makes the recall
+// script a history-replay probe.
+func priorUserTexts(messages []agentcore.Message) []string {
+	var texts []string
+	for _, msg := range messages {
+		if msg.Role != agentcore.RoleUser {
+			continue
+		}
+		var b strings.Builder
+		for _, part := range msg.Content {
+			if part.Kind == agentcore.ContentText {
+				if b.Len() > 0 {
+					b.WriteByte(' ')
+				}
+				b.WriteString(part.Text)
+			}
+		}
+		if t := strings.TrimSpace(b.String()); t != "" {
+			texts = append(texts, t)
+		}
+	}
+	if len(texts) == 0 {
+		return nil
+	}
+	return texts[:len(texts)-1]
+}
+
 func findDiagnoseTool(tools []agentcore.ToolDefinition) (string, bool) {
 	for _, t := range tools {
 		if pipelineToolRe.MatchString(t.Name) {
@@ -138,6 +171,20 @@ func summarizeToolResult(toolResultText string) string {
 	}
 	return "Ran the pipeline diagnosis. The provider tool reported: " + compact +
 		". In short, that's the signal to chase down."
+}
+
+// recallReply answers "what did I say?" by quoting the earlier user turns the
+// prompt carried. Deterministic on purpose: e2e asserts the exact quote to
+// prove history replay reached the model.
+func recallReply(prior []string) string {
+	if len(prior) == 0 {
+		return "This is the first thing you've said in this conversation — I have no earlier messages from you."
+	}
+	quoted := make([]string, len(prior))
+	for i, t := range prior {
+		quoted[i] = `"` + truncate(t, 200) + `"`
+	}
+	return "Earlier in this conversation you said: " + strings.Join(quoted, ", then ") + "."
 }
 
 func genericReply(userText string) string {

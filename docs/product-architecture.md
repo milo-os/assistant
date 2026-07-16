@@ -101,6 +101,11 @@ budgets (BackendTrafficPolicy 429s) as the cost-control backstop.
 - Gateway-enforced tool allow-list (excluded tool invisible + blocked
   through the gate, present direct — provider goodwill not required).
 - Usage CloudEvents byte-identical to the pre-port TypeScript emitter.
+- Multi-turn conversations: a follow-up message with the same A2A
+  `contextId` gets the prior turns replayed into its prompt (recall
+  proven behaviorally, with a fresh-context negative control); history
+  is scoped per (project, contextId) and token-budget truncated, and
+  the replayed tokens show up in the metered input counts.
 
 ## Roadmap
 
@@ -111,8 +116,13 @@ budgets (BackendTrafficPolicy 429s) as the cost-control backstop.
    derivation from reviewed configurations (see the enhancement doc).
 3. **Portal v1.0 translator** — the portal's A2A client still speaks
    the v0.3 wire; method names + stream parsing need the v1.0 update.
-4. **Signed agent cards** — supported by a2a-go; enterprise trust
+4. **Durable conversation store** — chat memory is in-memory today
+   (process lifetime); the candidate design is Conversation as a KRM
+   resource via an aggregated apiserver with messages in Postgres
+   behind a subresource, which also gives consumers a conversation
+   list and history that survives restarts.
+5. **Signed agent cards** — supported by a2a-go; enterprise trust
    follow-up.
-5. **agentcore extraction** — the provider-neutral loop/model layer is
+6. **agentcore extraction** — the provider-neutral loop/model layer is
    deliberately library-shaped; candidate for a standalone open-source
    Go module (licensing decision required before extraction).

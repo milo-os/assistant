@@ -66,9 +66,24 @@ go build -o /tmp/patch ./cmd/patch
 PATCH_URL=http://localhost:1986 PATCH_TOKEN=pg-demo-token \
   /tmp/patch chat "Diagnose pipeline p-1 for StreamCo" --project demo-project
 
+# A CONVERSATION (multi-turn, with memory): each line is a turn, the
+# conversation id is threaded automatically. Ctrl-D or /quit to leave.
+PATCH_URL=http://localhost:1986 PATCH_TOKEN=pg-demo-token \
+  /tmp/patch chat -i --project demo-project
+
+# Or continue a one-shot chat: it prints `context: <id>` on stderr —
+# pass that back to keep the conversation going.
+PATCH_URL=http://localhost:1986 PATCH_TOKEN=pg-demo-token \
+  /tmp/patch chat "and what was the first finding?" \
+  --project demo-project --context-id <id>
+
 # The agent card (advertises the A2A surface + skills):
 PATCH_URL=http://localhost:1986 /tmp/patch card
 ```
+
+Conversation memory is held in the assistant pod (process lifetime) and is
+scoped per (project, contextId); replayed history is token-budget capped and
+metered as real input tokens.
 
 `pg-demo-token` grants `demo-project`; a token for another project (or no token)
 is rejected — the auth boundary is real, not decorative.

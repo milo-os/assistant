@@ -97,3 +97,30 @@ func TestGenericReplyWhenNoDiagnose(t *testing.T) {
 		t.Fatalf("generic reply = %q", text)
 	}
 }
+
+func TestRecallQuotesPriorUserTurns(t *testing.T) {
+	text, calls, _ := collect(t, New(), agentcore.Request{
+		Messages: []agentcore.Message{
+			agentcore.UserMessage("my favorite pipeline is p-42"),
+			{Role: agentcore.RoleAssistant, Content: []agentcore.ContentPart{agentcore.TextPart("Noted.")}},
+			agentcore.UserMessage("what did I say?"),
+		},
+	})
+	if len(calls) != 0 {
+		t.Fatalf("recall should be pure text, got tool calls: %+v", calls)
+	}
+	if !strings.Contains(text, `"my favorite pipeline is p-42"`) {
+		t.Fatalf("recall should quote the prior user turn, got: %q", text)
+	}
+}
+
+func TestRecallWithNoHistorySaysSo(t *testing.T) {
+	// A single-turn prompt (no replay) must NOT hallucinate a memory — this is
+	// the negative control that makes the recall probe meaningful.
+	text, _, _ := collect(t, New(), agentcore.Request{
+		Messages: []agentcore.Message{agentcore.UserMessage("what did I say?")},
+	})
+	if !strings.Contains(text, "first thing") {
+		t.Fatalf("no-history recall reply = %q", text)
+	}
+}

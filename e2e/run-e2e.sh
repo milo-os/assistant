@@ -218,8 +218,15 @@ boot_sink() {
   log "Booting usage capture sink on ${SINK_URL}"
   ( SINK_HOST="${SINK_HOST}" SINK_PORT="${SINK_PORT}" CAPTURE_FILE="${OUT}/captured-events.jsonl" \
       node "${E2E_DIR}/sink/sink.mjs" ) >"${OUT}/sink.log" 2>&1 &
-  PIDS+=("$!"); BOOTED_PORTS+=("${SINK_PORT}"); disown
+  local sink_pid="$!"
+  PIDS+=("${sink_pid}"); BOOTED_PORTS+=("${SINK_PORT}"); disown
   wait_for_health "sink" "${SINK_URL}"
+  # A foreign listener on the sink port (stale sink, playground port-forward)
+  # makes wait_for_health pass while OUR sink is dead of EADDRINUSE — then
+  # every usage assertion silently runs against the wrong sink and the golden
+  # diff reads a stale capture. Fail hard instead.
+  kill -0 "${sink_pid}" 2>/dev/null \
+    || fail "sink did not survive boot — port ${SINK_PORT} is already in use by another process (see ${OUT}/sink.log)"
   curl -fsS -X DELETE "${SINK_URL}/events" >/dev/null 2>&1 || true
 }
 

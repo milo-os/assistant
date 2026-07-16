@@ -56,10 +56,17 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 			return fail(io, err)
 		}
 		defer client.Destroy()
-		req := &a2a.SendMessageRequest{Message: buildMessage(cmd.message, cmd.project)}
-		code, streamErr := renderChat(client.SendStreamingMessage(ctx, req), cmd.json, io)
+		if cmd.interactive {
+			return runRepl(ctx, client, cmd.project, cmd.contextID, cmd.message, io)
+		}
+		code, contextID, streamErr := chatTurn(ctx, client, cmd.message, cmd.project, cmd.contextID, cmd.json, io)
 		if streamErr != nil {
 			return fail(io, streamErr)
+		}
+		// Tell the user how to continue this conversation (stderr, so piped
+		// stdout stays clean; --json already carries contextId in the events).
+		if !cmd.json && contextID != "" {
+			io.Err("context: " + contextID + "  (continue with --context-id)\n")
 		}
 		return code
 

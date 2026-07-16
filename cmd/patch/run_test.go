@@ -94,8 +94,14 @@ func bearerToken(cc *a2asrv.CallContext) string {
 // stack + scripted executor + dev-token auth) and returns its base URL.
 func newTestService(t *testing.T) string {
 	t.Helper()
+	return newTestServiceWith(t, &diagnoseExecutor{})
+}
+
+// newTestServiceWith is newTestService with a caller-supplied executor.
+func newTestServiceWith(t *testing.T, executor a2asrv.AgentExecutor) string {
+	t.Helper()
 	handler := a2asrv.NewHandler(
-		&diagnoseExecutor{},
+		executor,
 		a2asrv.WithCallInterceptors(&devAuth{tokens: map[string]string{
 			"good":  "demo-project",
 			"wrong": "other-project",
@@ -246,7 +252,7 @@ func firstTaskID(t *testing.T, base string) string {
 		t.Fatalf("client: %v", err)
 	}
 	defer client.Destroy()
-	msg := buildMessage("Diagnose pipeline p-1", "demo-project")
+	msg := buildMessage("Diagnose pipeline p-1", "demo-project", "")
 	res, err := client.SendMessage(ctx, &a2a.SendMessageRequest{Message: msg})
 	if err != nil {
 		t.Fatalf("send: %v", err)
