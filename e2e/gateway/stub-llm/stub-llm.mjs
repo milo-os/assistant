@@ -89,6 +89,33 @@ function wantsDiagnose(userText) {
   return /diagnose/i.test(userText);
 }
 
+// Every user message BEFORE the latest one — i.e. what conversation-history
+// replay put back into the prompt (mirrors mockmodel's recall probe).
+function priorUserTexts(messages) {
+  const texts = [];
+  for (const m of messages) {
+    if (m.role !== 'user') continue;
+    let t = '';
+    if (typeof m.content === 'string') t = m.content.trim();
+    else if (Array.isArray(m.content)) {
+      t = m.content.filter((p) => p?.type === 'text').map((p) => p.text).join(' ').trim();
+    }
+    if (t) texts.push(t);
+  }
+  return texts.slice(0, -1);
+}
+
+function wantsRecall(userText) {
+  return /what did i (say|ask)/i.test(userText);
+}
+
+function recallReply(prior) {
+  if (prior.length === 0) {
+    return "This is the first thing you've said in this conversation — I have no earlier messages from you.";
+  }
+  return `Earlier in this conversation you said: ${prior.map((t) => `"${t.slice(0, 200)}"`).join(', then ')}.`;
+}
+
 function findDiagnoseTool(tools) {
   const fns = (tools ?? []).filter((t) => t?.type === 'function' && t.function?.name);
   return fns.find((t) => /pipeline_diagnose/i.test(t.function.name))?.function.name;
@@ -125,6 +152,9 @@ function decide(body) {
     return { kind: 'text', text: summarizeToolResult(toolResult), finish: 'stop' };
   }
   const userText = latestUserText(messages);
+  if (wantsRecall(userText)) {
+    return { kind: 'text', text: recallReply(priorUserTexts(messages)), finish: 'stop' };
+  }
   const diagnoseTool = wantsDiagnose(userText) ? findDiagnoseTool(tools) : undefined;
   if (diagnoseTool) {
     return {
