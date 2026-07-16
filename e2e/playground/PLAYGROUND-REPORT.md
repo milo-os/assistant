@@ -54,7 +54,8 @@ the contention; these proofs proceeded against the live env meanwhile.
 | P6 — service-emitted usage at the sink | **PROVEN** (5/5) |
 | P7-assistant — go vet + go test | **PROVEN** |
 | P7-catalog — envtest | **PROVEN** |
-| P8 — playground-down --dry-run == labeled footprint | **PROVEN** (26/26 exact, no teardown) |
+| P8 — BASE playground-down --dry-run == labeled footprint | **PROVEN** (26/26 exact, no teardown) |
+| P8-overlay — catalog-down --dry-run scoped to the overlay | **NOT PROVEN** — the overlay teardown over-reaches into the BASE namespace (see below) |
 
 ## How to reproduce
 
@@ -161,6 +162,39 @@ the BASE footprint only. `snapshot.sh labeled-all` shows the full 73-object
 cross-namespace footprint.
 
 ---
+
+## P8-overlay — catalog-down --dry-run — **NOT PROVEN (cross-tier teardown bug found)**
+
+`catalog-down.sh --dry-run` (service-catalog-playground) is read-only and lists
+19 resources — the overlay's CRDs, cluster roles/bindings, webhooks, demo CRs,
+and `namespace/agent-framework-playground`. **But it also lists
+`namespace/patch-playground` — the BASE namespace, which is foreign to the
+overlay.** That is not cosmetic: `catalog-down.sh` deletes namespaces *by label*
+
+```
+LABEL="app.kubernetes.io/part-of=agent-framework-playground"
+kubectl delete namespace -l "${LABEL}" --ignore-not-found --wait=true   # line 73
+```
+
+and **both** namespaces carry that label:
+
+```
+NAME                         PART-OF
+patch-playground             agent-framework-playground     ← BASE
+agent-framework-playground   agent-framework-playground     ← overlay
+```
+
+So a real `catalog-down.sh` (overlay teardown) would delete `namespace/patch-playground`
+too, tearing down the **entire BASE playground** (assistant, gateway, sink,
+StreamCo, stub-LLM) — not just the overlay. The two tiers are meant to be
+independently usable/removable; this teardown is not isolated. (The BASE
+`playground-down.sh` is fine — it deletes `patch-playground` *by name*, not by
+the shared label, so it never touches the overlay.)
+
+**Fix owed (catalog-engineer):** scope `catalog-down.sh`'s namespace deletion to
+`agent-framework-playground` by name (or add a tier-distinguishing label), so the
+overlay teardown can't reap the BASE namespace. Verified DRY-RUN ONLY — nothing
+was deleted.
 
 ## P1 — bring-up idempotent + preflight-gated — **PROVEN (both forms, live)**
 
