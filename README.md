@@ -1,25 +1,27 @@
 # Patch — Assistant Service
 
-Standalone A2A backend for **Patch**, the Datum Cloud assistant. This is
-the runtime for the already-registered catalog service
-`assistant.miloapis.com`. It was extracted from the cloud-portal, where
-Patch was embedded in the portal's backend and bound to a session
-cookie — which made the chat path un-scriptable, left conversation state
-in browser `localStorage`, and gave the A2A card and per-project MCP
-surfaces no owner. This service owns them; the portal becomes one client
-of it.
+**Patch** is Datum Cloud's AI operator: a conversational agent that
+answers questions and diagnoses problems using the live capabilities of
+the services a customer is entitled to. This repository is Patch's
+runtime — a standalone Go backend (catalog service
+`assistant.miloapis.com`) that any consumer reaches over an open
+protocol: the Cloud Portal, the bundled `patch` CLI, or any other agent.
 
-It speaks the **A2A (Agent2Agent) protocol v1.0** over JSON-RPC 2.0
-(built on the official [`a2a-go`](https://github.com/a2aproject/a2a-go)
-library), composes each project's entitled provider capabilities
-(knowledge + MCP tools) from **capability documents**, runs the model
-loop in the in-repo `agentcore` package, and emits usage as CloudEvents
-on the Milo billing wire.
+What it does:
 
-> **Ported from TypeScript to Go.** The wire moved to **real A2A v1.0**
-> (a deliberate breaking change from the prior v0.3-shaped wire) — see
-> [A2A v1.0 wire](#a2a-v10-wire). The usage CloudEvent wire is unchanged
-> and byte-verified against the pre-port emitter.
+- Speaks the **A2A (Agent2Agent) protocol v1.0** over JSON-RPC 2.0 on
+  the official [`a2a-go`](https://github.com/a2aproject/a2a-go) library
+  — consumers integrate against a standard, not a Datum API.
+- Composes each project's entitled provider capabilities — knowledge
+  and MCP tools — per conversation from **capability documents**, a
+  schema this service owns and publishes. Providers plug in without the
+  assistant redeploying.
+- Holds **durable, project-scoped conversation memory**: follow-up
+  messages in the same context are answered with the prior exchange in
+  the prompt, backed by Postgres.
+- Meters every model call and provider tool invocation as CloudEvents
+  on the Milo billing wire, aggregated across all agentic steps with
+  full cache-token detail — designed to be gateway-verifiable.
 
 ## Quickstart
 
@@ -56,8 +58,8 @@ Written in **Go** (module `github.com/milo-os/assistant`, see `go.mod`
 for the toolchain version). `go build ./cmd/assistant` produces the
 service binary; `go build ./cmd/patch` produces the `patch` CLI consumer.
 Standard library `net/http` for the mux. Tests and vet use the Go
-toolchain (`go vet ./...`, `go test ./...`). The only remaining bun/Node
-component is the QA acceptance harness under `e2e/`.
+toolchain (`go vet ./...`, `go test ./...`). The wire-level acceptance
+harness under `e2e/` runs on bun/Node.
 
 ## API surface
 
@@ -87,14 +89,12 @@ A2A v1.0 method names are **PascalCase** (a2a-go binding):
 
 ### A2A v1.0 wire
 
-The wire is **real A2A v1.0** via a2a-go, a deliberate breaking change
-from the prior v0.3-shaped TS wire. If you wrote a client against the old
-wire, these are the changes:
+Client-facing reference for the v1.0 wire shape (clients written against
+pre-1.0 A2A drafts should note these — the older forms are rejected):
 
 - **Method names are PascalCase**: `SendMessage` / `SendStreamingMessage`
-  / `GetTask` / `CancelTask` (not `message/send`, `message/stream`,
-  `tasks/get`, `tasks/cancel` — those now return `-32601`
-  MethodNotFound).
+  / `GetTask` / `CancelTask` (draft-style `message/send`, `message/stream`,
+  `tasks/get`, `tasks/cancel` return `-32601` MethodNotFound).
 - **Task states are `TASK_STATE_*` enums**: `TASK_STATE_SUBMITTED`,
   `TASK_STATE_WORKING`, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`,
   `TASK_STATE_CANCELED`.
@@ -273,9 +273,10 @@ data path. Given a project's documents, composition produces:
   enforced client-side too. MCP clients are opened per task, given a 5s
   connect timeout, and closed at the terminal state.
 
-Document shape (JSON; unchanged from the prior `AgentBinding` fixture
-shape — the `kind` string is retained for provenance, the parser ignores
-unknown fields and rejects invalid documents with clear errors):
+Document shape (JSON; the KRM-style envelope — `apiVersion`/`kind`/
+`metadata`/`spec` — carries provenance from producers like the catalog's
+`AgentBinding` projection; the parser ignores unknown fields and rejects
+invalid documents with clear errors):
 
 ```jsonc
 {
@@ -481,18 +482,19 @@ Semantics:
 ## Metering
 
 Usage is emitted as CloudEvents to `<USAGE_GATEWAY_URL>/cloudevents` (a
-JSON array, ≤100/batch, optional `x-api-key`). The wire is
-**byte-identical** to the prior TS emitter (verified by a golden test and
-by the e2e sink byte-diff — do not "improve" it). Emission is a no-op
-when the gateway is unset and **never throws** (it can't fail a chat).
-Per completed task:
+JSON array, ≤100/batch, optional `x-api-key`). The wire format is a
+**pinned contract** with the platform's billing pipeline — a golden test
+and the e2e sink byte-diff hold it stable; do not "improve" it. Emission
+is a no-op when the gateway is unset and **never throws** (it can't fail
+a chat). Per completed task:
 
 - **token meters** — `assistant.miloapis.com/conversation/{input-tokens,
   output-tokens, messages}` (+ cache meters when the provider reports
   them), `dimensions.model`, resource `{group: assistant.miloapis.com,
   kind: Conversation, name: <contextId>}`. Values are int64 strings.
-  Multi-step usage is aggregated into the total (per-step usage is not
-  dropped — a fix pinned by tests after a prior under-billing bug).
+  Multi-step usage is aggregated into the total — every agentic step is
+  billed, not just the final one (pinned by tests; under-billing here is
+  a known failure class).
 - **`assistant.miloapis.com/conversation/tool-invocations`** — one per
   provider tool call, `dimensions.service = <serviceName>`.
 - **subject** — `projects/<projectName>` on every event.
@@ -555,7 +557,7 @@ internal/
   agent/              run-conversation orchestration (prompt, loop, usage events)
   a2a/                a2asrv AgentExecutor glue, task store wiring
   auth/               dev tokens + OIDC, fail-closed authorizer seam
-  usage/              CloudEvents emitter (byte-identical to the TS wire)
+  usage/              CloudEvents emitter (golden-pinned billing wire)
   config/             env → Config
   server/             net/http mux: /healthz, agent-card, /a2a
   logger/             slog setup
@@ -615,21 +617,18 @@ Highlights: an in-process MCP round-trip in `internal/capability` /
 (agent card, auth 401/403/200, `SendMessage`/`SendStreamingMessage`
 driving a tool call over real MCP with usage landing at an in-process
 sink, `GetTask`/`CancelTask`); OIDC with a locally generated key; the
-usage emitter golden test against the recorded TS wire; and the agent
+usage emitter golden test pinning the billing wire; and the agent
 loop's exit/usage-aggregation rules pinned against the mock model.
 
 The **e2e acceptance harness** (`e2e/`, bun) drives the built binaries
-end to end (core + consumers + gateway legs) and byte-diffs the sink wire
-against the pre-port golden — see `e2e/E2E-REPORT.md`.
+end to end (core + consumers + gateway legs) and byte-diffs the sink
+wire against the recorded golden — see `e2e/E2E-REPORT.md`.
 
-## Follow-ups
+## Roadmap
 
-- **Portal client v1.0 update** — the cloud-portal thin client
-  (`feat/portal-assistant-client`) is still v0.3-shaped and gets
-  `-32601` MethodNotFound against the v1.0 service; update its method
-  names and SSE parsing.
-- **HTTP `CapabilitySource`** — documents served by the control plane per
-  project instead of a fixture file (the `Source` interface is the seam).
+- **Portal A2A v1.0 client** — bring the cloud-portal's thin client up
+  to the v1.0 wire (method names + SSE parsing) so the portal consumes
+  this service like any other A2A client.
 - **SAR/OpenFGA caller authorization** — replace the claims authorizer
   with a SubjectAccessReview authorizer against the Milo control plane.
 - **OAuth token exchange (RFC 8693)** — on-behalf-of exchange for
