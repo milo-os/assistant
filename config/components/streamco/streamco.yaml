@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: streamco
-          image: patch-streamco:local
+          image: ghcr.io/milo-os/assistant-streamco
           imagePullPolicy: IfNotPresent
           command: ["node", "src/server.ts"]
           ports:

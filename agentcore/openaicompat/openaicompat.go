@@ -12,6 +12,7 @@ package openaicompat
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/milo-os/assistant/agentcore"
@@ -69,16 +70,24 @@ func (m *Model) ModelID() string { return m.modelID }
 func (m *Model) Stream(ctx context.Context, req agentcore.Request) (agentcore.StreamReader, error) {
 	params := buildParams(m.modelID, req)
 
-	reqOpts := make([]option.RequestOption, 0, len(req.Headers))
+	reqOpts := make([]option.RequestOption, 0, len(req.Headers)+1)
 	for k, v := range req.Headers {
 		reqOpts = append(reqOpts, option.WithHeader(k, v))
 	}
+	// Capture the raw response: a misrouted request (e.g. a gateway 404 with a
+	// text/plain body) yields an SSE parser that finds no events and ends
+	// cleanly — which would otherwise masquerade as a completed, empty,
+	// zero-token turn. Empty answers must be errors, not silent successes.
+	var httpRes *http.Response
+	reqOpts = append(reqOpts, option.WithResponseInto(&httpRes))
 
 	stream := m.client.Chat.Completions.NewStreaming(ctx, params, reqOpts...)
 
 	return agentcore.StreamFunc(func(send agentcore.SendFunc) {
 		acc := openai.ChatCompletionAccumulator{}
+		sawChunk := false
 		for stream.Next() {
+			sawChunk = true
 			chunk := stream.Current()
 			acc.AddChunk(chunk)
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
@@ -89,6 +98,18 @@ func (m *Model) Stream(ctx context.Context, req agentcore.Request) (agentcore.St
 		}
 		if err := stream.Err(); err != nil {
 			send(agentcore.StreamPart{Kind: agentcore.StreamPartError, FinishReason: agentcore.FinishError, Err: err})
+			return
+		}
+		if !sawChunk {
+			status := "unknown"
+			if httpRes != nil {
+				status = httpRes.Status
+			}
+			send(agentcore.StreamPart{
+				Kind:         agentcore.StreamPartError,
+				FinishReason: agentcore.FinishError,
+				Err:          fmt.Errorf("openaicompat: upstream returned no stream events (HTTP %s) — check the base URL routes /chat/completions", status),
+			})
 			return
 		}
 

@@ -1,0 +1,11 @@
+# CloudNativePG: the vendored operator manifest (cluster-scoped, installed
+# into cnpg-system) plus this environment's Cluster CR. `task dev:deploy`
+# applies the operator with --server-side (the CRDs exceed client-side apply's
+# annotation limit) and waits for its webhook before applying the Cluster —
+# see the staged deploy in Taskfile.yaml. The operator is ADDITIVE shared
+# infra: environment teardown removes the Cluster with the namespace but
+# leaves cnpg-system in place.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cluster.yaml

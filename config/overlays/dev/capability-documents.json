@@ -20,7 +20,7 @@
         "mcpServers": [
           {
             "name": "streamco",
-            "endpoint": "__GATEWAY_MCP_URL__",
+            "endpoint": "http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local:80/mcp",
             "toolSelector": {
               "include": [
                 "streamco-backend__streams_list",

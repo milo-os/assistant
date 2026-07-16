@@ -77,12 +77,14 @@ documents); nothing else changes.
 
 ## Deployment views
 
-**Local / playground (kind via datum-cloud/test-infra):** assistant,
-StreamCo, stub or real model route, and usage sink run in-cluster behind
-Envoy AI Gateway; the `patch` CLI connects from the host. Optional
-catalog overlay adds the CRDs + controllers + a capability-provider
-adapter, enabling the live demo: `kubectl apply` a new
-ServiceAgentConfiguration → the next chat turn's capabilities change.
+**Local / dev environment (kind via datum-cloud/test-infra):**
+`task dev:setup` stands up the assistant, StreamCo, stub or real model
+route, usage sink, and a CloudNativePG-backed conversation store behind
+Envoy AI Gateway (kustomize overlays in `config/`); the `patch` CLI
+connects from the host. The `dev-catalog` overlay switches capabilities
+to the catalog's capability-provider API, enabling the live demo:
+`kubectl apply` a new ServiceAgentConfiguration → the next chat turn's
+capabilities change.
 
 **Production posture:** consumers authenticate with OIDC access tokens
 (RFC 8693 exchange for on-behalf-of); authorization via

@@ -1,7 +1,7 @@
 # Conversation store (durable): a CloudNativePG-managed PostgreSQL cluster
 # backing the assistant's conversation/message history (CONVERSATION_STORE_URL).
 #
-# The CNPG operator (vendored at ../cnpg/cnpg-operator-1.30.0.yaml, installed
+# The CNPG operator (vendored in this directory, installed
 # by playground-up.sh into cnpg-system) owns provisioning: PVC, credentials,
 # services, and restart/failover handling. It creates the app credentials
 # Secret `conversation-store-app`, whose `uri` key is exactly the

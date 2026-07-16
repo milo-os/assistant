@@ -1,0 +1,203 @@
+# Task-driven dev environment, following the datum-cloud house pattern
+# (reference: milo-os/billing): a pinned remote include of
+# datum-cloud/test-infra bootstraps the kind cluster + shared operators
+# (cert-manager, Flux, Kyverno, Envoy Gateway); this repo layers its own stack
+# on top with kustomize (config/base + components + overlays/dev) and runs
+# environment e2e with chainsaw.
+#
+# Requires TASK_X_REMOTE_TASKFILES=1 (set in .env; task reads it via dotenv).
+#
+# Quickstart:
+#   task dev:setup      # cluster + images + full stack (fixture capabilities)
+#   task dev:forward    # port-forward the assistant to localhost:1986
+#   task e2e            # chainsaw environment tests
+#   task dev:redeploy   # fast loop: rebuild image, roll the assistant
+version: '3'
+
+dotenv: ['.env']
+
+vars:
+  IMAGE_ASSISTANT: ghcr.io/milo-os/assistant
+  IMAGE_STREAMCO: ghcr.io/milo-os/assistant-streamco
+  IMAGE_SINK: ghcr.io/milo-os/assistant-sink
+  IMAGE_TAG: dev
+  TEST_INFRA_CLUSTER_NAME: test-infra
+  TEST_INFRA_REPO_REF: 'v0.6.4'
+  KUBECONFIG_PATH: '{{.ROOT_DIR}}/.test-infra/kubeconfig'
+  NS: patch-playground
+  EG_NS: envoy-gateway-system
+  AIGW_NS: envoy-ai-gateway-system
+  AIGW_VERSION: v1.0.0
+  CNPG_OPERATOR_IMAGE: ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0
+  CNPG_POSTGRES_IMAGE: ghcr.io/cloudnative-pg/postgresql:17.8
+  TOOL_DIR: '{{.ROOT_DIR}}/bin'
+  CHAINSAW_VERSION: v0.2.15
+
+includes:
+  test-infra:
+    taskfile: https://raw.githubusercontent.com/datum-cloud/test-infra/{{.TEST_INFRA_REPO_REF}}/Taskfile.yml
+    vars:
+      REPO_REF: '{{.TEST_INFRA_REPO_REF}}'
+
+tasks:
+  # ── Plain dev loop ──────────────────────────────────────────
+  build:
+    desc: Build the service and CLI binaries
+    cmds:
+      - go build ./...
+
+  test:
+    desc: Run unit tests (set TEST_DATABASE_URL to include Postgres store tests)
+    cmds:
+      - go vet ./...
+      - go test -timeout 5m ./... -count=1
+
+  install-tools:
+    desc: Install version-pinned dev tools into ./bin
+    cmds:
+      - GOBIN={{.TOOL_DIR}} go install github.com/kyverno/chainsaw@{{.CHAINSAW_VERSION}}
+    status:
+      - test -x {{.TOOL_DIR}}/chainsaw
+
+  # ── Cluster dev environment ─────────────────────────────────
+  dev:setup:
+    desc: Bring up the full dev environment (kind cluster + operators + stack)
+    cmds:
+      - task: test-infra:cluster-up
+      - task: dev:build
+      - task: dev:load
+      - task: dev:deploy
+
+  dev:build:
+    desc: Build the dev images (assistant compiled on the HOST — an in-image
+      go build starves on a busy Docker VM; streamco/sink are thin node images)
+    vars:
+      GOARCH:
+        sh: |
+          case "$(uname -m)" in
+            arm64|aarch64) echo arm64 ;;
+            *) echo amd64 ;;
+          esac
+    cmds:
+      - mkdir -p deploy/.build
+      - CGO_ENABLED=0 GOOS=linux GOARCH={{.GOARCH}} go build -trimpath -ldflags="-s -w" -o deploy/.build/assistant ./cmd/assistant
+      - docker build --provenance=false --sbom=false -t {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} -f deploy/assistant.Dockerfile deploy/.build
+      - docker build --provenance=false --sbom=false -t {{.IMAGE_STREAMCO}}:{{.IMAGE_TAG}} -f deploy/streamco.Dockerfile e2e/streamco
+      - docker build --provenance=false --sbom=false -t {{.IMAGE_SINK}}:{{.IMAGE_TAG}} -f deploy/sink.Dockerfile e2e/sink
+
+  dev:load:
+    desc: Load the dev images into the kind cluster
+    cmds:
+      - kind load docker-image {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} {{.IMAGE_STREAMCO}}:{{.IMAGE_TAG}} {{.IMAGE_SINK}}:{{.IMAGE_TAG}} --name {{.TEST_INFRA_CLUSTER_NAME}}
+
+  dev:deploy:
+    desc: Deploy dependencies + the stack (staged, with waits). OVERLAY=dev|dev-catalog
+    vars:
+      OVERLAY: '{{.OVERLAY | default "dev"}}'
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+    cmds:
+      # Stage 1: Envoy AI Gateway extension (additive shared infra).
+      # Idempotent and deliberately non-churning: a healthy installed
+      # controller is left untouched — helm --wait against a flapping shared
+      # cluster stalls, and re-rolling Envoy Gateway churns leader election.
+      - |
+        if ! kubectl -n {{.AIGW_NS}} get deploy ai-gateway-controller >/dev/null 2>&1; then
+          helm upgrade -i aieg-crd oci://docker.io/envoyproxy/ai-gateway-crds-helm \
+            --version {{.AIGW_VERSION}} --namespace {{.AIGW_NS}} --create-namespace --wait
+          helm upgrade -i aieg oci://docker.io/envoyproxy/ai-gateway-helm \
+            --version {{.AIGW_VERSION}} --namespace {{.AIGW_NS}} --create-namespace --wait
+        fi
+      - |
+        if ! kubectl -n {{.EG_NS}} get cm envoy-gateway-config -o yaml 2>/dev/null | grep -q extensionManager; then
+          kubectl -n flux-system patch helmrelease envoy-gateway --type merge \
+            --patch-file config/dependencies/ai-gateway/eg-helmrelease-extension.patch.yaml
+          kubectl -n flux-system annotate helmrelease envoy-gateway \
+            "reconcile.fluxcd.io/requestedAt=$(date +%s)" --overwrite
+          for i in $(seq 1 60); do
+            kubectl -n {{.EG_NS}} get cm envoy-gateway-config -o yaml 2>/dev/null | grep -q extensionManager && break
+            [ "$i" = 60 ] && { echo "timed out waiting for EG extension config" >&2; exit 1; }
+            sleep 2
+          done
+          kubectl -n {{.EG_NS}} rollout restart deploy/envoy-gateway
+          kubectl -n {{.EG_NS}} rollout status deploy/envoy-gateway --timeout=120s \
+            || kubectl -n {{.EG_NS}} wait --for=condition=Available deploy/envoy-gateway --timeout=120s
+        fi
+      # Stage 2: CloudNativePG operator (server-side: the CRDs are too big for
+      # client-side apply) + the conversation-store Cluster. The Cluster apply
+      # retries through the operator webhook's readiness window.
+      - |
+        if ! docker exec {{.TEST_INFRA_CLUSTER_NAME}}-control-plane crictl images | grep -q cloudnative-pg/postgresql; then
+          docker image inspect {{.CNPG_OPERATOR_IMAGE}} >/dev/null 2>&1 || docker pull {{.CNPG_OPERATOR_IMAGE}}
+          docker image inspect {{.CNPG_POSTGRES_IMAGE}} >/dev/null 2>&1 || docker pull {{.CNPG_POSTGRES_IMAGE}}
+          kind load docker-image {{.CNPG_OPERATOR_IMAGE}} {{.CNPG_POSTGRES_IMAGE}} --name {{.TEST_INFRA_CLUSTER_NAME}} || true
+          docker exec {{.TEST_INFRA_CLUSTER_NAME}}-control-plane crictl images | grep -q cloudnative-pg/postgresql \
+            || { echo "CNPG postgres image failed to load into kind" >&2; exit 1; }
+        fi
+      - kubectl apply --server-side --force-conflicts -f config/dependencies/cnpg/cnpg-operator-1.30.0.yaml
+      - kubectl -n cnpg-system rollout status deploy/cnpg-controller-manager --timeout=300s
+        || kubectl -n cnpg-system wait --for=condition=Available deploy/cnpg-controller-manager --timeout=300s
+      - |
+        for i in $(seq 1 18); do
+          kubectl apply -k config/dependencies/cnpg 2>/dev/null && exit 0
+          sleep 10
+        done
+        echo "CNPG webhook never admitted the Cluster" >&2; exit 1
+      # Stage 3: the stack overlay.
+      - kubectl apply -k config/overlays/{{.OVERLAY}}
+      # Stage 4: waits, dependency-first. CP-tolerant fallbacks — a flapping
+      # controller-manager stalls `rollout status` on observedGeneration even
+      # when pods are healthy.
+      - kubectl -n {{.NS}} wait --for=condition=Ready cluster/conversation-store --timeout=600s
+      - kubectl -n {{.NS}} rollout status deploy/stub-llm --timeout=180s
+        || kubectl -n {{.NS}} wait --for=condition=Available deploy/stub-llm --timeout=60s
+      - kubectl -n {{.NS}} rollout status deploy/streamco --timeout=180s
+        || kubectl -n {{.NS}} wait --for=condition=Available deploy/streamco --timeout=60s
+      - kubectl -n {{.NS}} rollout status deploy/sink --timeout=180s
+        || kubectl -n {{.NS}} wait --for=condition=Available deploy/sink --timeout=60s
+      - kubectl -n {{.NS}} wait --for=condition=Programmed gateway/patch-playground --timeout=300s
+      - kubectl -n {{.NS}} rollout status deploy/assistant --timeout=300s
+        || kubectl -n {{.NS}} wait --for=condition=Available deploy/assistant --timeout=120s
+      - 'echo "dev environment ready — task dev:forward, then: PATCH_URL=http://localhost:1986 PATCH_TOKEN=pg-demo-token go run ./cmd/patch chat -i --project demo-project"'
+
+  dev:redeploy:
+    desc: Fast loop — rebuild + reload the assistant image and roll the deployment
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+    cmds:
+      - task: dev:build
+      - task: dev:load
+      - kubectl -n {{.NS}} rollout restart deploy/assistant
+      - kubectl -n {{.NS}} rollout status deploy/assistant --timeout=300s
+        || kubectl -n {{.NS}} wait --for=condition=Available deploy/assistant --timeout=120s
+
+  dev:forward:
+    desc: Port-forward the assistant (localhost:1986) and the AI gateway (localhost:1987); runs in the foreground
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+    cmds:
+      - kubectl -n {{.NS}} port-forward svc/assistant 1986:7820 &
+        kubectl -n {{.EG_NS}} port-forward svc/patch-ai-gateway 1987:80 &
+        wait
+
+  dev:clean:
+    desc: Remove this environment's namespace + GatewayClass (shared operators stay)
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+    cmds:
+      - kubectl delete namespace {{.NS}} --ignore-not-found
+      - kubectl delete gatewayclass patch-pg-gw --ignore-not-found
+
+  # ── e2e ─────────────────────────────────────────────────────
+  e2e:
+    desc: Chainsaw environment tests (task e2e -- <path> for one suite)
+    deps: [install-tools]
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+    cmds:
+      - '{{.TOOL_DIR}}/chainsaw test --config test/e2e/.chainsaw.yaml {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}test/e2e/{{end}}'
+
+  e2e:local:
+    desc: Wire-level A2A/protocol e2e against locally-booted binaries (bun harness)
+    cmds:
+      - ./e2e/run-e2e.sh all

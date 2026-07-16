@@ -559,15 +559,55 @@ internal/
   config/             env → Config
   server/             net/http mux: /healthz, agent-card, /a2a
   logger/             slog setup
+config/               kustomize dev environment (house pattern)
+  base/               assistant Deployment/Service + namespace
+  components/         gateway (Envoy AI Gateway resources), llm-stub,
+                      streamco, sink
+  overlays/dev        fixture-capability mode (default), images :dev
+  overlays/dev-catalog  catalog capability-provider mode
+  dependencies/       cnpg (vendored operator + Cluster), ai-gateway
+                      (EG HelmRelease extension patch)
+test/e2e/             chainsaw environment tests (env-health, chat-smoke)
 fixtures/             capability-documents.json (sample)
-e2e/                  QA-owned end-to-end acceptance harness (bun/Node)
+e2e/                  wire-level A2A acceptance harness (bun/Node)
+deploy/               Dockerfiles for the dev images
+Taskfile.yaml         dev-environment entrypoints (see below)
 ```
+
+## Dev environment (kind via datum-cloud/test-infra)
+
+The full environment — assistant behind the Envoy AI Gateway (metered,
+keyless, tool allow-lists), StreamCo MCP provider, usage sink, and a
+CloudNativePG-backed durable conversation store — runs on a kind
+cluster bootstrapped by [datum-cloud/test-infra](https://github.com/datum-cloud/test-infra),
+consumed as a pinned remote Taskfile include (the datum-cloud house
+pattern; requires `TASK_X_REMOTE_TASKFILES=1`, see `.env.example`).
+
+```bash
+cp .env.example .env
+task dev:setup            # kind cluster + operators + images + full stack
+task dev:forward          # assistant → localhost:1986, gateway → localhost:1987
+
+PATCH_URL=http://localhost:1986 PATCH_TOKEN=pg-demo-token \
+  go run ./cmd/patch chat -i --project demo-project
+
+task dev:redeploy         # fast loop: rebuild + roll the assistant
+task e2e                  # chainsaw environment tests
+task dev:clean            # remove the environment (shared operators stay)
+```
+
+`task dev:deploy OVERLAY=dev-catalog` switches capabilities from the
+fixture file to the service catalog's capability-provider API (requires
+the catalog side from milo-os/service-catalog). The managed Envoy
+Service name is pinned (`patch-ai-gateway`), so every URL in the config
+tree is static — no discovery or templating anywhere.
 
 ## Testing
 
 ```bash
-go vet ./...
-go test ./...
+task test        # go vet + unit tests (TEST_DATABASE_URL adds Postgres store tests)
+task e2e         # chainsaw against the dev environment
+task e2e:local   # wire-level A2A harness against locally-booted binaries
 ```
 
 Highlights: an in-process MCP round-trip in `internal/capability` /

@@ -215,3 +215,47 @@ func TestStreamEmitsToolCall(t *testing.T) {
 		t.Fatalf("want 1 tool on the wire, got %d", len(tools))
 	}
 }
+
+// TestMisroutedRequestFailsLoudly pins the fix for a silent-failure mode
+// found live: a gateway 404 (text/plain "unsupported path") gave the SSE
+// parser nothing to parse, which surfaced as a COMPLETED, empty, zero-token
+// turn. Any response with no stream events must be an error part.
+func TestMisroutedRequestFailsLoudly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("unsupported path: " + r.URL.Path))
+	}))
+	defer srv.Close()
+
+	m := New(Options{BaseURL: srv.URL, ModelID: "patch-stub-v1"})
+	s, err := m.Stream(context.Background(), agentcore.Request{
+		Messages: []agentcore.Message{agentcore.UserMessage("hi")},
+	})
+	if err != nil {
+		return // an eager error is also acceptable
+	}
+	defer s.Close()
+
+	var sawError bool
+	for {
+		p, rerr := s.Recv()
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			sawError = true
+			break
+		}
+		if p.Kind == agentcore.StreamPartError {
+			sawError = true
+			break
+		}
+		if p.Kind == agentcore.StreamPartStepFinish {
+			t.Fatalf("misrouted request finished gracefully (usage %+v) — must error", p.Usage)
+		}
+	}
+	if !sawError {
+		t.Fatal("misrouted request produced neither an error part nor a stream error")
+	}
+}

@@ -1,0 +1,49 @@
+# Chat smoke: a real two-turn conversation through the full in-cluster path
+# (patch CLI -> assistant -> AI gateway -> stub LLM), proving chat works AND
+# conversation memory replays — turn 2 quotes turn 1, and a fresh context has
+# no memory (negative control). The stub model's recall script makes this
+# deterministic without a real model key.
+#
+# Uses its own short-lived port-forward on a dedicated port so it never
+# depends on (or fights with) `task dev:forward`.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: chat-smoke
+spec:
+  skipDelete: true
+  steps:
+    - name: two-turn-recall
+      try:
+        - script:
+            timeout: 240s
+            content: |
+              set -euo pipefail
+              PORT=18620
+              kubectl -n patch-playground port-forward svc/assistant ${PORT}:7820 >/dev/null 2>&1 &
+              PF=$!
+              trap 'kill ${PF} 2>/dev/null || true' EXIT
+              for i in $(seq 1 30); do
+                curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null && break
+                [ "$i" = 30 ] && { echo "assistant not reachable over port-forward" >&2; exit 1; }
+                sleep 1
+              done
+              REPO="$(git rev-parse --show-toplevel)"
+              cd "${REPO}"
+              export PATCH_URL="http://127.0.0.1:${PORT}" PATCH_TOKEN=pg-demo-token
+
+              FACT="my favorite pipeline is p-chainsaw"
+              CTX=$(go run ./cmd/patch chat "${FACT}" --project demo-project 2>&1 >/dev/null \
+                | sed -n 's/^context: \([^ ]*\).*/\1/p')
+              [ -n "${CTX}" ] || { echo "no contextId from turn 1" >&2; exit 1; }
+
+              ANSWER=$(go run ./cmd/patch chat "what did I say?" --project demo-project --context-id "${CTX}" 2>/dev/null)
+              echo "recall answer: ${ANSWER}"
+              echo "${ANSWER}" | grep -qF "\"${FACT}\"" \
+                || { echo "FAIL: turn 2 did not recall turn 1" >&2; exit 1; }
+
+              FRESH=$(go run ./cmd/patch chat "what did I say?" --project demo-project 2>/dev/null)
+              echo "fresh-context answer: ${FRESH}"
+              echo "${FRESH}" | grep -q "first thing" \
+                || { echo "FAIL: fresh context unexpectedly had memory" >&2; exit 1; }
+              echo "PASS: two-turn recall + negative control"

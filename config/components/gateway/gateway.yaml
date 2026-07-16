@@ -35,12 +35,22 @@ spec:
       # ClusterIP: kind has no LoadBalancer, so the default type would leave the
       # Gateway Programmed=False (AddressNotAssigned). We reach it via
       # `kubectl port-forward`, so a cluster address is all we need.
+      #
+      # The NAME is pinned so every consumer (the assistant's GATEWAY_URL, the
+      # capability fixture's MCP endpoint) can reference a static FQDN —
+      # http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local — with
+      # no discovery/templating step. Without it EG autogenerates the name.
       envoyService:
         type: ClusterIP
+        name: patch-ai-gateway
       envoyDeployment:
         container:
-          # Clear the large default requests so this fits a shared kind node.
-          resources: {}
+          # Modest-but-present requests: the EG defaults are too large for a
+          # shared kind node, but clearing them entirely made the proxy
+          # BestEffort QoS — first to starve under node contention, which
+          # manifested as chronic envoy-container StartError restarts.
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
   telemetry:
     accessLog:
       settings:

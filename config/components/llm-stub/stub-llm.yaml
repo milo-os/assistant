@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
         - name: stub-llm
-          image: patch-streamco:local
+          image: ghcr.io/milo-os/assistant-streamco
           imagePullPolicy: IfNotPresent
           command: ["node", "/config/stub-llm.mjs"]
           ports:

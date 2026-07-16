@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: sink
-          image: patch-sink:local
+          image: ghcr.io/milo-os/assistant-sink
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 7811

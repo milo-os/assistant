@@ -1,0 +1,71 @@
+# Dev overlay — FIXTURE capability mode: the full environment with capability
+# documents served from a mounted file. `task dev:deploy` applies this by
+# default; the dev-catalog overlay swaps the fixture for the catalog's
+# capability-provider API. Each overlay declares exactly ONE capability source
+# (they are mutually exclusive in the service config), and switching overlays
+# is a clean declarative swap — kubectl apply prunes the other mode's env.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - ../../components/gateway
+  - ../../components/llm-stub
+  - ../../components/streamco
+  - ../../components/sink
+
+images:
+  - name: ghcr.io/milo-os/assistant
+    newTag: dev
+  - name: ghcr.io/milo-os/assistant-streamco
+    newTag: dev
+  - name: ghcr.io/milo-os/assistant-sink
+    newTag: dev
+
+configMapGenerator:
+  - name: assistant-capabilities
+    namespace: patch-playground
+    files:
+      - capability-documents.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: agent-framework-playground
+
+# Dev-grade credential, like the stub upstream key: this is a loopback-only
+# dev environment on a kind cluster, not a production posture.
+secretGenerator:
+  - name: assistant-dev-token
+    namespace: patch-playground
+    literals:
+      - tokens=pg-demo-token:demo-user:demo-project
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: agent-framework-playground
+
+patches:
+  - target:
+      kind: Deployment
+      name: assistant
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: assistant
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: assistant
+                env:
+                  - name: CAPABILITY_DOCS_FIXTURE
+                    value: /config/capability-documents.json
+                volumeMounts:
+                  - name: capabilities
+                    mountPath: /config
+                    readOnly: true
+            volumes:
+              - name: capabilities
+                configMap:
+                  name: assistant-capabilities

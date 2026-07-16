@@ -174,7 +174,7 @@ say "Apply gateway manifests → namespace $NS"
 kc apply -f "$MANIFESTS/00-namespace.yaml"
 # stub-llm source ConfigMap generated from the single .mjs (one source of truth).
 kc -n "$NS" create configmap stub-llm-src \
-  --from-file=stub-llm.mjs="$SCRIPT_DIR/stub-llm/stub-llm.mjs" \
+  --from-file=stub-llm.mjs="$SCRIPT_DIR/../../config/components/llm-stub/stub-llm.mjs" \
   --dry-run=client -o yaml | kc apply -f -
 kc -n "$NS" label configmap stub-llm-src app.kubernetes.io/part-of=agent-framework-e2e --overwrite >/dev/null
 # Apply 10–60 via kustomize so every resource carries the attribution label

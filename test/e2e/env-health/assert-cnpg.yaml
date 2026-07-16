@@ -1,0 +1,14 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: conversation-store
+  namespace: patch-playground
+status:
+  readyInstances: 1
+---
+# The app credentials Secret the assistant consumes (uri key).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: conversation-store-app
+  namespace: patch-playground

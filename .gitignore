@@ -14,3 +14,9 @@ dist/
 /deploy/.build/
 /deploy/playground/.run/
 
+
+# Task dev-env machinery
+.test-infra/
+/bin/
+deploy/.build/
+.task/
