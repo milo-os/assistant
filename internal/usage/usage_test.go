@@ -138,22 +138,31 @@ func TestToCloudEvent_OmitsEmptyDimensionsAndUID(t *testing.T) {
 // e2e/golden/sink-cloudevents.golden.jsonl. If the golden moves, this fails.
 func TestSinkGolden(t *testing.T) {
 	const source = "http://127.0.0.1:7820/a2a"
-	// The four events the e2e "diagnose" turn produces (mock model: 84 in / 46
-	// out summed across two steps; one messages event; one tool invocation).
-	tokenEvents := BuildUsageEvents(BuildUsageInput{
+	// The golden holds the canonical set from the e2e run's two turn shapes:
+	// the "diagnose" turn (mock model: 84 in / 46 out summed across two steps;
+	// one messages event; one tool invocation — the original TS-parity set)
+	// and the single-step turn the multi-turn checks added (42 in / 23 out;
+	// its messages event dedupes with the diagnose turn's).
+	all := BuildUsageEvents(BuildUsageInput{
 		ProjectName:    "demo-project",
 		ConversationID: "conv-e2e",
 		Model:          "patch-mock-v0",
 		Tokens:         UsageTokens{InputTokens: 84, OutputTokens: 46},
 		NowMillis:      fixedNow,
 	})
-	toolEvent := BuildToolInvocationEvent(BuildToolInvocationInput{
+	all = append(all, BuildUsageEvents(BuildUsageInput{
+		ProjectName:    "demo-project",
+		ConversationID: "conv-e2e",
+		Model:          "patch-mock-v0",
+		Tokens:         UsageTokens{InputTokens: 42, OutputTokens: 23},
+		NowMillis:      fixedNow,
+	})...)
+	all = append(all, BuildToolInvocationEvent(BuildToolInvocationInput{
 		ProjectName:    "demo-project",
 		ConversationID: "conv-e2e",
 		ServiceName:    "streaming.streamco.example",
 		NowMillis:      fixedNow,
-	})
-	all := append(tokenEvents, toolEvent)
+	}))
 
 	lines := make([]string, 0, len(all))
 	seen := map[string]bool{}

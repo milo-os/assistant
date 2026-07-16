@@ -81,9 +81,18 @@ PATCH_URL=http://localhost:1986 PATCH_TOKEN=pg-demo-token \
 PATCH_URL=http://localhost:1986 /tmp/patch card
 ```
 
-Conversation memory is held in the assistant pod (process lifetime) and is
-scoped per (project, contextId); replayed history is token-budget capped and
-metered as real input tokens.
+Conversation memory is **durable**: history lives in a CloudNativePG-managed
+PostgreSQL cluster (`conversation-store`, PVC-backed; the CNPG operator is
+installed into `cnpg-system` from the vendored manifest in `cnpg/` and stays
+behind on teardown as shared infra) scoped per (project, contextId); replayed
+history is token-budget capped and metered as real input tokens. The proof:
+
+```bash
+# 1. Tell Patch something, note the context id it prints.
+# 2. Restart the assistant:
+kubectl -n patch-playground rollout restart deploy/assistant
+# 3. Ask "what did I say?" with --context-id <that id> — it still remembers.
+```
 
 `pg-demo-token` grants `demo-project`; a token for another project (or no token)
 is rejected — the auth boundary is real, not decorative.

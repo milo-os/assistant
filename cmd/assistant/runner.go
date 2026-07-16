@@ -15,12 +15,14 @@ import (
 )
 
 // newAgentRunner builds the [assistanta2a.AgentRunner] the A2A executor drives:
-// it resolves the model from config, wires the capability source and usage
-// emitter, constructs the agent orchestrator, and adapts it to the A2A seam.
-func newAgentRunner(cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRunner, error) {
+// it resolves the model from config, wires the capability source, conversation
+// store, and usage emitter, constructs the agent orchestrator, and adapts it
+// to the A2A seam. The returned cleanup releases the conversation store's
+// resources (call it on shutdown; it is never nil).
+func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRunner, func(), error) {
 	model, err := agent.ResolveModel(cfg.Model, log)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Source selection (fixture and provider URL are mutually exclusive — the
@@ -49,19 +51,36 @@ func newAgentRunner(cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRun
 	// StepLimit and MaxOutputTokens are left at zero: the agent layer applies
 	// the TS-parity defaults (step limit 8, MaxOutputTokens 4096) — that policy
 	// lives in internal/agent, where the TS agent/loop.ts had it.
-	// Conversation memory: in-process for now (history survives for the
-	// service's lifetime; durability is the conversation-store slice). A
-	// follow-up message with the same A2A contextId gets the prior turns
-	// replayed into its prompt.
+	// Conversation memory: durable (Postgres) when CONVERSATION_STORE_URL is
+	// set, in-process otherwise. A follow-up message with the same A2A
+	// contextId gets the prior turns replayed into its prompt either way; the
+	// Postgres store additionally survives restarts and is scoped by
+	// (project, contextId) at the query layer.
+	var (
+		store   history.Store
+		cleanup = func() {}
+	)
+	if cfg.ConversationStoreURL != "" {
+		pg, err := history.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
+		if err != nil {
+			return nil, nil, err
+		}
+		store, cleanup = pg, pg.Close
+	} else {
+		store = history.NewMemoryStore()
+		log.Info("history.store", "type", "memory",
+			"note", "CONVERSATION_STORE_URL not set — conversation history will not survive restarts")
+	}
+
 	conv := agent.New(agent.Deps{
 		Model:     model,
 		ModelMode: string(cfg.Model.Mode),
 		Source:    source,
 		Emitter:   emitter,
-		History:   history.NewMemoryStore(),
+		History:   store,
 		Logger:    log,
 	})
-	return conversationRunner{conv: conv}, nil
+	return conversationRunner{conv: conv}, cleanup, nil
 }
 
 // conversationRunner adapts an [agent.Conversation] to [assistanta2a.AgentRunner]:

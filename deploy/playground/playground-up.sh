@@ -323,6 +323,39 @@ if [ "$WITH_CATALOG" = 0 ] && [ "${FORCE_BASE:-0}" != "1" ]; then
   fi
 fi
 
+# ── Conversation store (durable history) before the assistant: the assistant
+# fails fast when CONVERSATION_STORE_URL is unreachable, so bring Postgres up
+# first. CloudNativePG owns provisioning: the vendored operator manifest is
+# installed into cnpg-system (idempotent, server-side apply — the CRDs are too
+# big for client-side), then the Cluster CR in 65-postgres.yaml. Images are
+# pulled on the HOST and kind-loaded so the cluster needs no registry egress.
+# NOTE: the operator is ADDITIVE shared infra (like the Envoy Gateway stack):
+# playground-down.sh removes the Cluster with the namespace but leaves
+# cnpg-system in place — other tenants of the shared cluster may adopt it.
+say "Conversation store (CloudNativePG)"
+CNPG_OPERATOR_MANIFEST="$SCRIPT_DIR/cnpg/cnpg-operator-1.30.0.yaml"
+CNPG_OPERATOR_IMAGE="${CNPG_OPERATOR_IMAGE:-ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0}"
+CNPG_POSTGRES_IMAGE="${CNPG_POSTGRES_IMAGE:-ghcr.io/cloudnative-pg/postgresql:17.8}"
+for img in "$CNPG_OPERATOR_IMAGE" "$CNPG_POSTGRES_IMAGE"; do
+  docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img"
+done
+kind load docker-image "$CNPG_OPERATOR_IMAGE" "$CNPG_POSTGRES_IMAGE" --name "$CLUSTER" 2>/dev/null \
+  || warn "kind load reported errors (attestation manifests) — verify below"
+docker exec "${CLUSTER}-control-plane" crictl images | grep -q cloudnative-pg/postgresql \
+  || { echo "ABORT: CNPG postgres image not on the node" >&2; exit 1; }
+kc apply --server-side --force-conflicts -f "$CNPG_OPERATOR_MANIFEST"
+kc -n cnpg-system rollout status deploy/cnpg-controller-manager --timeout=180s \
+  || kc -n cnpg-system wait --for=condition=Available deploy/cnpg-controller-manager --timeout=180s
+# The Cluster apply needs the operator's admission webhook answering; retry
+# through its readiness window.
+for i in $(seq 1 18); do
+  kc apply -f "$MANIFESTS/65-postgres.yaml" 2>/dev/null && break
+  [ "$i" = 18 ] && { echo "ABORT: CNPG webhook never admitted the Cluster" >&2; exit 1; }
+  sleep 10
+done
+kc -n "$NS" wait --for=condition=Ready cluster/conversation-store --timeout=600s
+ok "conversation store ready (CNPG cluster; history survives restarts)"
+
 ASSISTANT_FILE="$RUN_DIR/70-assistant.yaml"
 sed "s#__GATEWAY_URL__#${GATEWAY_URL}#" \
   "$MANIFESTS/70-assistant.tmpl.yaml" > "$ASSISTANT_FILE"

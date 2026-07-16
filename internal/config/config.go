@@ -103,6 +103,12 @@ type Config struct {
 	// composed.
 	CapabilityProviderURL string
 
+	// ConversationStoreURL is the PostgreSQL URL for durable conversation
+	// history (env CONVERSATION_STORE_URL). Empty ⇒ in-memory history
+	// (process lifetime). When set, an unreachable database fails boot —
+	// a service configured for durable history must not silently forget.
+	ConversationStoreURL string
+
 	Model ModelConfig
 	Usage UsageConfig
 }
@@ -216,6 +222,14 @@ func Load(getenv func(string) string) (*Config, error) {
 			"CAPABILITY_PROVIDER_URL and CAPABILITY_DOCS_FIXTURE are mutually exclusive — set at most one capability source"})
 	}
 
+	conversationStoreURL := env("CONVERSATION_STORE_URL")
+	if conversationStoreURL != "" &&
+		!strings.HasPrefix(conversationStoreURL, "postgres://") &&
+		!strings.HasPrefix(conversationStoreURL, "postgresql://") {
+		errs = append(errs, FieldError{"CONVERSATION_STORE_URL",
+			"must be a postgres:// or postgresql:// URL (or empty for in-memory history)"})
+	}
+
 	if len(errs) > 0 {
 		return nil, &Error{Errors: errs}
 	}
@@ -243,6 +257,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		},
 		CapabilityDocsFixture: capabilityDocsFixture,
 		CapabilityProviderURL: capabilityProviderURL,
+		ConversationStoreURL:  conversationStoreURL,
 		Model: ModelConfig{
 			Mode:               modelMode,
 			AnthropicAPIKey:    anthropicKey,

@@ -192,6 +192,7 @@ needed).
 | `OIDC_PROJECTS_CLAIM` | `projects` | JWT claim carrying granted projects |
 | `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file (fixture source); mutually exclusive with `CAPABILITY_PROVIDER_URL` |
 | `CAPABILITY_PROVIDER_URL` | — | Base URL of the capability-provider HTTP API (HTTP source); mutually exclusive with `CAPABILITY_DOCS_FIXTURE`. Both unset ⇒ no provider capabilities |
+| `CONVERSATION_STORE_URL` | — | `postgres://` URL for durable conversation history. Unset ⇒ in-memory (process lifetime). Set but unreachable ⇒ boot fails (no silent fallback to amnesia) |
 | `MODEL_MODE` | `anthropic` if key else `mock` | `anthropic` \| `mock` \| `gateway` |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_MODE=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Anthropic model id |
@@ -466,9 +467,16 @@ Semantics:
   budget (default 6000; oldest turns drop first, whole turns at a time),
   bounding the input-token cost of long conversations. Replayed tokens
   are real input tokens and are metered as such.
-- **Durability**: in-memory — history lives for the service process
-  lifetime. A durable conversation store (and with it, conversation
-  listing for consumers like the portal) is a documented follow-up.
+- **Durability**: set `CONVERSATION_STORE_URL` (a `postgres://` URL) and
+  history is stored durably — conversations and messages live in two
+  project-scoped Postgres tables and survive service restarts. Every
+  query is keyed by `(project_name, context_id)`; the replay query is
+  bounded (newest ~200 turns) regardless of conversation length; a
+  turn's two message rows are written transactionally so concurrent
+  appends never interleave. Unset, history is in-memory (process
+  lifetime). Both stores implement the same `history.Store` seam, plus
+  a `Lister` (per-project conversation listing, newest activity first)
+  for a future conversation API.
 
 ## Metering
 
@@ -591,11 +599,12 @@ against the pre-port golden — see `e2e/E2E-REPORT.md`.
 - **Agent card signing** — the card is currently unsigned.
 - **Durable task store** — the in-memory task store is behind an
   interface; swap for a persistent backend (tasks are lost on restart).
-- **Durable conversation store** — conversation history (see
-  "Conversation memory") is in-memory behind the `history.Store`
-  interface; the durable design under evaluation is Conversation as a
-  KRM resource (aggregated apiserver) with messages in Postgres behind a
-  subresource, which also gives consumers a conversation list.
+- **Conversation API surface** — the Postgres storage layer for
+  conversations/messages is in (`CONVERSATION_STORE_URL`, see
+  "Conversation memory"), including per-project listing. What remains
+  is the consumer-facing API on top: Conversation as a KRM resource
+  (aggregated apiserver) with messages behind a subresource, so portal
+  and CLI can list and reopen conversations with platform authz.
 - **SSRF hardening** — knowledge fetches trust operator-reviewed document
   URLs; add an egress allow-list at the gateway for production.
 ```

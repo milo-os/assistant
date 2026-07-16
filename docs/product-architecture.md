@@ -116,11 +116,12 @@ budgets (BackendTrafficPolicy 429s) as the cost-control backstop.
    derivation from reviewed configurations (see the enhancement doc).
 3. **Portal v1.0 translator** — the portal's A2A client still speaks
    the v0.3 wire; method names + stream parsing need the v1.0 update.
-4. **Durable conversation store** — chat memory is in-memory today
-   (process lifetime); the candidate design is Conversation as a KRM
-   resource via an aggregated apiserver with messages in Postgres
-   behind a subresource, which also gives consumers a conversation
-   list and history that survives restarts.
+4. **Conversation API surface** — the storage layer is done: with
+   `CONVERSATION_STORE_URL` set, conversations and messages persist in
+   project-scoped Postgres tables and history survives restarts. What
+   remains is the consumer-facing API: Conversation as a KRM resource
+   via an aggregated apiserver, messages behind a subresource, so the
+   portal/CLI can list and reopen conversations under platform authz.
 5. **Signed agent cards** — supported by a2a-go; enterprise trust
    follow-up.
 6. **agentcore extraction** — the provider-neutral loop/model layer is

@@ -11,7 +11,9 @@ package history
 
 import (
 	"context"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/milo-os/assistant/agentcore"
 )
@@ -33,12 +35,18 @@ type Store interface {
 	Append(ctx context.Context, projectName, contextID string, turn Turn) error
 }
 
-// MemoryStore is an in-process [Store]. History lives for the lifetime of the
-// service process — enough for the playground and for proving the replay
-// path; durability is the conversation-store slice.
+// MemoryStore is an in-process [Store] and [Lister]. History lives for the
+// lifetime of the service process; [PostgresStore] is the durable equivalent
+// behind the same interfaces.
 type MemoryStore struct {
 	mu    sync.Mutex
 	turns map[storeKey][]Turn
+	meta  map[storeKey]*memoryMeta
+}
+
+type memoryMeta struct {
+	createdAt    time.Time
+	lastActiveAt time.Time
 }
 
 type storeKey struct {
@@ -46,9 +54,17 @@ type storeKey struct {
 	context string
 }
 
+var (
+	_ Store  = (*MemoryStore)(nil)
+	_ Lister = (*MemoryStore)(nil)
+)
+
 // NewMemoryStore returns an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{turns: make(map[storeKey][]Turn)}
+	return &MemoryStore{
+		turns: make(map[storeKey][]Turn),
+		meta:  make(map[storeKey]*memoryMeta),
+	}
 }
 
 // Turns implements [Store].
@@ -69,8 +85,43 @@ func (s *MemoryStore) Append(_ context.Context, projectName, contextID string, t
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := storeKey{project: projectName, context: contextID}
+	now := time.Now()
+	if m, ok := s.meta[key]; ok {
+		m.lastActiveAt = now
+	} else {
+		s.meta[key] = &memoryMeta{createdAt: now, lastActiveAt: now}
+	}
 	s.turns[key] = append(s.turns[key], turn)
 	return nil
+}
+
+// ListConversations implements [Lister]: the project's conversations, newest
+// activity first. limit <= 0 uses 100.
+func (s *MemoryStore) ListConversations(_ context.Context, projectName string, limit int) ([]Conversation, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Conversation
+	for key, turns := range s.turns {
+		if key.project != projectName {
+			continue
+		}
+		m := s.meta[key]
+		out = append(out, Conversation{
+			ProjectName:  key.project,
+			ContextID:    key.context,
+			CreatedAt:    m.createdAt,
+			LastActiveAt: m.lastActiveAt,
+			TurnCount:    int64(len(turns)),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastActiveAt.After(out[j].LastActiveAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // Truncate drops the oldest turns until the estimated token cost of what
