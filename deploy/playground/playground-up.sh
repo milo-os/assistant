@@ -141,20 +141,37 @@ ok "baseline → $RUN_DIR/inventory.baseline.txt"
 # a busy shared node churns leader election across two ReplicaSets and stalls.
 # When EG is already Available we leave it strictly alone.
 say "Ensure Envoy Gateway (test-infra: task install-envoy-gateway-operator)"
-if kc -n "$EG_NS" get deploy envoy-gateway >/dev/null 2>&1 \
-   && kc -n "$EG_NS" wait --for=condition=Available deploy/envoy-gateway --timeout=5s >/dev/null 2>&1; then
-  ok "Envoy Gateway already installed + Available (leaving it untouched)"
+if kc -n "$EG_NS" get deploy envoy-gateway >/dev/null 2>&1; then
+  if kc -n "$EG_NS" wait --for=condition=Available deploy/envoy-gateway --timeout=10s >/dev/null 2>&1; then
+    ok "Envoy Gateway already installed + Available (leaving it untouched)"
+  else
+    # Present but not Ready: the shared operator pod can crashloop under the same
+    # VM contention that flaps cm/scheduler. Do NOT re-run the test-infra install
+    # — it blocks indefinitely on the crashlooping operator's rollout. An
+    # already-programmed Envoy data plane keeps serving without the operator, so
+    # on a re-run (our routes already programmed) it is safe to continue.
+    warn "Envoy Gateway operator present but NOT Ready — likely shared-cluster CP contention."
+    warn "NOT re-running the test-infra install (it would block on the crashlooping operator)."
+    warn "An already-programmed data plane still serves; continuing."
+  fi
 else
   ( cd "$TEST_INFRA_DIR" && task install-envoy-gateway-operator )
-  kc -n "$EG_NS" rollout status deploy/envoy-gateway --timeout=180s
-  ok "Envoy Gateway ready"
+  kc -n "$EG_NS" rollout status deploy/envoy-gateway --timeout=180s \
+    || kc -n "$EG_NS" wait --for=condition=Available deploy/envoy-gateway --timeout=60s \
+    || warn "Envoy Gateway not Available after install (shared CP may be flapping) — continuing"
+  ok "Envoy Gateway install attempted"
 fi
 
 say "Ensure Envoy AI Gateway $AIGW_VERSION (Helm)"
 ensure_api
-if kc -n "$AIGW_NS" get deploy ai-gateway-controller >/dev/null 2>&1 \
-   && kc -n "$AIGW_NS" wait --for=condition=Available deploy/ai-gateway-controller --timeout=5s >/dev/null 2>&1; then
-  ok "Envoy AI Gateway already installed + Available (skipping helm upgrade)"
+if kc -n "$AIGW_NS" get deploy ai-gateway-controller >/dev/null 2>&1; then
+  if kc -n "$AIGW_NS" wait --for=condition=Available deploy/ai-gateway-controller --timeout=10s >/dev/null 2>&1; then
+    ok "Envoy AI Gateway already installed + Available (skipping helm upgrade)"
+  else
+    warn "AI Gateway controller present but NOT Ready — likely shared-cluster CP contention."
+    warn "NOT re-running helm (--wait would block on the crashlooping controller)."
+    warn "Already-programmed routes still serve; continuing."
+  fi
 else
   helm --kubeconfig "$KCFG" upgrade -i aieg-crd \
     oci://docker.io/envoyproxy/ai-gateway-crds-helm --version "$AIGW_VERSION" \
@@ -162,8 +179,9 @@ else
   helm --kubeconfig "$KCFG" upgrade -i aieg \
     oci://docker.io/envoyproxy/ai-gateway-helm --version "$AIGW_VERSION" \
     --namespace "$AIGW_NS" --create-namespace --wait
-  kc -n "$AIGW_NS" wait --for=condition=Available deploy --all --timeout=180s
-  ok "AI Gateway controller ready"
+  kc -n "$AIGW_NS" wait --for=condition=Available deploy --all --timeout=180s \
+    || warn "AI Gateway not Available after install (shared CP may be flapping) — continuing"
+  ok "AI Gateway install attempted"
 fi
 
 EXT_SVC="$(kc -n "$AIGW_NS" get svc -o jsonpath='{range .items[?(@.spec.ports[0].port==1063)]}{.metadata.name}{end}' 2>/dev/null || true)"
@@ -202,7 +220,8 @@ else
   kc -n "$EG_NS" rollout status deploy/envoy-gateway --timeout=120s \
     || kc -n "$EG_NS" wait --for=condition=Available deploy/envoy-gateway --timeout=120s
 fi
-kc -n "$EG_NS" wait --for=condition=Available deploy/envoy-gateway --timeout=120s >/dev/null
+kc -n "$EG_NS" wait --for=condition=Available deploy/envoy-gateway --timeout=60s >/dev/null 2>&1 \
+  || warn "Envoy Gateway not Available (operator may be crashlooping under CP contention) — the already-programmed data plane still serves; continuing"
 ok "Envoy Gateway carries the AI Gateway extension"
 
 # ── 3. Build + kind-load images ───────────────────────────────
