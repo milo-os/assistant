@@ -32,6 +32,12 @@ vars:
   AIGW_NS: envoy-ai-gateway-system
   TOOL_DIR: '{{.ROOT_DIR}}/bin'
   CHAINSAW_VERSION: v0.2.15
+  # patch CLI defaults for dev:chat / dev:card. The dev token + project come
+  # from the overlay's `pg-demo-token:demo-user:demo-project`. Override on the
+  # CLI, e.g. `task dev:chat PROJECT=other`.
+  PATCH_URL: 'http://localhost:1986'
+  PATCH_TOKEN: 'pg-demo-token'
+  PROJECT: demo-project
 
 includes:
   test-infra:
@@ -183,7 +189,7 @@ tasks:
       - kubectl -n {{.NS}} wait --for=condition=Programmed gateway/patch-playground --timeout=300s
       - kubectl -n {{.NS}} rollout status deploy/assistant --timeout=300s
         || kubectl -n {{.NS}} wait --for=condition=Available deploy/assistant --timeout=120s
-      - 'echo "dev environment ready — task dev:forward, then: PATCH_URL=http://localhost:1986 PATCH_TOKEN=pg-demo-token go run ./cmd/patch chat -i --project demo-project"'
+      - 'echo "dev environment ready — chat with it:  task dev:chat   (one-shot: task dev:chat MSG=\"Diagnose pipeline p-1 for StreamCo\")"'
 
   dev:redeploy:
     desc: Fast loop — rebuild + reload the assistant image and roll the deployment
@@ -204,6 +210,46 @@ tasks:
       - kubectl -n {{.NS}} port-forward svc/assistant 1986:7820 &
         kubectl -n {{.EG_NS}} port-forward svc/patch-ai-gateway 1987:80 &
         wait
+
+  dev:chat:
+    desc: >-
+      Chat with the assistant. Interactive by default; one-shot with a message:
+      task dev:chat MSG="Diagnose pipeline p-1 for StreamCo". Continue a thread
+      with CTX=<context-id>. Auto-starts a port-forward if one isn't running.
+    silent: true
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+      PATCH_URL: '{{.PATCH_URL}}'
+      PATCH_TOKEN: '{{.PATCH_TOKEN}}'
+    cmds:
+      - |
+        # Reuse a port-forward if one is already up (e.g. `task dev:forward` in
+        # another terminal); otherwise forward svc/assistant for this invocation.
+        if ! curl -sf -m 2 -o /dev/null "$PATCH_URL/healthz" 2>/dev/null; then
+          echo "→ port-forwarding svc/assistant → localhost:1986 …"
+          kubectl -n {{.NS}} port-forward svc/assistant 1986:7820 >/dev/null 2>&1 &
+          for i in $(seq 1 30); do curl -sf -m 2 -o /dev/null "$PATCH_URL/healthz" 2>/dev/null && break; sleep 0.5; done
+        fi
+        if [ -n "{{.MSG}}" ]; then
+          go run ./cmd/patch chat "{{.MSG}}" --project {{.PROJECT}} {{if .CTX}}--context-id {{.CTX}}{{end}}
+        else
+          go run ./cmd/patch chat -i --project {{.PROJECT}} {{if .CTX}}--context-id {{.CTX}}{{end}}
+        fi
+
+  dev:card:
+    desc: Print the assistant's agent card (capability discovery). Auto-forwards.
+    silent: true
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+      PATCH_URL: '{{.PATCH_URL}}'
+      PATCH_TOKEN: '{{.PATCH_TOKEN}}'
+    cmds:
+      - |
+        if ! curl -sf -m 2 -o /dev/null "$PATCH_URL/healthz" 2>/dev/null; then
+          kubectl -n {{.NS}} port-forward svc/assistant 1986:7820 >/dev/null 2>&1 &
+          for i in $(seq 1 30); do curl -sf -m 2 -o /dev/null "$PATCH_URL/healthz" 2>/dev/null && break; sleep 0.5; done
+        fi
+        go run ./cmd/patch card --url "$PATCH_URL"
 
   dev:clean:
     desc: Remove this environment's namespace + GatewayClass (shared operators stay)
