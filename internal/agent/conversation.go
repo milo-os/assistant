@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/capability"
@@ -29,6 +30,13 @@ const DefaultMaxOutputTokens = 4096
 // input tokens on every subsequent request, so an unbounded conversation
 // would grow cost quadratically; oldest turns are dropped first.
 const DefaultHistoryTokenBudget = 6000
+
+// DefaultTurnTimeout is the overall wall-clock bound on a single conversation
+// turn when [Deps].TurnTimeout is unset. It covers every model call, tool
+// call, and retry backoff in the turn together, so a stuck real model or tool
+// cannot pin a request forever. Expiry ends the turn canceled (StateCanceled),
+// distinct from a normal completion.
+const DefaultTurnTimeout = 120 * time.Second
 
 // State is the terminal state of a conversation task.
 type State string
@@ -68,6 +76,16 @@ type Deps struct {
 	StepLimit          int
 	MaxOutputTokens    int
 	HistoryTokenBudget int
+	// TurnTimeout bounds the total wall-clock time of one turn when > 0;
+	// otherwise DefaultTurnTimeout applies. A negative value disables the
+	// per-turn deadline (the turn is bounded only by the caller's context).
+	TurnTimeout time.Duration
+	// MaxRetries, RetryBaseDelay, and RetryMaxDelay tune the loop's transient-
+	// failure retry (rate limit / overload / transient transport). Zero values
+	// use the agentcore defaults; a negative MaxRetries disables retries.
+	MaxRetries     int
+	RetryBaseDelay time.Duration
+	RetryMaxDelay  time.Duration
 	// Logger receives orchestration logs. Nil discards them.
 	Logger *slog.Logger
 }
@@ -171,7 +189,14 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	}
 	messages := append(history.Messages(c.loadHistory(ctx, params)),
 		agentcore.UserMessage(params.UserText))
-	inner := agentcore.Run(ctx, agentcore.LoopOptions{
+
+	// Bound the whole turn (every model call, tool call, and retry backoff)
+	// with one wall-clock deadline so a stuck real model or tool cannot pin
+	// the request forever. Expiry surfaces as a context deadline the loop maps
+	// to FinishCanceled. The cancel is released when the run finalizes.
+	turnCtx, cancelTurn := turnContext(ctx, c.deps.TurnTimeout)
+
+	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
 		Model:           c.deps.Model,
 		System:          BuildSystemPrompt(composed.SystemPromptAddendum),
 		Messages:        messages,
@@ -179,10 +204,14 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),
+		MaxRetries:      c.deps.MaxRetries,
+		RetryBaseDelay:  c.deps.RetryBaseDelay,
+		RetryMaxDelay:   c.deps.RetryMaxDelay,
 	})
 
 	return &Stream{
 		ctx:         ctx,
+		cancelTurn:  cancelTurn,
 		conv:        c,
 		params:      params,
 		inner:       inner,
@@ -191,6 +220,19 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		invMu:       &mu,
 		state:       StateCompleted,
 	}
+}
+
+// turnContext derives the per-turn context. A positive timeout applies a
+// wall-clock deadline; a negative one disables the bound (caller context only);
+// zero uses [DefaultTurnTimeout]. It always returns a cancel to release.
+func turnContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout < 0 {
+		return context.WithCancel(ctx)
+	}
+	if timeout == 0 {
+		timeout = DefaultTurnTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 // loadHistory returns the conversation's prior turns, truncated to the token
@@ -246,6 +288,7 @@ func attributionHeaders(mode, projectName, contextID string) map[string]string {
 // the terminal [Result], available after Recv reports io.EOF.
 type Stream struct {
 	ctx         context.Context
+	cancelTurn  context.CancelFunc
 	conv        *Conversation
 	params      Params
 	inner       agentcore.StreamReader
@@ -333,6 +376,12 @@ func (s *Stream) finalize() {
 		return
 	}
 	s.finalized = true
+
+	// Release the per-turn deadline timer now that the run is done. Metering
+	// below runs on a cancel-immune context, so this cannot cut it short.
+	if s.cancelTurn != nil {
+		s.cancelTurn()
+	}
 
 	_ = s.composed.Close()
 

@@ -138,14 +138,23 @@ func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal
 		// DENY-BY-DEFAULT. a2a-go v2 also dispatches ListTasks, SubscribeToTask
 		// and the push-config methods (CreateTaskPushNotificationConfig,
 		// GetTaskPushNotificationConfig, ListTaskPushNotificationConfigs,
-		// DeleteTaskPushNotificationConfig) plus GetExtendedAgentCard. None have
-		// per-project scoping here, and the shared task store is built with a
-		// constant Authenticator (server.go), so it applies NO per-user/project
-		// filter: an unguarded ListTasks would hand every project's tasks — with
-		// their message History — to any valid token, even a zero-grant one.
-		// Until per-project scoping exists, reject every non-gated method. This
-		// also covers truly-unknown methods, which a2a-go would otherwise pass
-		// straight to the handler.
+		// DeleteTaskPushNotificationConfig) plus GetExtendedAgentCard.
+		//
+		// ListTasks stays DENIED even though the durable store now carries the
+		// owning project on every row (internal/taskstore): a2a-go's ListTasks
+		// RPC — and the a2astore.Store.List signature it dispatches to — carry NO
+		// caller identity, so the handler cannot pass the caller's granted
+		// projects into the store. Scoping ListTasks safely therefore needs a
+		// dedicated endpoint that threads the principal's grants into
+		// PostgresStore.ListForProjects; until that endpoint exists, an exposed
+		// ListTasks would hand every project's tasks — with their message
+		// History — to any valid token, even a zero-grant one, so we reject it
+		// here. (The store's interface-level List is itself tenant-safe by
+		// default: with no scope on the context it returns an empty page.)
+		//
+		// The same reasoning denies SubscribeToTask and the push-config methods.
+		// This also covers truly-unknown methods, which a2a-go would otherwise
+		// pass straight to the handler.
 		return auth.Unauthorized("Method not permitted")
 	}
 }

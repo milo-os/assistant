@@ -135,6 +135,49 @@ func TestComposeKnowledge_RendersSourcesAndConcepts(t *testing.T) {
 	}
 }
 
+// ExpectedProject is a defense-in-depth tenant check: a document whose
+// namespace names a different project is dropped (its knowledge never composes),
+// a document in the calling project survives, and a document with no namespace
+// is kept (the Source stays the scoping authority there).
+func TestCompose_ScopesDocumentsByProject(t *testing.T) {
+	var buf bytes.Buffer
+	mine := streamcoDoc(func(d *CapabilityDocument) {
+		d.Metadata.Namespace = "demo-project"
+		d.Spec.Tools = &Tools{}
+	})
+	foreign := streamcoDoc(func(d *CapabilityDocument) {
+		d.Metadata = &Metadata{Name: "leaked", Namespace: "other-tenant"}
+		d.Spec.ServiceName = "leak.evil.example"
+		d.Spec.Knowledge = &Knowledge{Concepts: []KnowledgeConcept{{GVK: GVKRef{Group: "leak.evil.example", Kind: "Secret"}, Summary: "cross-tenant leak"}}}
+		d.Spec.Tools = &Tools{}
+	})
+	nons := streamcoDoc(func(d *CapabilityDocument) {
+		d.Metadata = nil // no namespace => Source is trusted for scoping
+		d.Spec.ServiceName = "dns.acme.example"
+		d.Spec.Knowledge = &Knowledge{Concepts: []KnowledgeConcept{{GVK: GVKRef{Group: "dns.acme.example", Kind: "Zone"}, Summary: "a DNS zone"}}}
+		d.Spec.Tools = &Tools{}
+	})
+	composed, _ := Compose(context.Background(), []CapabilityDocument{mine, foreign, nons}, ComposeOptions{
+		ExpectedProject: "demo-project",
+		Logger:          testLogger(&buf),
+	})
+	defer composed.Close()
+
+	a := composed.SystemPromptAddendum
+	if !strings.Contains(a, streamcoHeader) {
+		t.Fatalf("calling-project document must survive:\n%s", a)
+	}
+	if !strings.Contains(a, "a DNS zone") {
+		t.Fatalf("namespace-less document must survive:\n%s", a)
+	}
+	if strings.Contains(a, "cross-tenant leak") {
+		t.Fatalf("foreign-namespace document must be dropped:\n%s", a)
+	}
+	if !strings.Contains(buf.String(), "capability.scope.rejected") {
+		t.Fatalf("expected a scope.rejected warning; logs:\n%s", buf.String())
+	}
+}
+
 func TestComposeKnowledge_GroupsPerService(t *testing.T) {
 	streamco := streamcoDoc(func(d *CapabilityDocument) { d.Spec.Tools = &Tools{} })
 	other := streamcoDoc(func(d *CapabilityDocument) {

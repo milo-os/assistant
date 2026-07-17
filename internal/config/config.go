@@ -12,6 +12,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -24,6 +26,25 @@ const (
 	AuthModeDev AuthMode = "dev"
 	// AuthModeOIDC verifies bearer JWTs against an OIDC issuer's JWKS.
 	AuthModeOIDC AuthMode = "oidc"
+)
+
+// AuthzMode selects the request authorizer (who may act on a project).
+type AuthzMode string
+
+const (
+	// AuthzModeClaims decides from the project grants the credential carries
+	// (the v0 ClaimsAuthorizer). Default.
+	AuthzModeClaims AuthzMode = "claims"
+	// AuthzModeSAR issues a SubjectAccessReview against the Milo control plane
+	// (auth.NewSubjectAccessReviewAuthorizer). Requires a reachable API endpoint.
+	AuthzModeSAR AuthzMode = "sar"
+)
+
+// Standard in-cluster service-account mount paths, used to derive the SAR
+// endpoint and credentials when AUTHZ_MODE=sar and no explicit endpoint is set.
+const (
+	defaultSARTokenPath  = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	defaultSARCACertPath = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
 
 // ModelMode selects the model backend.
@@ -57,6 +78,25 @@ type AuthConfig struct {
 	OIDCAudience string
 	// OIDCProjectsClaim is the JWT claim carrying the granted project names.
 	OIDCProjectsClaim string
+
+	// AuthzMode selects the authorizer: "claims" (default) trusts the grants the
+	// credential carries; "sar" issues a SubjectAccessReview to the control plane.
+	AuthzMode AuthzMode
+	// SARAPIURL is the control-plane API base URL the SubjectAccessReview is
+	// POSTed to (env AUTHZ_SAR_API_URL). When unset in sar mode it is derived
+	// from the in-cluster KUBERNETES_SERVICE_HOST/PORT.
+	SARAPIURL string
+	// SARGroup/Resource/Verb override the resourceAttributes triple the SAR asks
+	// about (envs AUTHZ_SAR_GROUP/RESOURCE/VERB). Empty ⇒ the auth package
+	// defaults (assistant.miloapis.com / conversations / create).
+	SARGroup    string
+	SARResource string
+	SARVerb     string
+	// SARTokenPath/SARCACertPath point at the assistant's own service-account
+	// token and CA bundle for the SAR call (envs AUTHZ_SAR_TOKEN_PATH /
+	// AUTHZ_SAR_CA_CERT_PATH). Default to the standard in-cluster mount paths.
+	SARTokenPath  string
+	SARCACertPath string
 }
 
 // ModelConfig holds the model-backend settings.
@@ -195,6 +235,32 @@ func Load(getenv func(string) string) (*Config, error) {
 		projectsClaim = defaultProjectsClaim
 	}
 
+	// ── Authorization mode ────────────────────────────────────
+	authzMode := AuthzMode(oneOf(env("AUTHZ_MODE"), []string{"claims", "sar"}, "claims"))
+	sarAPIURL := strings.TrimRight(env("AUTHZ_SAR_API_URL"), "/")
+	if authzMode == AuthzModeSAR && sarAPIURL == "" {
+		// Derive the in-cluster apiserver endpoint from the injected env, so a
+		// pod need only set AUTHZ_MODE=sar.
+		if host := env("KUBERNETES_SERVICE_HOST"); host != "" {
+			port := env("KUBERNETES_SERVICE_PORT")
+			if port == "" {
+				port = "443"
+			}
+			sarAPIURL = "https://" + net.JoinHostPort(host, port)
+		} else {
+			errs = append(errs, FieldError{"AUTHZ_SAR_API_URL",
+				"AUTHZ_MODE=sar requires AUTHZ_SAR_API_URL (no in-cluster KUBERNETES_SERVICE_HOST to derive it from)"})
+		}
+	}
+	sarTokenPath := env("AUTHZ_SAR_TOKEN_PATH")
+	if sarTokenPath == "" {
+		sarTokenPath = defaultSARTokenPath
+	}
+	sarCACertPath := env("AUTHZ_SAR_CA_CERT_PATH")
+	if sarCACertPath == "" {
+		sarCACertPath = defaultSARCACertPath
+	}
+
 	// ── Model ─────────────────────────────────────────────────
 	anthropicKey := env("ANTHROPIC_API_KEY")
 	gatewayURL := env("GATEWAY_URL")
@@ -240,6 +306,13 @@ func Load(getenv func(string) string) (*Config, error) {
 			"must be a postgres:// or postgresql:// URL (or empty for in-memory history)"})
 	}
 
+	// ── Production-posture invariants ─────────────────────────
+	// Refuse to boot on a configuration that silently runs dev-grade security on
+	// an internet-facing deployment. These are narrow enough that every existing
+	// dev/e2e config (loopback / plaintext-http / .test hosts) still boots; they
+	// only fire on the specific unsafe combinations below.
+	errs = append(errs, productionInvariants(authMode, authzMode, publicBaseURL, gatewayURL, modelMode, env("AUTH_DEV_TOKENS"))...)
+
 	if len(errs) > 0 {
 		return nil, &Error{Errors: errs}
 	}
@@ -264,9 +337,16 @@ func Load(getenv func(string) string) (*Config, error) {
 			OIDCIssuer:        env("OIDC_ISSUER"),
 			OIDCAudience:      env("OIDC_AUDIENCE"),
 			OIDCProjectsClaim: projectsClaim,
+			AuthzMode:         authzMode,
+			SARAPIURL:         sarAPIURL,
+			SARGroup:          env("AUTHZ_SAR_GROUP"),
+			SARResource:       env("AUTHZ_SAR_RESOURCE"),
+			SARVerb:           env("AUTHZ_SAR_VERB"),
+			SARTokenPath:      sarTokenPath,
+			SARCACertPath:     sarCACertPath,
 		},
-		CapabilityDocsFixture: capabilityDocsFixture,
-		CapabilityProviderURL: capabilityProviderURL,
+		CapabilityDocsFixture:          capabilityDocsFixture,
+		CapabilityProviderURL:          capabilityProviderURL,
 		ConversationStoreURL:           conversationStoreURL,
 		AllowPrivateCapabilityNetworks: isTruthy(env("CAPABILITY_ALLOW_PRIVATE_NETWORKS")),
 		Model: ModelConfig{
@@ -288,6 +368,86 @@ func Load(getenv func(string) string) (*Config, error) {
 // MapGetenv adapts a map to the getenv function [Load] expects (test helper).
 func MapGetenv(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
+}
+
+// productionInvariants enforces the "refuse to boot on an unsafe production
+// posture" rules. Each rule targets a specific dev-grade setting exposed on an
+// internet-facing surface; none fire for a loopback/plaintext-http/internal-host
+// deployment, so the dev and e2e configs still boot.
+func productionInvariants(authMode AuthMode, authzMode AuthzMode, publicBaseURL, gatewayURL string, modelMode ModelMode, devTokens string) []FieldError {
+	var errs []FieldError
+
+	// 1. Static dev tokens behind a TLS public endpoint. AUTH_MODE=dev is a
+	//    shared-secret posture; an https PUBLIC_BASE_URL means the service is
+	//    internet-facing, where dev tokens must never be the only gate. (Plain
+	//    http:// dev/e2e URLs — localhost, *.test — are unaffected.)
+	if authMode == AuthModeDev && schemeOf(publicBaseURL) == "https" {
+		errs = append(errs, FieldError{"AUTH_MODE",
+			"AUTH_MODE=dev with an https:// PUBLIC_BASE_URL is an unsafe production posture (static dev tokens on an internet-facing endpoint); use AUTH_MODE=oidc"})
+	}
+
+	// 2. Leftover dev tokens in a non-dev auth mode. In oidc mode AUTH_DEV_TOKENS
+	//    is ignored — its presence signals a stale/committed dev credential that
+	//    must not ship.
+	if authMode == AuthModeOIDC && strings.TrimSpace(devTokens) != "" {
+		errs = append(errs, FieldError{"AUTH_DEV_TOKENS",
+			"AUTH_DEV_TOKENS must not be set when AUTH_MODE=oidc — remove the dev token before production"})
+	}
+
+	// 3. Plaintext model gateway to an external host. Gateway mode carries the
+	//    prompt (and the gateway injects the upstream key), so a plaintext http
+	//    hop to a host outside the cluster/loopback exposes it in transit.
+	//    In-cluster (ClusterIP / *.svc.cluster.local) and loopback gateways over
+	//    http are the intended dev/deployed posture and stay allowed.
+	if modelMode == ModelModeGateway && schemeOf(gatewayURL) == "http" && !isInternalHost(hostOf(gatewayURL)) {
+		errs = append(errs, FieldError{"GATEWAY_URL",
+			"MODEL_MODE=gateway over plaintext http:// to an external host exposes prompts in transit; use https or an in-cluster/loopback endpoint"})
+	}
+
+	return errs
+}
+
+// schemeOf returns the lowercased URL scheme, or "" when unparseable.
+func schemeOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme)
+}
+
+// hostOf returns the hostname (no port) of rawURL, or "".
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// isInternalHost reports whether host is loopback, a private/link-local IP, or a
+// cluster-internal DNS name (a single label, or an internal suffix like
+// .svc.cluster.local / .internal / .local). Public IP literals and registered
+// public domains are NOT internal. An empty host is treated as internal (there
+// is nothing external to protect).
+func isInternalHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "" || host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+	}
+	// A bare single-label name (e.g. a Kubernetes Service name) is in-cluster.
+	if !strings.Contains(host, ".") {
+		return true
+	}
+	for _, suffix := range []string{".svc.cluster.local", ".svc", ".cluster.local", ".internal", ".local"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func oneOf(value string, allowed []string, fallback string) string {

@@ -3,11 +3,14 @@ package openaicompat
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/milo-os/assistant/agentcore"
 )
@@ -257,5 +260,144 @@ func TestMisroutedRequestFailsLoudly(t *testing.T) {
 	}
 	if !sawError {
 		t.Fatal("misrouted request produced neither an error part nor a stream error")
+	}
+}
+
+// errorServer returns an HTTP error with the given status/body/headers on every
+// request, counting hits so a test can prove the adapter makes exactly one
+// request (SDK-internal retry must be off; retry is the loop's job).
+func errorServer(t *testing.T, status int, body string, headers map[string]string, hits *int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*hits++
+		for k, v := range headers {
+			w.Header().Set(k, v)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+}
+
+// streamErr drives the model and returns the terminal error the stream carries.
+func streamErr(t *testing.T, m *Model) error {
+	t.Helper()
+	s, err := m.Stream(context.Background(), agentcore.Request{Messages: []agentcore.Message{agentcore.UserMessage("hi")}})
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	for {
+		p, rerr := s.Recv()
+		if rerr == io.EOF {
+			return nil
+		}
+		if rerr != nil {
+			return rerr
+		}
+		if p.Kind == agentcore.StreamPartError {
+			return p.Err
+		}
+	}
+}
+
+// TestClassifiesStatuses pins that OpenAI-compatible HTTP errors surface as
+// classified [agentcore.ModelError]s: 429/503 retryable, 401/400 terminal, and
+// that the adapter makes exactly one request (no hidden SDK retry).
+func TestClassifiesStatuses(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		body      string
+		wantClass agentcore.ErrorClass
+		retryable bool
+	}{
+		{"rate-limited", 429, `{"error":{"message":"rate limit","type":"rate_limit_exceeded"}}`, agentcore.ErrClassRateLimited, true},
+		{"unavailable", 503, `{"error":{"message":"unavailable"}}`, agentcore.ErrClassOverloaded, true},
+		{"auth", 401, `{"error":{"message":"bad key","type":"invalid_request_error","code":"invalid_api_key"}}`, agentcore.ErrClassAuth, false},
+		{"invalid", 400, `{"error":{"message":"bad param","type":"invalid_request_error"}}`, agentcore.ErrClassInvalidRequest, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var hits int
+			srv := errorServer(t, c.status, c.body, nil, &hits)
+			defer srv.Close()
+
+			m := New(Options{ModelID: "patch-stub-v1", BaseURL: srv.URL})
+			err := streamErr(t, m)
+			var me *agentcore.ModelError
+			if !errors.As(err, &me) {
+				t.Fatalf("error is not a classified ModelError: %v", err)
+			}
+			if me.Class != c.wantClass {
+				t.Fatalf("class = %v, want %v", me.Class, c.wantClass)
+			}
+			if me.Class.Retryable() != c.retryable {
+				t.Fatalf("retryable = %v, want %v", me.Class.Retryable(), c.retryable)
+			}
+			if hits != 1 {
+				t.Fatalf("adapter made %d requests, want exactly 1 (SDK retry must be off)", hits)
+			}
+		})
+	}
+}
+
+// TestClassifiesContextLength pins that a 400 the endpoint attributes to
+// context length is bucketed as terminal context-length with a clear message.
+func TestClassifiesContextLength(t *testing.T) {
+	var hits int
+	srv := errorServer(t, 400, `{"error":{"message":"This model's maximum context length is 128000 tokens","type":"invalid_request_error","code":"context_length_exceeded"}}`, nil, &hits)
+	defer srv.Close()
+
+	m := New(Options{ModelID: "patch-stub-v1", BaseURL: srv.URL})
+	err := streamErr(t, m)
+	var me *agentcore.ModelError
+	if !errors.As(err, &me) {
+		t.Fatalf("not a ModelError: %v", err)
+	}
+	if me.Class != agentcore.ErrClassContextLength {
+		t.Fatalf("class = %v, want context-length", me.Class)
+	}
+	if me.Class.Retryable() {
+		t.Fatal("context-length must be terminal")
+	}
+	if !strings.Contains(err.Error(), "context window") {
+		t.Fatalf("message should be actionable, got %q", err.Error())
+	}
+}
+
+// TestClassifyHonorsRetryAfterHeader pins that a Retry-After on a 429 lands on
+// the classified error for the loop to honor.
+func TestClassifyHonorsRetryAfterHeader(t *testing.T) {
+	var hits int
+	srv := errorServer(t, 429, `{"error":{"message":"slow"}}`, map[string]string{"Retry-After": "3"}, &hits)
+	defer srv.Close()
+
+	m := New(Options{ModelID: "patch-stub-v1", BaseURL: srv.URL})
+	err := streamErr(t, m)
+	var me *agentcore.ModelError
+	if !errors.As(err, &me) {
+		t.Fatalf("not a ModelError: %v", err)
+	}
+	if me.RetryAfter != 3*time.Second {
+		t.Fatalf("RetryAfter = %v, want 3s", me.RetryAfter)
+	}
+}
+
+// TestClassifyPassesThroughCancellation pins that a cancellation/deadline is
+// returned unchanged (never a retryable ModelError), so the loop ends canceled.
+func TestClassifyPassesThroughCancellation(t *testing.T) {
+	for _, cancelErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		got := classify(cancelErr)
+		if !errors.Is(got, cancelErr) {
+			t.Fatalf("classify(%v) = %v, want the cancellation passed through", cancelErr, got)
+		}
+		var me *agentcore.ModelError
+		if errors.As(got, &me) {
+			t.Fatalf("cancellation must not become a ModelError, got class %v", me.Class)
+		}
+	}
+	if _, isModelErr := classify(fmt.Errorf("do request: %w", context.Canceled)).(*agentcore.ModelError); isModelErr {
+		t.Fatal("a wrapped cancellation must not be classified as a retryable ModelError")
 	}
 }

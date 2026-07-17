@@ -78,6 +78,83 @@ func TestIPGuard_BlocksNonRoutableAllowsPublic(t *testing.T) {
 	}
 }
 
+// Allow-list (untrusted-provider) posture: with an allow-list set the policy
+// inverts from "block private" to "permit only reviewed hosts". A sanctioned
+// host passes (even on a private/gateway IP), a non-listed host is refused even
+// when it resolves to a public address, and the always-blocked set still holds
+// for an allow-listed host that resolves to metadata.
+func TestIPGuard_AllowList(t *testing.T) {
+	al, err := parseHostAllowList([]string{"api.streamco.example"}, []string{"10.96.0.0/12"})
+	if err != nil {
+		t.Fatalf("parseHostAllowList: %v", err)
+	}
+	newGuard := func(m map[string][]string) *ipGuard {
+		g := newIPGuard(false, staticResolver(m))
+		g.allow = al
+		return g
+	}
+
+	// Sanctioned host by exact match, resolving to a public IP: permitted.
+	g := newGuard(map[string][]string{"api.streamco.example": {"93.184.216.34"}})
+	if err := g.checkURL(context.Background(), "http://api.streamco.example/docs"); err != nil {
+		t.Errorf("allow-listed host should pass: %v", err)
+	}
+	// Sanctioned host as a domain suffix.
+	gSub := newGuard(map[string][]string{"eu.api.streamco.example": {"93.184.216.34"}})
+	if err := gSub.checkURL(context.Background(), "http://eu.api.streamco.example/docs"); err != nil {
+		t.Errorf("subdomain of an allow-listed host should pass: %v", err)
+	}
+	// Sanctioned gateway CIDR: a private gateway IP is permitted by CIDR match
+	// even though allowPrivate is false — the allow-list replaces the IP policy.
+	gGw := newGuard(map[string][]string{"gateway.internal": {"10.96.0.10"}})
+	if err := gGw.checkURL(context.Background(), "http://gateway.internal/mcp"); err != nil {
+		t.Errorf("allow-listed gateway CIDR should pass: %v", err)
+	}
+	// A non-listed host is refused even though it resolves to a public address.
+	gPub := newGuard(map[string][]string{"evil.example": {"93.184.216.34"}})
+	if err := gPub.checkURL(context.Background(), "http://evil.example/x"); err == nil {
+		t.Error("non-listed public host must be refused under an allow-list")
+	}
+	// Defense in depth: an allow-listed host resolving to cloud metadata is still
+	// refused by the always-blocked set.
+	gMeta := newGuard(map[string][]string{"api.streamco.example": {"169.254.169.254"}})
+	if err := gMeta.checkURL(context.Background(), "http://api.streamco.example/x"); err == nil {
+		t.Error("allow-listed host resolving to IMDS must still be refused")
+	}
+}
+
+// A malformed gateway CIDR fails closed at parse time rather than silently
+// widening/narrowing the allow-list.
+func TestParseHostAllowList_BadCIDR(t *testing.T) {
+	if _, err := parseHostAllowList(nil, []string{"not-a-cidr"}); err == nil {
+		t.Fatal("a malformed CIDR should be a hard error")
+	}
+	// An all-blank input yields a non-nil, empty list => IP-policy fallback.
+	al, err := parseHostAllowList([]string{"  ", "."}, []string{""})
+	if err != nil {
+		t.Fatalf("blank input should not error: %v", err)
+	}
+	if !al.empty() {
+		t.Fatal("all-blank input should produce an empty allow-list")
+	}
+}
+
+// The empty-allow-list path preserves the original IP-policy behavior: the
+// guard blocks private and permits public exactly as before.
+func TestIPGuard_EmptyAllowListPreservesIPPolicy(t *testing.T) {
+	al, _ := parseHostAllowList(nil, nil)
+	gPriv := newIPGuard(false, staticResolver(map[string][]string{"h": {"10.0.0.5"}}))
+	gPriv.allow = al
+	if err := gPriv.checkURL(context.Background(), "http://h/x"); err == nil {
+		t.Error("empty allow-list must keep blocking private addresses")
+	}
+	gPub := newIPGuard(false, staticResolver(map[string][]string{"h": {"93.184.216.34"}}))
+	gPub.allow = al
+	if err := gPub.checkURL(context.Background(), "http://h/x"); err != nil {
+		t.Errorf("empty allow-list must keep permitting public addresses: %v", err)
+	}
+}
+
 // A knowledge source pointed at an internal/metadata address is refused by the
 // guarded client at dial time: the body never reaches the prompt, while the
 // service header and concepts survive (degrade, not fail).
@@ -102,6 +179,45 @@ func TestComposeKnowledge_RefusesPrivateSource(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "knowledge.fetch_failed") {
 		t.Fatalf("expected a fetch_failed warning; logs:\n%s", buf.String())
+	}
+}
+
+// The allow-list wires through ComposeOptions: a knowledge source whose host is
+// not on AllowedHosts is refused at dial time even though it resolves to a
+// PUBLIC address, so the body never reaches the prompt while header + concepts
+// survive. This proves Compose is in allow-list (untrusted-provider) mode, not
+// merely the IP policy (which would have permitted the public host).
+func TestComposeKnowledge_AllowListRefusesNonListedPublicSource(t *testing.T) {
+	var buf bytes.Buffer
+	doc := streamcoDoc(func(d *CapabilityDocument) {
+		d.Spec.Tools = &Tools{}
+		d.Spec.Knowledge.Sources = []KnowledgeSource{{Type: KnowledgeLLMDocs, Title: "Docs", URL: "http://unlisted.example/docs"}}
+	})
+	composed, _ := Compose(context.Background(), []CapabilityDocument{doc}, ComposeOptions{
+		AllowedHosts: []string{"docs.streamco.example"},
+		resolver:     staticResolver(map[string][]string{"unlisted.example": {"93.184.216.34"}}),
+		Logger:       testLogger(&buf),
+	})
+	defer composed.Close()
+
+	a := composed.SystemPromptAddendum
+	if !strings.Contains(a, streamcoHeader) || !strings.Contains(a, "A live media stream") {
+		t.Fatalf("header + concepts must survive an allow-list refusal:\n%s", a)
+	}
+	if strings.Contains(a, "### Docs") {
+		t.Fatalf("non-listed source body must not appear:\n%s", a)
+	}
+	if !strings.Contains(buf.String(), "knowledge.fetch_failed") {
+		t.Fatalf("expected a fetch_failed warning; logs:\n%s", buf.String())
+	}
+}
+
+// A malformed AllowedCIDRs entry fails composition closed rather than silently
+// dropping the intended gateway range.
+func TestCompose_BadAllowListCIDRErrors(t *testing.T) {
+	_, err := Compose(context.Background(), nil, ComposeOptions{AllowedCIDRs: []string{"garbage"}})
+	if err == nil {
+		t.Fatal("a malformed allow-list CIDR should fail composition")
 	}
 }
 

@@ -5,7 +5,13 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 )
+
+// errConsumerGone is an internal sentinel: an attempt stops early because the
+// stream's consumer closed it (emit returned false). It is never surfaced to
+// the caller and never triggers a retry — the run simply unwinds.
+var errConsumerGone = errors.New("agentcore: stream consumer closed")
 
 // DefaultStepLimit is the number of model steps (tool-call rounds) [Run]
 // allows before it stops gracefully. It is used when [LoopOptions].StepLimit
@@ -41,6 +47,17 @@ type LoopOptions struct {
 	// usage for billing (loop rule 4); the aggregate is also delivered on the
 	// terminal [StreamPartFinish].
 	OnStep func(Usage)
+	// MaxRetries is the number of additional attempts made when a step fails
+	// with a RETRYABLE error (rate limit, overload, transient transport) and
+	// before any output has streamed. Zero means [DefaultMaxRetries]; a
+	// negative value disables retries entirely.
+	MaxRetries int
+	// RetryBaseDelay is the base of the exponential retry backoff. Zero means
+	// [DefaultRetryBaseDelay].
+	RetryBaseDelay time.Duration
+	// RetryMaxDelay caps a single backoff wait (a server Retry-After is still
+	// honored verbatim). Zero means [DefaultRetryMaxDelay].
+	RetryMaxDelay time.Duration
 }
 
 // Run drives opts.Model through the tool-use loop and returns a
@@ -148,66 +165,123 @@ func (r *run) drive() {
 	}
 }
 
-// runStep runs one model inference and consumes its stream, returning the
-// accumulated text, the requested tool calls, the step usage, and the
-// step's finish reason. ok is false when an error or cancellation terminated
-// the run (a terminal part was already emitted).
+// runStep runs one model step, retrying a retryable failure (rate limit,
+// overload, transient transport) with bounded exponential backoff so a real
+// provider's transient errors do not fail the turn. It returns the
+// accumulated text, tool calls, step usage, and finish reason. ok is false
+// when an error or cancellation terminated the run (a terminal part was
+// already emitted).
+//
+// A retry is only possible BEFORE any output has streamed: once a delta or a
+// tool call has reached the caller the answer is committed, so a later failure
+// is surfaced (never silently retried into a fresh, duplicate answer). A
+// failed attempt never produced a step-finish, so its usage is discarded here
+// and only the successful attempt's usage is billed by [run.drive].
 func (r *run) runStep(messages []Message, toolDefs []ToolDefinition) (text string, toolCalls []ToolCall, usage Usage, reason FinishReason, ok bool) {
-	ms, err := r.opts.Model.Stream(r.ctx, Request{
+	maxRetries := r.opts.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = DefaultMaxRetries
+	} else if maxRetries < 0 {
+		maxRetries = 0
+	}
+
+	for attempt := 0; ; attempt++ {
+		text, toolCalls, usage, reason, streamed, err := r.runAttempt(messages, toolDefs)
+		if err == nil {
+			return text, toolCalls, usage, reason, true
+		}
+		if errors.Is(err, errConsumerGone) {
+			return "", nil, Usage{}, "", false // consumer closed; unwind silently
+		}
+		// Retry only a retryable failure that struck before any output
+		// committed and only while attempts remain.
+		if !streamed && attempt < maxRetries && isRetryable(err) {
+			if r.backoff(attempt, err) {
+				continue
+			}
+			// The context was canceled/expired while backing off.
+			r.emitError(r.ctx.Err())
+			return "", nil, Usage{}, "", false
+		}
+		r.emitError(err)
+		return "", nil, Usage{}, "", false
+	}
+}
+
+// runAttempt runs one model inference and consumes its stream. streamed
+// reports whether any text delta or tool call reached the caller (which makes
+// the attempt non-retryable). err is non-nil on a failed/canceled stream; it
+// is [errConsumerGone] when the caller closed the stream mid-attempt.
+func (r *run) runAttempt(messages []Message, toolDefs []ToolDefinition) (text string, toolCalls []ToolCall, usage Usage, reason FinishReason, streamed bool, err error) {
+	ms, serr := r.opts.Model.Stream(r.ctx, Request{
 		System:          r.opts.System,
 		Messages:        messages,
 		Tools:           toolDefs,
 		MaxOutputTokens: r.opts.MaxOutputTokens,
 		Headers:         r.opts.Headers,
 	})
-	if err != nil {
-		r.emitError(err)
-		return "", nil, Usage{}, "", false
+	if serr != nil {
+		return "", nil, Usage{}, "", false, serr
 	}
 	defer ms.Close()
 
 	var textBuf strings.Builder
 	reason = FinishStop
 	for {
-		part, err := ms.Recv()
-		if err == io.EOF {
+		part, rerr := ms.Recv()
+		if rerr == io.EOF {
 			break
 		}
-		if err != nil {
-			r.emitError(err)
-			return "", nil, Usage{}, "", false
+		if rerr != nil {
+			return "", nil, Usage{}, "", streamed, rerr
 		}
 
 		switch part.Kind {
 		case StreamPartTextDelta:
 			textBuf.WriteString(part.Text)
+			streamed = true
 			if !r.emit(part) {
-				return "", nil, Usage{}, "", false
+				return "", nil, Usage{}, "", streamed, errConsumerGone
 			}
 		case StreamPartToolCall:
 			if part.ToolCall != nil {
 				toolCalls = append(toolCalls, *part.ToolCall)
 			}
+			streamed = true
 			if !r.emit(part) {
-				return "", nil, Usage{}, "", false
+				return "", nil, Usage{}, "", streamed, errConsumerGone
 			}
 		case StreamPartStepFinish:
 			usage = part.Usage
 			reason = part.FinishReason
 		case StreamPartError:
 			// Every adapter emits StreamPartError to signal a failed or
-			// canceled model stream. It MUST propagate as a run failure —
+			// canceled model stream. It MUST propagate as an attempt failure —
 			// falling through here would report a truncated stream as a
 			// normal stop-completion (billing a half-answer as success).
-			r.emitError(part.Err)
-			return "", nil, Usage{}, "", false
+			return "", nil, Usage{}, "", streamed, part.Err
 		default:
 			// No adapter emits the remaining kinds mid-stream; ignore them
 			// defensively rather than corrupting the run.
 		}
 	}
 
-	return textBuf.String(), toolCalls, usage, reason, true
+	return textBuf.String(), toolCalls, usage, reason, streamed, nil
+}
+
+// backoff sleeps before the given retry attempt, returning false if the run's
+// context is canceled or its per-turn deadline expires while waiting (so the
+// caller can end the run as canceled rather than retry a dead request).
+func (r *run) backoff(attempt int, err error) bool {
+	d := retryDelay(attempt, err, r.opts.RetryBaseDelay, r.opts.RetryMaxDelay)
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-r.ctx.Done():
+		return false
+	}
 }
 
 // executeTools runs every tool call for a step and returns the results as
@@ -252,11 +326,11 @@ func (r *run) executeTool(call ToolCall) ToolResult {
 // emitError ends the run with the terminal error part. It carries the usage
 // accumulated over the steps that completed before the failure (r.total) so a
 // mid-run failure still bills the inferences the provider already ran, and it
-// distinguishes a context cancellation ([FinishCanceled]) from any other
-// failure ([FinishError]) end to end.
+// distinguishes a cancellation or per-turn deadline expiry ([FinishCanceled])
+// from any other failure ([FinishError]) end to end.
 func (r *run) emitError(err error) {
 	reason := FinishError
-	if errors.Is(err, context.Canceled) || r.ctx.Err() == context.Canceled {
+	if isCancellation(err) || isCancellation(r.ctx.Err()) {
 		reason = FinishCanceled
 	}
 	r.emit(StreamPart{Kind: StreamPartError, FinishReason: reason, Err: err, TotalUsage: r.total})

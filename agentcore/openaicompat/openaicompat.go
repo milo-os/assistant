@@ -12,8 +12,12 @@ package openaicompat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/openai/openai-go/v3"
@@ -45,7 +49,11 @@ type Model struct {
 
 // New constructs a [Model] from opts.
 func New(opts Options) *Model {
-	reqOpts := []option.RequestOption{option.WithBaseURL(opts.BaseURL)}
+	// Disable the SDK's own retry loop: retry policy is owned by the agentcore
+	// loop, which classifies failures, honors Retry-After, applies our backoff,
+	// and is bounded by the per-turn deadline. Leaving the SDK's default (2)
+	// enabled would compound with ours and multiply the attempt count.
+	reqOpts := []option.RequestOption{option.WithBaseURL(opts.BaseURL), option.WithMaxRetries(0)}
 	if opts.APIKey != "" {
 		reqOpts = append(reqOpts, option.WithAPIKey(opts.APIKey))
 	} else {
@@ -97,7 +105,7 @@ func (m *Model) Stream(ctx context.Context, req agentcore.Request) (agentcore.St
 			}
 		}
 		if err := stream.Err(); err != nil {
-			send(agentcore.StreamPart{Kind: agentcore.StreamPartError, FinishReason: agentcore.FinishError, Err: err})
+			send(agentcore.StreamPart{Kind: agentcore.StreamPartError, FinishReason: agentcore.FinishError, Err: classify(err)})
 			return
 		}
 		if !sawChunk {
@@ -134,6 +142,71 @@ func (m *Model) Stream(ctx context.Context, req agentcore.Request) (agentcore.St
 			FinishReason: reason,
 		})
 	}, func() { _ = stream.Close() }), nil
+}
+
+// classify turns a raw OpenAI-compatible SDK / transport error into an
+// [agentcore.ModelError] tagged with the retry class the loop needs. A
+// cancellation is returned unwrapped so the loop maps it to FinishCanceled
+// rather than retrying it. An HTTP error is bucketed by status code (429/503/
+// 529 retryable; 401/403 auth; 413 or a length-flavored 400 context-length;
+// other 400 invalid-request); a bare transport failure (connection reset,
+// timeout, unexpected EOF) is treated as transient and retryable.
+func classify(err error) error {
+	if err == nil || isCancellation(err) {
+		return err
+	}
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		retryAfter := agentcore.RetryAfterFromHeader(headerOf(apiErr.Response))
+		class := agentcore.ClassifyStatus(apiErr.StatusCode, looksLikeContextLength(err.Error()))
+		if class == agentcore.ErrClassContextLength {
+			return agentcore.NewModelError(class, retryAfter,
+				fmt.Errorf("openaicompat: request exceeds the model context window (HTTP %d) — trim the conversation history: %w", apiErr.StatusCode, err))
+		}
+		return agentcore.NewModelError(class, retryAfter, err)
+	}
+	if isTransientNetwork(err) {
+		return agentcore.NewModelError(agentcore.ErrClassTransient, 0, err)
+	}
+	return agentcore.NewModelError(agentcore.ErrClassUpstream, 0, err)
+}
+
+// isCancellation reports a context cancellation or deadline expiry, which the
+// loop must not retry.
+func isCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// isTransientNetwork reports a transport-level failure worth retrying: a net
+// timeout, a connection reset, or an unexpected EOF before any output.
+func isTransientNetwork(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection reset") || strings.Contains(msg, "connection refused") || strings.Contains(msg, "EOF")
+}
+
+// looksLikeContextLength recognizes a length/oversize failure a 400 does not
+// reveal by status code alone (OpenAI-compatible endpoints report
+// "context_length_exceeded" / "maximum context length").
+func looksLikeContextLength(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "context_length_exceeded") ||
+		strings.Contains(m, "context") && strings.Contains(m, "length") ||
+		strings.Contains(m, "maximum") && strings.Contains(m, "token")
+}
+
+// headerOf safely reads the header off a possibly-nil response.
+func headerOf(res *http.Response) http.Header {
+	if res == nil {
+		return nil
+	}
+	return res.Header
 }
 
 // mapUsage normalizes Chat Completions usage into [agentcore.Usage].

@@ -30,8 +30,9 @@ func NewAuthenticator(ctx context.Context, cfg *config.Config, logger *slog.Logg
 }
 
 // NewAuthorizer selects the authorizer. v0 always uses the credential-carried
-// grants ([ClaimsAuthorizer]) for both auth modes. Production would branch here
-// to a [SubjectAccessReviewAuthorizer] without touching any call site — the
+// grants ([ClaimsAuthorizer]) for both auth modes. Production branches to the
+// SAR-based authorizer from [NewSubjectAccessReviewAuthorizer] (wired by the
+// service shell from AUTHZ_MODE=sar) without touching any call site — the
 // [Authorizer] interface is the seam.
 func NewAuthorizer(_ *config.Config, logger *slog.Logger) Authorizer {
 	logger.Info("authz.mode", "type", "claims")

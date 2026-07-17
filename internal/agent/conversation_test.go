@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/agentcore/mockmodel"
@@ -249,6 +251,87 @@ func TestDefaultMaxOutputTokens(t *testing.T) {
 		Run(context.Background(), Params{UserText: "hi", ProjectName: "p", ContextID: "c"}))
 	if explicitModel.maxTokens != 512 {
 		t.Fatalf("explicit max tokens = %d, want 512", explicitModel.maxTokens)
+	}
+}
+
+// blockingModel returns a stream whose Recv blocks until the request context is
+// canceled, then reports the context error — standing in for a real model that
+// hangs (never streams, never finishes) so the per-turn deadline is what ends
+// the turn.
+type blockingModel struct{}
+
+func (blockingModel) ModelID() string { return "blocking" }
+func (blockingModel) Stream(ctx context.Context, _ agentcore.Request) (agentcore.StreamReader, error) {
+	return &blockingReader{ctx: ctx}, nil
+}
+
+type blockingReader struct{ ctx context.Context }
+
+func (r *blockingReader) Recv() (agentcore.StreamPart, error) {
+	<-r.ctx.Done()
+	return agentcore.StreamPart{}, r.ctx.Err()
+}
+func (r *blockingReader) Close() error { return nil }
+
+// TestPerTurnDeadlineCancelsStuckModel pins the per-turn wall-clock bound: a
+// model that never completes is cut off at TurnTimeout and the turn ends
+// canceled (distinct from a normal completion), instead of pinning the request
+// forever. Nothing streamed, so no tokens are billed.
+func TestPerTurnDeadlineCancelsStuckModel(t *testing.T) {
+	conv := New(Deps{
+		Model: blockingModel{}, ModelMode: "mock", Emitter: noopEmitter(),
+		TurnTimeout: 40 * time.Millisecond,
+	})
+	start := time.Now()
+	stream := conv.Run(context.Background(), Params{UserText: "hi", ProjectName: "demo-project", ContextID: "conv-timeout"})
+	drainEvents(t, stream)
+	elapsed := time.Since(start)
+	res := stream.Result()
+
+	if res.State != StateCanceled {
+		t.Fatalf("state = %s, want canceled (a per-turn timeout must not read as completed)", res.State)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("turn ran %v — the per-turn deadline did not fire", elapsed)
+	}
+	// A turn that produced no step-finish bills nothing.
+	if len(res.UsageEvents) != 0 {
+		t.Fatalf("a timed-out turn with no completed step must bill nothing, got %d events", len(res.UsageEvents))
+	}
+}
+
+// TestRetryRecoversInConversation pins that the conversation wires the loop's
+// transient-failure retry: a first-attempt rate limit (retryable) recovers on
+// the retry and the turn completes, billing only the successful step.
+func TestRetryRecoversInConversation(t *testing.T) {
+	model := &scriptModel{turns: []scriptTurn{
+		{err: agentcore.NewModelError(agentcore.ErrClassRateLimited, 0, errors.New("429 rate limited"))},
+		{parts: []agentcore.StreamPart{
+			{Kind: agentcore.StreamPartTextDelta, Text: "recovered"},
+			{Kind: agentcore.StreamPartStepFinish, Usage: agentcore.Usage{Input: 12, Output: 7}, FinishReason: agentcore.FinishStop},
+		}},
+	}}
+	conv := New(Deps{
+		Model: model, ModelMode: "mock", Emitter: noopEmitter(),
+		RetryBaseDelay: time.Microsecond, RetryMaxDelay: time.Millisecond,
+	})
+	stream := conv.Run(context.Background(), Params{UserText: "go", ProjectName: "demo-project", ContextID: "c"})
+	drainEvents(t, stream)
+	res := stream.Result()
+
+	if res.State != StateCompleted {
+		t.Fatalf("state = %s, want completed after a retried rate limit (err=%s)", res.State, res.Error)
+	}
+	if res.Text != "recovered" {
+		t.Fatalf("text = %q, want the retried attempt's answer", res.Text)
+	}
+	if model.call != 2 {
+		t.Fatalf("want 2 attempts (retry once), got %d", model.call)
+	}
+	byMeter := meterValues(res.UsageEvents)
+	if byMeter[usage.MeterInputTokens] != "12" || byMeter[usage.MeterOutputTokens] != "7" {
+		t.Fatalf("only the successful attempt bills: input=%q output=%q, want 12/7",
+			byMeter[usage.MeterInputTokens], byMeter[usage.MeterOutputTokens])
 	}
 }
 

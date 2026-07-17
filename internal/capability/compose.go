@@ -77,6 +77,29 @@ type ComposeOptions struct {
 	// and in-cluster (private) IPs, which the guard blocks by default. It MUST
 	// stay false in production. Default false = guard on (safe).
 	AllowPrivateNetworks bool
+	// AllowedHosts and AllowedCIDRs, when either is non-empty, switch the SSRF
+	// guard from its default "block private" IP-policy into an allow-list posture
+	// for UNTRUSTED providers: a capability-document URL (knowledge source, skill
+	// source, MCP endpoint) is permitted only if its host matches an AllowedHosts
+	// entry or resolves into an AllowedCIDRs range. AllowedHosts entries match a
+	// host exactly and as a domain suffix ("example.com" permits "example.com"
+	// and "api.example.com"); AllowedCIDRs is the reviewed gateway range(s).
+	//
+	// The always-blocked set (link-local/IMDS, unspecified, multicast) still
+	// holds in allow-list mode — an allow-listed host that resolves to metadata
+	// is refused. When both are empty the guard keeps its IP-policy behavior
+	// (backward compatible). The integrator populates these from config.
+	AllowedHosts []string
+	AllowedCIDRs []string
+	// ExpectedProject, when set, is the namespace/project of the calling request.
+	// It is a defense-in-depth tenant-isolation check on the capability Source:
+	// the Source is responsible for returning only the calling project's
+	// documents, but any document whose Metadata.Namespace disagrees with
+	// ExpectedProject is dropped and logged rather than trusted. Documents that
+	// carry no namespace are passed through — for those the Source remains the
+	// scoping authority (the CRD projection has no spec-level project field to
+	// cross-check; if one is added later, extend scopeDocuments to verify it).
+	ExpectedProject string
 	// resolver is the DNS seam for the SSRF guard. Nil uses net.DefaultResolver.
 	resolver ipResolver
 }
@@ -113,10 +136,19 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		logger = slog.New(slog.DiscardHandler)
 	}
 
+	// Tenant-isolation depth: drop any document the Source mis-scoped before it
+	// contributes knowledge or tools (no-op unless ExpectedProject is set).
+	docs = scopeDocuments(docs, opts.ExpectedProject, logger)
+
 	// One SSRF guard drives all three provider-URL sinks (knowledge, skills,
 	// MCP). The knowledge/skill fetches share a guarded HTTP client; the MCP
 	// connect path re-checks the endpoint host before connecting.
 	guard := newIPGuard(opts.AllowPrivateNetworks, opts.resolver)
+	allow, err := parseHostAllowList(opts.AllowedHosts, opts.AllowedCIDRs)
+	if err != nil {
+		return nil, err
+	}
+	guard.allow = allow
 	httpClient := guard.wrapClient(opts.HTTPClient)
 
 	addendum := buildKnowledgeAddendum(ctx, docs, knowledgeOptions{
@@ -160,6 +192,34 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 			return nil
 		},
 	}, nil
+}
+
+// scopeDocuments is the defense-in-depth tenant-isolation seam. The capability
+// Source is trusted to return only the calling project's documents; this guards
+// against a Source bug (or a compromised fan-out) leaking another tenant's
+// document by dropping any whose Metadata.Namespace names a different project.
+// It fails closed only on a positive mismatch: a document with no namespace is
+// kept, because the schema carries no other project handle to cross-check and
+// the Source stays the scoping authority there. With no ExpectedProject the
+// check is disabled and docs pass through unchanged (backward compatible).
+func scopeDocuments(docs []CapabilityDocument, expectedProject string, logger *slog.Logger) []CapabilityDocument {
+	if expectedProject == "" {
+		return docs
+	}
+	kept := make([]CapabilityDocument, 0, len(docs))
+	for _, doc := range docs {
+		ns := ""
+		if doc.Metadata != nil {
+			ns = doc.Metadata.Namespace
+		}
+		if ns != "" && ns != expectedProject {
+			logger.Warn("capability.scope.rejected",
+				"service", doc.Spec.ServiceName, "documentNamespace", ns, "expectedProject", expectedProject)
+			continue
+		}
+		kept = append(kept, doc)
+	}
+	return kept
 }
 
 func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, logger *slog.Logger) (agentcore.ToolSet, []mcpSession) {

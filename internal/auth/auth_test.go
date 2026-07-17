@@ -86,12 +86,6 @@ func TestClaimsAuthorizer(t *testing.T) {
 	assertStatus(t, err, 403)
 }
 
-func TestSubjectAccessReviewAuthorizer_FailsClosed(t *testing.T) {
-	az := SubjectAccessReviewAuthorizer{APIURL: "http://milo"}
-	err := az.AuthorizeProject(context.Background(), PrincipalFromProjects("s", []string{"*"}), "projA")
-	assertStatus(t, err, 403) // unimplemented stub denies even a wildcard grant
-}
-
 // ── OIDC authenticator ────────────────────────────────────────
 
 const (

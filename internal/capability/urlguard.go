@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -34,9 +35,88 @@ type ipResolver func(ctx context.Context, host string) ([]netip.Addr, error)
 // over loopback and in-cluster (private) IPs, so with it set the IP policy is
 // disabled entirely. It defaults to false — the safe default — and the
 // integrator opts in from config for dev environments only.
+//
+// allow, when non-empty, switches the guard from the IP-policy (trusted
+// provider) posture into an allow-list (untrusted provider) posture: a URL is
+// permitted only if its host matches a sanctioned entry or resolves into an
+// allowed gateway CIDR. The always-blocked set still holds in that mode. A nil
+// or empty allow keeps the original IP-policy behavior (backward compatible).
 type ipGuard struct {
 	allowPrivate bool
 	resolve      ipResolver
+	allow        *hostAllowList
+}
+
+// hostAllowList is the reviewed set of hosts (exact or domain suffix) and
+// gateway CIDRs a URL's destination may match under the untrusted-provider
+// posture. It is the real defense there: rather than "block private", the
+// policy is "permit only the reviewed gateway + sanctioned provider hosts".
+type hostAllowList struct {
+	// hosts holds normalized (lowercased, dot-trimmed) host entries. An entry
+	// "example.com" matches the host "example.com" exactly and any subdomain
+	// ("api.example.com") as a suffix.
+	hosts []string
+	// cidrs holds the explicit gateway ranges. A destination is permitted if any
+	// resolved address falls inside one of these prefixes.
+	cidrs []netip.Prefix
+}
+
+// parseHostAllowList normalizes host entries and parses CIDR entries into a
+// [hostAllowList]. Blank entries are dropped; a malformed CIDR is a hard error
+// (fail closed — a mis-typed gateway range must not silently widen or narrow
+// the allow-list). An all-blank input yields a non-nil, empty list, which the
+// guard treats as "no allow-list" (IP-policy mode).
+func parseHostAllowList(hosts, cidrs []string) (*hostAllowList, error) {
+	al := &hostAllowList{}
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		h = strings.Trim(h, ".")
+		if h == "" {
+			continue
+		}
+		al.hosts = append(al.hosts, h)
+	}
+	for _, c := range cidrs {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			return nil, fmt.Errorf("invalid allow-list CIDR %q: %w", c, err)
+		}
+		al.cidrs = append(al.cidrs, p.Masked())
+	}
+	return al, nil
+}
+
+// empty reports whether the allow-list carries no entries. A nil list is empty.
+// The guard falls back to IP-policy mode when the list is empty.
+func (h *hostAllowList) empty() bool {
+	return h == nil || (len(h.hosts) == 0 && len(h.cidrs) == 0)
+}
+
+// permits reports whether host (or any of its resolved addresses) matches the
+// allow-list. Host matching is exact or domain-suffix; IP matching is CIDR
+// containment against the gateway ranges. It is a pure membership test — the
+// always-blocked set is enforced separately by [ipGuard.vet] so it holds even
+// for an allow-listed host.
+func (h *hostAllowList) permits(host string, ips []netip.Addr) bool {
+	host = strings.Trim(strings.ToLower(host), ".")
+	for _, entry := range h.hosts {
+		if host == entry || strings.HasSuffix(host, "."+entry) {
+			return true
+		}
+	}
+	for _, ip := range ips {
+		a := ip.Unmap()
+		for _, c := range h.cidrs {
+			if c.Contains(a) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func newIPGuard(allowPrivate bool, resolver ipResolver) *ipGuard {
@@ -84,11 +164,12 @@ func (g *ipGuard) checkURL(ctx context.Context, rawURL string) error {
 	return g.checkHost(ctx, host)
 }
 
-// checkHost resolves host and refuses it if any resolved address is blocked.
-// This fails closed: a resolver returning even one non-routable address is
-// treated as hostile (e.g. a rebinding response mixing a public and a private
-// IP). The always-blocked set (link-local/IMDS, unspecified, multicast) applies
-// even under allowPrivate; allowPrivate only relaxes loopback/RFC1918.
+// checkHost resolves host and vets it against the active policy. This fails
+// closed: a resolver returning even one non-routable address is treated as
+// hostile (e.g. a rebinding response mixing a public and a private IP). The
+// always-blocked set (link-local/IMDS, unspecified, multicast) applies in every
+// mode; allowPrivate only relaxes loopback/RFC1918, and an allow-list replaces
+// the private-address policy with host/CIDR membership.
 func (g *ipGuard) checkHost(ctx context.Context, host string) error {
 	ips, err := g.resolve(ctx, host)
 	if err != nil {
@@ -96,6 +177,28 @@ func (g *ipGuard) checkHost(ctx context.Context, host string) error {
 	}
 	if len(ips) == 0 {
 		return fmt.Errorf("no addresses for host %q", host)
+	}
+	return g.vet(host, ips)
+}
+
+// vet applies the guard's destination policy to a resolved host. The
+// always-blocked set is enforced first, in EVERY mode (defense in depth): an
+// allow-listed host that resolves to cloud metadata is still refused. Then, if
+// an allow-list is configured, the destination is permitted only when its host
+// or a resolved address matches it — everything else, even a public address, is
+// refused (the untrusted-provider posture). With no allow-list, the original
+// IP-policy applies: loopback/RFC1918 are gated on allowPrivate.
+func (g *ipGuard) vet(host string, ips []netip.Addr) error {
+	for _, ip := range ips {
+		if err := alwaysBlocked(ip.Unmap()); err != nil {
+			return err
+		}
+	}
+	if !g.allow.empty() {
+		if g.allow.permits(host, ips) {
+			return nil
+		}
+		return fmt.Errorf("host %q is not in the allow-list", host)
 	}
 	for _, ip := range ips {
 		if err := g.blocked(ip); err != nil {
@@ -121,10 +224,8 @@ func (g *ipGuard) dialContext(ctx context.Context, network, addr string) (net.Co
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("no addresses for host %q", host)
 	}
-	for _, ip := range ips {
-		if err := g.blocked(ip); err != nil {
-			return nil, err
-		}
+	if err := g.vet(host, ips); err != nil {
+		return nil, err
 	}
 	var d net.Dialer
 	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
@@ -190,13 +291,8 @@ func (g *ipGuard) wrapClient(base *http.Client) *http.Client {
 // into private addressing while the always-blocked set still holds.
 func (g *ipGuard) blocked(ip netip.Addr) error {
 	a := ip.Unmap()
-	switch {
-	case a.IsUnspecified():
-		return fmt.Errorf("unspecified address %s is not allowed", a)
-	case a.IsLinkLocalUnicast(), a.IsLinkLocalMulticast():
-		return fmt.Errorf("link-local address %s is not allowed", a)
-	case a.IsInterfaceLocalMulticast(), a.IsMulticast():
-		return fmt.Errorf("multicast address %s is not allowed", a)
+	if err := alwaysBlocked(a); err != nil {
+		return err
 	}
 	if g.allowPrivate {
 		return nil
@@ -206,6 +302,23 @@ func (g *ipGuard) blocked(ip netip.Addr) error {
 		return fmt.Errorf("loopback address %s is not allowed", a)
 	case a.IsPrivate():
 		return fmt.Errorf("private address %s is not allowed", a)
+	}
+	return nil
+}
+
+// alwaysBlocked reports why an address is refused in EVERY mode — under
+// allowPrivate and under an allow-list alike — or nil if it clears this set. It
+// is the defense-in-depth floor: link-local/IMDS, the unspecified address, and
+// multicast are never a legitimate capability destination, so no relaxation
+// (dev escape hatch or sanctioned-host allow-list) may re-expose them.
+func alwaysBlocked(a netip.Addr) error {
+	switch {
+	case a.IsUnspecified():
+		return fmt.Errorf("unspecified address %s is not allowed", a)
+	case a.IsLinkLocalUnicast(), a.IsLinkLocalMulticast():
+		return fmt.Errorf("link-local address %s is not allowed", a)
+	case a.IsInterfaceLocalMulticast(), a.IsMulticast():
+		return fmt.Errorf("multicast address %s is not allowed", a)
 	}
 	return nil
 }
