@@ -1,0 +1,51 @@
+# Structural production hardening for the assistant Deployment (env is replaced
+# separately in kustomization.yaml). Strategic-merge patch.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: assistant
+spec:
+  # HPA owns the running count (min 3); this is the initial/floor.
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      annotations:
+        # Scrape the Prometheus metrics endpoint.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "7820"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: assistant
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Readiness gates on dependency reachability (Postgres + gateway) so a
+          # pod that cannot serve is pulled from the Service; liveness is a bare
+          # process check so a transient dependency blip does not restart-loop.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 7820 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 7820 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }

@@ -1,0 +1,47 @@
+# Default-deny + explicit allows for the assistant. Ingress only from the
+# platform ingress/gateway namespace (adjust the namespace selector to your
+# environment); egress to DNS, the Postgres store, and the in-cluster AI
+# gateway / capability provider / usage collector. Egress to arbitrary
+# provider endpoints is intentionally NOT opened here — the SSRF guard governs
+# outbound fetches at the application layer; if providers live off-cluster,
+# widen egress deliberately (and prefer the host allow-list).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: assistant
+spec:
+  podSelector:
+    matchLabels:
+      app: assistant
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              # The ingress/gateway namespace that fronts external A2A traffic.
+              kubernetes.io/metadata.name: REPLACE_WITH_INGRESS_NAMESPACE
+      ports:
+        - { protocol: TCP, port: 7820 }
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # PostgreSQL (CloudNativePG cluster in this namespace)
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: conversation-store
+      ports:
+        - { protocol: TCP, port: 5432 }
+    # In-cluster platform endpoints (AI gateway, capability provider, usage
+    # collector, and the Kubernetes API for SubjectAccessReview). Kept broad
+    # to the cluster; tighten to specific namespaces/labels per environment.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 8080 }

@@ -1,0 +1,113 @@
+# Production overlay for the Patch assistant service.
+#
+# Self-contained on config/base (the assistant Deployment/Service + namespace);
+# it does NOT include the dev components (gateway/stub-llm/streamco/sink) — in
+# production the AI gateway, the capability provider (service catalog), and the
+# usage collector are platform infrastructure, not deployed here. The overlay
+# FULLY REPLACES base's dev env (a JSON6902 replace, not a merge) so no dev
+# token or dev value can leak into a production deploy.
+#
+# It is intentionally not directly-appliable as-is: it references Secrets and a
+# hostname the operator supplies (see README.md). Render + review with
+#   kubectl kustomize config/overlays/production
+# and apply the reviewed output through your GitOps/CD pipeline.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Production namespace (base's namespace.yaml is renamed by this transformer).
+namespace: patch-system
+
+resources:
+  - ../../base
+  - cnpg-cluster.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+  - gateway-tls.yaml
+
+# Metadata labels only (not selectors — the base already labels pods
+# {app: assistant}, and mutating an existing selector is an error).
+labels:
+  - pairs:
+      app.kubernetes.io/name: patch-assistant
+      app.kubernetes.io/part-of: patch
+    includeSelectors: false
+
+# Pin the image to an immutable digest at release time (CD substitutes this).
+# NEVER ship :dev/:local to production. Example:
+#   newName: ghcr.io/milo-os/assistant
+#   digest: sha256:<release-digest>
+images:
+  - name: ghcr.io/milo-os/assistant
+    newTag: REPLACE_WITH_RELEASE_TAG_OR_DIGEST
+
+patches:
+  # Structural hardening: replicas, securityContext, probes (readiness gates on
+  # dependencies via /readyz), resources.
+  - path: deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: assistant
+  # Full env replacement — nothing from base's dev env survives.
+  - target:
+      kind: Deployment
+      name: assistant
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: PORT
+            value: "7820"
+          - name: HOST
+            value: "0.0.0.0"
+          - name: LOG_LEVEL
+            value: "info"
+          # ── Public identity (agent-card url + CloudEvents source) ──
+          - name: PUBLIC_BASE_URL
+            value: "https://REPLACE_WITH_PUBLIC_HOSTNAME"
+          # ── Model: gateway mode, keyless (upstream key lives at the gateway) ──
+          - name: MODEL_MODE
+            value: "gateway"
+          - name: GATEWAY_URL
+            value: "http://REPLACE_WITH_AI_GATEWAY_HOST/v1"
+          - name: GATEWAY_MODEL
+            value: "REPLACE_WITH_PRODUCTION_MODEL"
+          # ── AuthN: OIDC (real tokens), not dev ──
+          - name: AUTH_MODE
+            value: "oidc"
+          - name: OIDC_ISSUER
+            valueFrom:
+              secretKeyRef: { name: assistant-oidc, key: issuer }
+          - name: OIDC_AUDIENCE
+            valueFrom:
+              secretKeyRef: { name: assistant-oidc, key: audience }
+          - name: OIDC_PROJECTS_CLAIM
+            valueFrom:
+              secretKeyRef: { name: assistant-oidc, key: projectsClaim }
+          # ── AuthZ: SubjectAccessReview against the Milo control plane ──
+          # SAR endpoint + credentials derive from the in-cluster service
+          # account by default; override via AUTHZ_SAR_* only for an external
+          # control plane.
+          - name: AUTHZ_MODE
+            value: "sar"
+          # ── Durable conversation + task store (CloudNativePG) ──
+          - name: CONVERSATION_STORE_URL
+            valueFrom:
+              secretKeyRef: { name: conversation-store-app, key: uri }
+          # In-cluster capability endpoints (AI gateway, catalog provider)
+          # resolve to private ClusterIPs; permit private addressing (link-local
+          # / cloud-metadata stay blocked regardless). For an UNTRUSTED
+          # third-party-provider posture, drop this and wire the host allow-list
+          # (see README — the guard supports it; config wiring is the follow-up).
+          - name: CAPABILITY_ALLOW_PRIVATE_NETWORKS
+            value: "true"
+          # ── Capabilities: the service catalog's provider API (NOT a fixture) ──
+          - name: CAPABILITY_PROVIDER_URL
+            value: "http://REPLACE_WITH_CAPABILITY_PROVIDER_HOST"
+          # ── Usage metering collector ──
+          - name: USAGE_GATEWAY_URL
+            valueFrom:
+              secretKeyRef: { name: assistant-usage-collector, key: url }
+          - name: USAGE_GATEWAY_API_KEY
+            valueFrom:
+              secretKeyRef: { name: assistant-usage-collector, key: apiKey }
