@@ -60,6 +60,13 @@ spec:
                 secretKeyRef:
                   name: conversation-store-app
                   key: uri
+            # Capability endpoints (the AI gateway, StreamCo) are in-cluster
+            # services on private ClusterIPs, which the SSRF guard blocks by
+            # default; permit private addressing here (link-local/cloud-metadata
+            # stay blocked regardless). A public-endpoint + untrusted-provider
+            # posture would drop this and use a host allow-list instead.
+            - name: CAPABILITY_ALLOW_PRIVATE_NETWORKS
+              value: "true"
             # ── Auth: dev token from a Secret ───────────────────────
             - name: AUTH_MODE
               value: "dev"

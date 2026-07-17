@@ -313,32 +313,75 @@ async function main() {
     record('5', 'provider tool call went over real MCP', false, 'STREAMCO_LOG not provided to driver', false);
   }
 
-  // Usage proof from the sink.
-  const sinkEvents = await fetch(`${SINK_URL}/events`).then((r) => r.json()).catch(() => []);
+  // Usage proof from the sink — EXACT per-turn counts (billing double-count
+  // regression pin). The accumulated sink is noisy (item 3/4 turns plus a raced
+  // cancel), so isolate one turn: clear the sink, run ONE diagnose turn to
+  // completion, and assert the turn's KNOWN fixed set. The mock diagnose turn
+  // meters exactly 84 input + 46 output (2 steps x 42/23), one messages meter,
+  // and one tool-invocation — 4 events total. Asserting EXACT counts (not the
+  // old >=1) is what catches a finalize double-emit that would bill each turn
+  // twice (every count would double, total would be 8).
+  await fetch(`${SINK_URL}/events`, { method: 'DELETE' }).catch(() => {});
+  const isolated = await readStream(a2aEndpoint, userMessage(PROMPT), { token: GOOD_TOKEN });
+  const isolatedCompleted = /"state"\s*:\s*"TASK_STATE_COMPLETED"/.test(JSON.stringify(isolated.events));
+  record('5', 'isolated diagnose turn reaches TASK_STATE_COMPLETED', isolatedCompleted, `events=${isolated.events.length}`);
+
+  // Usage is emitted server-side around terminal state; poll (bounded) until the
+  // turn's tool-invocation lands so the exact-count assertions are not raced.
+  let sinkEvents = [];
+  for (let i = 0; i < 20; i++) {
+    sinkEvents = await fetch(`${SINK_URL}/events`).then((r) => r.json()).catch(() => []);
+    if (sinkEvents.some((e) => e?.type === 'assistant.miloapis.com/conversation/tool-invocations')) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
   writeFileSync(join(OUT_DIR, 'sink-events.json'), JSON.stringify(sinkEvents, null, 2));
-  const toolInv = sinkEvents.filter(
-    (e) => e?.type === 'assistant.miloapis.com/conversation/tool-invocations',
+
+  const mine = sinkEvents.filter((e) => e?.subject === `projects/${PROJECT}`);
+  const ofType = (t) => mine.filter((e) => e?.type === t);
+  const inputTok = ofType('assistant.miloapis.com/conversation/input-tokens');
+  const outputTok = ofType('assistant.miloapis.com/conversation/output-tokens');
+  const messages = ofType('assistant.miloapis.com/conversation/messages');
+  const toolInv = ofType('assistant.miloapis.com/conversation/tool-invocations').filter(
+    (e) => e?.data?.dimensions?.service === 'streaming.streamco.example',
   );
-  const toolInvGood = toolInv.filter(
-    (e) => e?.data?.dimensions?.service === 'streaming.streamco.example' && e?.subject === `projects/${PROJECT}`,
+  const valuesOf = (arr) => arr.map((e) => e?.data?.value).join(',');
+
+  record(
+    '5',
+    'diagnose turn meters EXACTLY one input-tokens event = 84 (2 steps x 42)',
+    inputTok.length === 1 && inputTok[0]?.data?.value === '84',
+    `count=${inputTok.length} values=[${valuesOf(inputTok)}]`,
   );
   record(
     '5',
-    'sink captured tool-invocations meter (service=streaming.streamco.example, subject=projects/' + PROJECT + ')',
-    toolInvGood.length >= 1,
-    `toolInvocation events total=${toolInv.length} matching=${toolInvGood.length}`,
-  );
-  const tokenMeters = sinkEvents.filter((e) =>
-    /assistant\.miloapis\.com\/conversation\/(input-tokens|output-tokens)/.test(e?.type ?? ''),
-  );
-  const tokenMetersGood = tokenMeters.filter(
-    (e) => e?.subject === `projects/${PROJECT}` && e?.data?.resource?.kind === 'Conversation',
+    'diagnose turn meters EXACTLY one output-tokens event = 46 (2 steps x 23)',
+    outputTok.length === 1 && outputTok[0]?.data?.value === '46',
+    `count=${outputTok.length} values=[${valuesOf(outputTok)}]`,
   );
   record(
     '5',
-    'sink captured token meters (input/output-tokens, subject=projects/' + PROJECT + ', resource.kind=Conversation)',
-    tokenMetersGood.length >= 1,
-    `token meter events total=${tokenMeters.length} matching=${tokenMetersGood.length} types=[${[...new Set(tokenMeters.map((e) => e.type))].join(', ')}]`,
+    'diagnose turn meters EXACTLY one messages event = 1',
+    messages.length === 1 && messages[0]?.data?.value === '1',
+    `count=${messages.length} values=[${valuesOf(messages)}]`,
+  );
+  record(
+    '5',
+    'diagnose turn meters EXACTLY one tool-invocation (service=streaming.streamco.example)',
+    toolInv.length === 1 && toolInv[0]?.data?.value === '1',
+    `count=${toolInv.length}`,
+  );
+  record(
+    '5',
+    'diagnose turn emits EXACTLY its 4-event set (no double-emit)',
+    mine.length === 4,
+    `total sink events for project=${mine.length} types=[${[...new Set(mine.map((e) => e.type))].join(', ')}]`,
+  );
+  record(
+    '5',
+    'token meters carry resource.kind=Conversation',
+    inputTok.concat(outputTok).length > 0 &&
+      inputTok.concat(outputTok).every((e) => e?.data?.resource?.kind === 'Conversation'),
+    `inputKind=${inputTok[0]?.data?.resource?.kind} outputKind=${outputTok[0]?.data?.resource?.kind}`,
   );
 
   // ---- Item 6: multi-turn conversation memory --------------------------------

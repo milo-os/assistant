@@ -25,6 +25,7 @@ const (
 // knowledgeOptions configures [buildKnowledgeAddendum].
 type knowledgeOptions struct {
 	httpClient           *http.Client
+	guard                *ipGuard
 	timeout              time.Duration
 	maxBytesPerSource    int
 	maxSourcesPerService int
@@ -108,6 +109,15 @@ func fetchKnowledgeSource(ctx context.Context, serviceName string, src Knowledge
 		title = src.URL
 	}
 	heading := fmt.Sprintf("### %s (%s)", title, src.Type)
+
+	// Reject non-http(s) sources up front; the resolved-IP block for private/
+	// link-local targets is enforced by the guarded client at dial time.
+	if opts.guard != nil {
+		if err := opts.guard.allowedScheme(src.URL); err != nil {
+			opts.logger.Warn("capability.knowledge.fetch_failed", "service", serviceName, "url", src.URL, "error", err.Error())
+			return ""
+		}
+	}
 
 	fetchCtx, cancel := context.WithTimeout(ctx, opts.timeout)
 	defer cancel()

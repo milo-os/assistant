@@ -31,7 +31,15 @@ type BuildUsageInput struct {
 
 // BuildUsageEvents builds one usage [Event] per non-zero token axis plus the
 // messages meter, each dimensioned by model. It returns an empty slice when no
-// axis has a positive count. Ported verbatim from the TS assistant-events.ts.
+// token axis has a positive count.
+//
+// The messages meter is billed only when the run actually consumed model
+// tokens. A run that failed or was canceled before any model inference
+// produces no tokens and must not be billed a message — it produced no
+// assistant turn. A run that DID consume tokens bills both those tokens and
+// the single message for the interaction that occurred, even if it later
+// failed or was canceled. (This gates the messages axis relative to the TS
+// assistant-events.ts, which emitted it unconditionally.)
 func BuildUsageEvents(in BuildUsageInput) []Event {
 	now := in.NowMillis
 	if now == 0 {
@@ -82,7 +90,12 @@ func BuildUsageEvents(in BuildUsageInput) []Event {
 	push(MeterOutputTokens, in.Tokens.OutputTokens)
 	push(MeterCacheReadTokens, in.Tokens.CachedInputTokens)
 	push(MeterCacheWriteTokens, in.Tokens.CacheCreationInputTokens)
-	push(MeterMessages, messages)
+	// Only bill the message when the run consumed tokens; a run that broke
+	// before any inference has all-zero token axes and bills nothing.
+	if in.Tokens.InputTokens > 0 || in.Tokens.OutputTokens > 0 ||
+		in.Tokens.CachedInputTokens > 0 || in.Tokens.CacheCreationInputTokens > 0 {
+		push(MeterMessages, messages)
+	}
 
 	return events
 }

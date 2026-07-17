@@ -42,6 +42,9 @@ func TestSkillLoadFullPath(t *testing.T) {
 		ModelMode: "mock",
 		Source:    fakeSource{docs: []capability.CapabilityDocument{doc}},
 		Emitter:   noopEmitter(),
+		// The test skill server binds loopback; allow private so the SSRF guard
+		// does not refuse the load_skill fetch.
+		AllowPrivateCapabilityNetworks: true,
 	})
 
 	stream := conv.Run(context.Background(), Params{

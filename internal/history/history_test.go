@@ -2,8 +2,10 @@ package history
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/milo-os/assistant/agentcore"
 )
@@ -58,6 +60,66 @@ func TestMemoryStoreTurnsReturnsCopy(t *testing.T) {
 	again, _ := s.Turns(ctx, "p", "c")
 	if again[0].UserText != "u" {
 		t.Fatal("Turns exposed internal state to caller mutation")
+	}
+}
+
+func TestMemoryStoreCapsStoredContentLength(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+	huge := strings.Repeat("x", MaxStoredContentLen+4096)
+	if err := s.Append(ctx, "p", "c", Turn{UserText: huge, AssistantText: huge}); err != nil {
+		t.Fatal(err)
+	}
+	turns, err := s.Turns(ctx, "p", "c")
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("got %d turns, %v; want 1", len(turns), err)
+	}
+	if len(turns[0].UserText) != MaxStoredContentLen || len(turns[0].AssistantText) != MaxStoredContentLen {
+		t.Fatalf("content not capped: user=%d assistant=%d, want %d",
+			len(turns[0].UserText), len(turns[0].AssistantText), MaxStoredContentLen)
+	}
+}
+
+func TestMemoryStoreEvictsOldestBeyondCap(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+	const extra = 5
+	for i := 0; i < MaxTurnsPerConversation+extra; i++ {
+		if err := s.Append(ctx, "p", "c", Turn{
+			UserText:      fmt.Sprintf("u%d", i),
+			AssistantText: fmt.Sprintf("a%d", i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turns, err := s.Turns(ctx, "p", "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != MaxTurnsPerConversation {
+		t.Fatalf("got %d turns, want cap of %d", len(turns), MaxTurnsPerConversation)
+	}
+	// The oldest `extra` turns must have been dropped: the retained window
+	// starts at turn `extra` and ends at the newest.
+	if turns[0].UserText != fmt.Sprintf("u%d", extra) {
+		t.Fatalf("oldest retained turn = %q, want %q", turns[0].UserText, fmt.Sprintf("u%d", extra))
+	}
+	want := fmt.Sprintf("u%d", MaxTurnsPerConversation+extra-1)
+	if turns[len(turns)-1].UserText != want {
+		t.Fatalf("newest retained turn = %q, want %q", turns[len(turns)-1].UserText, want)
+	}
+}
+
+func TestTruncateContentBacksOffToRuneBoundary(t *testing.T) {
+	// A multi-byte rune straddling the cut must not be split — the result stays
+	// valid UTF-8 (a Postgres text column would reject a torn rune).
+	s := strings.Repeat("a", MaxStoredContentLen-1) + "é" // 'é' is 2 bytes
+	got := truncateContent(s)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateContent produced invalid UTF-8 of len %d", len(got))
+	}
+	if len(got) != MaxStoredContentLen-1 {
+		t.Fatalf("got len %d, want %d (dropped the straddling rune)", len(got), MaxStoredContentLen-1)
 	}
 }
 

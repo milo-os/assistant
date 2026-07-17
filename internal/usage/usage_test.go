@@ -42,6 +42,45 @@ func TestBuildUsageEvents_OneEventPerNonZeroAxisPlusMessages(t *testing.T) {
 	}
 }
 
+// TestBuildUsageEvents_NoMessagesMeterWithoutTokens pins finding #10: a run
+// with no token usage (e.g. one that failed or was canceled before any model
+// inference) must emit nothing — not even the messages meter. Pre-fix the
+// messages axis was pushed unconditionally, billing messages=1 for a run that
+// consumed no tokens.
+func TestBuildUsageEvents_NoMessagesMeterWithoutTokens(t *testing.T) {
+	events := BuildUsageEvents(BuildUsageInput{
+		ProjectName:    "demo-project",
+		ConversationID: "conv-123",
+		Model:          "claude-sonnet-4-6",
+		Tokens:         UsageTokens{}, // all zero
+		NowMillis:      fixedNow,
+	})
+	if len(events) != 0 {
+		t.Fatalf("no token usage must bill nothing (not even messages), got %d events: %+v", len(events), events)
+	}
+}
+
+// TestBuildUsageEvents_MessagesMeterBilledWithTokens is the positive control:
+// once any token axis is non-zero the messages meter is billed exactly once.
+func TestBuildUsageEvents_MessagesMeterBilledWithTokens(t *testing.T) {
+	events := BuildUsageEvents(BuildUsageInput{
+		ProjectName: "p", ConversationID: "c", Model: "m",
+		Tokens: UsageTokens{OutputTokens: 5}, NowMillis: fixedNow,
+	})
+	var messages int
+	for _, e := range events {
+		if e.MeterName == MeterMessages {
+			messages++
+			if e.Value != "1" {
+				t.Errorf("messages value = %q, want 1", e.Value)
+			}
+		}
+	}
+	if messages != 1 {
+		t.Fatalf("messages meter count = %d, want 1 when tokens are present", messages)
+	}
+}
+
 func TestBuildUsageEvents_TimestampMatchesJSToISOString(t *testing.T) {
 	events := BuildUsageEvents(BuildUsageInput{
 		ProjectName: "p", ConversationID: "c", Model: "m",

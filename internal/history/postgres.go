@@ -17,6 +17,29 @@ import (
 // budget (6000 estimated tokens ≈ 24k chars ≈ a few dozen turns).
 const DefaultMaxRecentTurns = 200
 
+const (
+	// dbOpTimeout bounds every database method internally. Each method wraps
+	// its incoming context with this deadline BEFORE touching the pool, so a
+	// wedged-but-TCP-alive backend errors out instead of blocking forever —
+	// even when the caller hands us an uncancellable context (recordHistory
+	// appends under context.WithoutCancel with no deadline of its own). This
+	// mirrors the usage emitter, which pairs WithoutCancel with WithTimeout.
+	dbOpTimeout = 15 * time.Second
+
+	// poolMaxConns caps the connection pool. With a bounded MaxConns a stalled
+	// backend can wedge at most this many acquirers; every further Acquire then
+	// fails fast on the caller's (now always bounded) context instead of the
+	// whole service silently draining into Acquire.
+	poolMaxConns = 8
+
+	// statementTimeout is the server-side ceiling on any single statement,
+	// sent as a connection RuntimeParam. It is a shorter, backend-enforced
+	// bound that fires before dbOpTimeout for the common case of a slow query,
+	// yielding a clean error; dbOpTimeout is the client-side backstop for a
+	// backend too wedged to honor it. Expressed in milliseconds (10s).
+	statementTimeout = "10000"
+)
+
 // schema is the storage layer for conversations and messages. Everything is
 // keyed by (project_name, context_id) — the project is the authorization
 // boundary, and no query in this file ever crosses it.
@@ -76,6 +99,7 @@ type Lister interface {
 type PostgresStore struct {
 	pool           *pgxpool.Pool
 	maxRecentTurns int
+	maxTurns       int // per-conversation retention cap, enforced at Append
 }
 
 var (
@@ -91,9 +115,9 @@ func NewPostgresStore(ctx context.Context, databaseURL string, logger *slog.Logg
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	cfg, err := pgxpool.ParseConfig(databaseURL)
+	cfg, err := buildPoolConfig(databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("conversation store: parse database url: %w", err)
+		return nil, err
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -110,7 +134,27 @@ func NewPostgresStore(ctx context.Context, databaseURL string, logger *slog.Logg
 		}
 	}
 	logger.Info("history.store", "type", "postgres", "host", cfg.ConnConfig.Host, "database", cfg.ConnConfig.Database)
-	return &PostgresStore{pool: pool, maxRecentTurns: DefaultMaxRecentTurns}, nil
+	return &PostgresStore{pool: pool, maxRecentTurns: DefaultMaxRecentTurns, maxTurns: MaxTurnsPerConversation}, nil
+}
+
+// buildPoolConfig parses databaseURL and layers on the pool/backend bounds that
+// keep a wedged database from taking the service down: a capped MaxConns and a
+// server-side statement_timeout. Pool acquisition itself is bounded by the
+// per-method dbOpTimeout context rather than a pool field (pgxpool has none),
+// so no acquirer waits forever. Operator-supplied values in the URL win.
+func buildPoolConfig(databaseURL string) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("conversation store: parse database url: %w", err)
+	}
+	cfg.MaxConns = poolMaxConns
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	if _, ok := cfg.ConnConfig.RuntimeParams["statement_timeout"]; !ok {
+		cfg.ConnConfig.RuntimeParams["statement_timeout"] = statementTimeout
+	}
+	return cfg, nil
 }
 
 // Close releases the connection pool.
@@ -120,6 +164,8 @@ func (s *PostgresStore) Close() { s.pool.Close() }
 // DefaultMaxRecentTurns), oldest first, reconstructed from the message rows
 // by seq arithmetic. An incomplete pair at the window's old edge is dropped.
 func (s *PostgresStore) Turns(ctx context.Context, projectName, contextID string) ([]Turn, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
+	defer cancel()
 	rows, err := s.pool.Query(ctx,
 		`SELECT seq, role, content FROM messages
 		 WHERE project_name = $1 AND context_id = $2
@@ -175,8 +221,13 @@ func (s *PostgresStore) Turns(ctx context.Context, projectName, contextID string
 // Append implements [Store]: one transaction that bumps the conversation's
 // turn count (creating it if new) and inserts the turn's two message rows.
 // The RETURNING-ed turn count assigns seq, so concurrent appenders serialize
-// on the conversation row and never collide.
+// on the conversation row and never collide. Over-long turn text is truncated
+// to MaxStoredContentLen and the conversation is pruned to maxTurns, both in
+// the same transaction, so a single conversation cannot grow without bound.
 func (s *PostgresStore) Append(ctx context.Context, projectName, contextID string, turn Turn) error {
+	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
+	defer cancel()
+	turn = clampTurn(turn)
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("conversation store: begin append: %w", err)
@@ -202,6 +253,21 @@ func (s *PostgresStore) Append(ctx context.Context, projectName, contextID strin
 	if err != nil {
 		return fmt.Errorf("conversation store: insert messages: %w", err)
 	}
+
+	// Enforce the per-conversation retention cap in the same transaction:
+	// once a conversation exceeds maxTurns, delete the oldest message pairs so
+	// storage stays bounded. seq is monotonic (derived from turn_count, which
+	// never decrements), so deleting old rows never collides with future ones.
+	if s.maxTurns > 0 && turnNo > int64(s.maxTurns) {
+		minKeptSeq := 2 * (turnNo - int64(s.maxTurns))
+		if _, err = tx.Exec(ctx,
+			`DELETE FROM messages
+			 WHERE project_name = $1 AND context_id = $2 AND seq <= $3`,
+			projectName, contextID, minKeptSeq); err != nil {
+			return fmt.Errorf("conversation store: prune conversation: %w", err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("conversation store: commit append: %w", err)
 	}
@@ -211,6 +277,8 @@ func (s *PostgresStore) Append(ctx context.Context, projectName, contextID strin
 // ListConversations implements [Lister]: the project's conversations, newest
 // activity first. limit <= 0 uses 100.
 func (s *PostgresStore) ListConversations(ctx context.Context, projectName string, limit int) ([]Conversation, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
+	defer cancel()
 	if limit <= 0 {
 		limit = 100
 	}

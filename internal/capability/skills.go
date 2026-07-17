@@ -84,13 +84,17 @@ func buildSkillsIndex(registry map[string]skillEntry) string {
 type loadSkillTool struct {
 	registry   map[string]skillEntry
 	httpClient *http.Client
+	guard      *ipGuard
 	timeout    time.Duration
 	maxBytes   int
 	logger     *slog.Logger
 }
 
-func newLoadSkillTool(registry map[string]skillEntry, opts ComposeOptions, logger *slog.Logger) *loadSkillTool {
-	httpClient := opts.HTTPClient
+// newLoadSkillTool builds the loader over a guarded HTTP client (httpClient)
+// and the shared SSRF guard, both supplied by [Compose]. The guarded client
+// blocks private/link-local skill sources at dial time; guard adds the scheme
+// pre-check.
+func newLoadSkillTool(registry map[string]skillEntry, opts ComposeOptions, httpClient *http.Client, guard *ipGuard, logger *slog.Logger) *loadSkillTool {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -105,6 +109,7 @@ func newLoadSkillTool(registry map[string]skillEntry, opts ComposeOptions, logge
 	return &loadSkillTool{
 		registry:   registry,
 		httpClient: httpClient,
+		guard:      guard,
 		timeout:    timeout,
 		maxBytes:   maxBytes,
 		logger:     logger,
@@ -163,6 +168,13 @@ func (t *loadSkillTool) Execute(ctx context.Context, input json.RawMessage) (str
 }
 
 func (t *loadSkillTool) fetch(ctx context.Context, source string) (string, error) {
+	// Reject non-http(s) sources up front; the resolved-IP block for private/
+	// link-local targets is enforced by the guarded client at dial time.
+	if t.guard != nil {
+		if err := t.guard.allowedScheme(source); err != nil {
+			return "", err
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)

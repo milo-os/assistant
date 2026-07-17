@@ -380,6 +380,58 @@ func TestComposeTools_TimesOutHangingConnectAndClosesLateSession(t *testing.T) {
 	}
 }
 
+// blockingToolsSession connects fine but its Tools() blocks until the list
+// context is canceled — a provider that hangs on tools/list.
+type blockingToolsSession struct {
+	mu         sync.Mutex
+	closeCalls int
+}
+
+func (s *blockingToolsSession) Tools(ctx context.Context) (map[string]agentcore.Tool, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (s *blockingToolsSession) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeCalls++
+	return nil
+}
+
+func TestComposeTools_ToolsListTimeoutDegradesWithoutHanging(t *testing.T) {
+	var buf bytes.Buffer
+	session := &blockingToolsSession{}
+	doc := streamcoDoc(func(d *CapabilityDocument) { d.Spec.Knowledge = nil })
+
+	done := make(chan *Composed, 1)
+	go func() {
+		composed, _ := Compose(context.Background(), []CapabilityDocument{doc}, ComposeOptions{
+			connect: func(_ context.Context, endpoint string) (mcpSession, error) {
+				if endpoint == "http://provider/mcp" {
+					return session, nil
+				}
+				return nil, errFakeUnreachable
+			},
+			MCPConnectTimeout: 20 * time.Millisecond,
+			Logger:            testLogger(&buf),
+		})
+		done <- composed
+	}()
+
+	select {
+	case composed := <-done:
+		defer composed.Close()
+		if got := keys(composed.Tools); len(got) != 0 {
+			t.Fatalf("want no tools when tools/list times out, got %v", got)
+		}
+		if !strings.Contains(buf.String(), "list_failed") {
+			t.Fatalf("expected a list_failed warning; logs:\n%s", buf.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Compose hung on a provider that blocks tools/list (finding #7 not fixed)")
+	}
+}
+
 func keys(ts agentcore.ToolSet) []string {
 	var out []string
 	for k := range ts {

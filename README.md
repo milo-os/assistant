@@ -223,6 +223,7 @@ needed).
 | `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file (fixture source); mutually exclusive with `CAPABILITY_PROVIDER_URL` |
 | `CAPABILITY_PROVIDER_URL` | — | Base URL of the capability-provider HTTP API (HTTP source); mutually exclusive with `CAPABILITY_DOCS_FIXTURE`. Both unset ⇒ no provider capabilities |
 | `CONVERSATION_STORE_URL` | — | `postgres://` URL for durable conversation history. Unset ⇒ in-memory (process lifetime). Set but unreachable ⇒ boot fails (no silent fallback to amnesia) |
+| `CAPABILITY_ALLOW_PRIVATE_NETWORKS` | `false` | Relax the capability SSRF guard's loopback/RFC1918 block. In-cluster capability endpoints (the AI gateway, provider pods) are private ClusterIPs, so every real deployment sets this `true`; link-local/cloud-metadata stay blocked either way. Leave `false` only when all endpoints are public and providers untrusted |
 | `MODEL_MODE` | `anthropic` if key else `mock` | `anthropic` \| `mock` \| `gateway` |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_MODE=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Anthropic model id |

@@ -109,6 +109,16 @@ type Config struct {
 	// a service configured for durable history must not silently forget.
 	ConversationStoreURL string
 
+	// AllowPrivateCapabilityNetworks relaxes the capability SSRF guard's
+	// loopback/RFC1918 block (env CAPABILITY_ALLOW_PRIVATE_NETWORKS). The
+	// platform's real capability endpoints — the in-cluster AI gateway, provider
+	// pods — resolve to private ClusterIPs, so every real deployment sets this
+	// true; local dev/e2e reach services over loopback and need it too. Even
+	// when true, link-local/cloud-metadata addresses stay blocked. Set false
+	// only in a posture where all capability endpoints are public AND providers
+	// are untrusted (then prefer a host allow-list). Default false = safe.
+	AllowPrivateCapabilityNetworks bool
+
 	Model ModelConfig
 	Usage UsageConfig
 }
@@ -257,7 +267,8 @@ func Load(getenv func(string) string) (*Config, error) {
 		},
 		CapabilityDocsFixture: capabilityDocsFixture,
 		CapabilityProviderURL: capabilityProviderURL,
-		ConversationStoreURL:  conversationStoreURL,
+		ConversationStoreURL:           conversationStoreURL,
+		AllowPrivateCapabilityNetworks: isTruthy(env("CAPABILITY_ALLOW_PRIVATE_NETWORKS")),
 		Model: ModelConfig{
 			Mode:               modelMode,
 			AnthropicAPIKey:    anthropicKey,

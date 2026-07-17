@@ -58,6 +58,11 @@ type Deps struct {
 	// making follow-up messages in the same A2A context conversational. Nil
 	// disables memory: every turn is answered standalone.
 	History history.Store
+	// AllowPrivateCapabilityNetworks relaxes the capability SSRF guard's
+	// loopback/RFC1918 block (link-local/metadata stay blocked either way). The
+	// platform's capability endpoints are in-cluster private ClusterIPs, so real
+	// deployments set this true; it is threaded into capability.Compose.
+	AllowPrivateCapabilityNetworks bool
 	// StepLimit and MaxOutputTokens override the loop defaults when > 0.
 	// HistoryTokenBudget overrides DefaultHistoryTokenBudget when > 0.
 	StepLimit          int
@@ -147,7 +152,8 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		invocations []capability.ProviderToolInvocation
 	)
 	composed, _ := capability.Compose(ctx, docs, capability.ComposeOptions{
-		HTTPClient: c.deps.HTTPClient,
+		HTTPClient:           c.deps.HTTPClient,
+		AllowPrivateNetworks: c.deps.AllowPrivateCapabilityNetworks,
 		OnToolInvocation: func(inv capability.ProviderToolInvocation) {
 			mu.Lock()
 			invocations = append(invocations, inv)
@@ -284,7 +290,16 @@ func (s *Stream) Recv() (Event, error) {
 			s.total = part.TotalUsage
 			s.state = stateFromReason(part.FinishReason)
 		case agentcore.StreamPartError:
-			s.state = StateFailed
+			// A failed or canceled run still carries the usage of the steps
+			// that completed before it broke, so those inferences are metered
+			// (the provider billed them). Keep a cancellation distinct from a
+			// genuine failure end to end.
+			s.total = part.TotalUsage
+			if part.FinishReason == agentcore.FinishCanceled {
+				s.state = StateCanceled
+			} else {
+				s.state = StateFailed
+			}
 			if part.Err != nil {
 				s.errMsg = part.Err.Error()
 			}

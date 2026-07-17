@@ -26,6 +26,13 @@ const (
 	methodCancelTask           = "CancelTask"
 )
 
+// maxRequestBodyBytes caps the JSON-RPC body the middleware buffers before
+// peeking the method/params. A2A requests are small (a message plus a little
+// metadata), so a few MiB is generous headroom; the cap stops an authenticated
+// caller from streaming a multi-GB body into the unbounded io.ReadAll below and
+// OOM-killing the pod.
+const maxRequestBodyBytes = 4 << 20 // 4 MiB
+
 // authMiddleware enforces authentication (401) and project authorization (403)
 // in front of the a2a-go JSON-RPC handler. Authentication is transport-level
 // (bearer token → principal). Authorization needs the target project: for
@@ -56,9 +63,17 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the whole body so we can peek the method/params for authorization,
-	// then restore it for the downstream JSON-RPC handler.
+	// then restore it for the downstream JSON-RPC handler. Cap the read: an
+	// over-limit body trips http.MaxBytesReader before it is fully buffered, so
+	// we answer 413 instead of OOMing on an unbounded io.ReadAll.
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeAuthError(w, http.StatusRequestEntityTooLarge, "Request body too large")
+			return
+		}
 		writeAuthError(w, http.StatusBadRequest, "Failed to read request body")
 		return
 	}
@@ -76,9 +91,14 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // authorize resolves the target project from the JSON-RPC request and checks it
-// against the principal. It returns nil (allow) for requests it cannot or need
-// not authorize (unknown method, missing project, unknown task) — those are
-// handled downstream (InvalidParams / TaskNotFound), matching the TS flow.
+// against the principal. It is DENY-BY-DEFAULT: only the four project-scoped
+// methods (SendMessage/SendStreamingMessage/GetTask/CancelTask) can be allowed,
+// and only when their project check passes. Every other method a2a-go v2
+// dispatches is rejected outright — see the default case for why.
+//
+// For an allowed method it still returns nil (defer to the handler) when it
+// cannot resolve the project (missing project, unknown task); those surface
+// downstream as InvalidParams / TaskNotFound, matching the TS flow.
 func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal, body []byte) error {
 	var peek struct {
 		Method string          `json:"method"`
@@ -115,7 +135,18 @@ func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal
 		return m.authorizer.AuthorizeProject(ctx, principal, project)
 
 	default:
-		return nil
+		// DENY-BY-DEFAULT. a2a-go v2 also dispatches ListTasks, SubscribeToTask
+		// and the push-config methods (CreateTaskPushNotificationConfig,
+		// GetTaskPushNotificationConfig, ListTaskPushNotificationConfigs,
+		// DeleteTaskPushNotificationConfig) plus GetExtendedAgentCard. None have
+		// per-project scoping here, and the shared task store is built with a
+		// constant Authenticator (server.go), so it applies NO per-user/project
+		// filter: an unguarded ListTasks would hand every project's tasks — with
+		// their message History — to any valid token, even a zero-grant one.
+		// Until per-project scoping exists, reject every non-gated method. This
+		// also covers truly-unknown methods, which a2a-go would otherwise pass
+		// straight to the handler.
+		return auth.Unauthorized("Method not permitted")
 	}
 }
 

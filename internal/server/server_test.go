@@ -336,11 +336,69 @@ func TestCancelTask(t *testing.T) {
 
 // ── JSON-RPC framing ──────────────────────────────────────────
 
+// TestUnknownMethod pins deny-by-default: an unknown method is rejected at the
+// auth boundary (403) rather than reaching the JSON-RPC handler (which would
+// answer -32601). Denying here keeps a2a-go from dispatching methods this
+// service has not project-scoped.
 func TestUnknownMethod(t *testing.T) {
 	srv := newTestServer(t)
-	r := decodeRPC(t, rpc(t, srv, goodToken, "does/notexist", map[string]any{}, "x"))
-	if r.Error == nil || r.Error.Code != -32601 {
-		t.Fatalf("want -32601 method-not-found, got %+v", r.Error)
+	res := rpc(t, srv, goodToken, "does/notexist", map[string]any{}, "x")
+	defer res.Body.Close()
+	if res.StatusCode != 403 {
+		t.Fatalf("status = %d, want 403", res.StatusCode)
+	}
+}
+
+// TestNonGatedMethodsDenied is the regression pin for the cross-project data
+// disclosure: a2a-go v2 dispatches ListTasks and SubscribeToTask, but the
+// shared task store has no per-project filter, so an unguarded ListTasks would
+// leak every project's tasks (with message History) to any valid token. Both
+// must be denied (403) at the auth boundary, together with the push-config
+// methods. A valid, project-granted token must still get a denial — not data.
+func TestNonGatedMethodsDenied(t *testing.T) {
+	srv := newTestServer(t)
+	denied := []string{
+		"ListTasks",
+		"SubscribeToTask",
+		"CreateTaskPushNotificationConfig",
+		"GetTaskPushNotificationConfig",
+		"ListTaskPushNotificationConfigs",
+		"DeleteTaskPushNotificationConfig",
+	}
+	for _, method := range denied {
+		t.Run(method, func(t *testing.T) {
+			// goodToken is granted `project`; the denial is the method itself,
+			// not a missing project grant.
+			res := rpc(t, srv, goodToken, method, map[string]any{}, "x")
+			defer res.Body.Close()
+			if res.StatusCode != 403 {
+				t.Fatalf("status = %d, want 403 (method must be denied, not dispatched)", res.StatusCode)
+			}
+		})
+	}
+}
+
+// TestOversizeBodyRejected pins the body-size cap: a request whose body exceeds
+// maxRequestBodyBytes is rejected with 413 before the middleware buffers it all,
+// so an authenticated caller cannot OOM the pod with a giant POST.
+func TestOversizeBodyRejected(t *testing.T) {
+	srv := newTestServer(t)
+	// A valid JSON-RPC envelope padded past the cap with filler metadata.
+	huge := strings.Repeat("a", maxRequestBodyBytes+1<<20)
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": "x", "method": "SendMessage",
+		"params": map[string]any{"filler": huge},
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/a2a", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+goodToken)
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", res.StatusCode)
 	}
 }
 

@@ -11,6 +11,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -84,16 +85,25 @@ func (m *Model) Stream(ctx context.Context, req agentcore.Request) (agentcore.St
 		return nil, err
 	}
 
-	reqOpts := make([]option.RequestOption, 0, len(req.Headers))
+	reqOpts := make([]option.RequestOption, 0, len(req.Headers)+1)
 	for k, v := range req.Headers {
 		reqOpts = append(reqOpts, option.WithHeader(k, v))
 	}
+	// Capture the raw response: a misrouted request (e.g. a proxy that serves
+	// HTML or ignores stream:true and returns a JSON object with HTTP 200)
+	// yields an SSE parser that finds no events and ends cleanly — which would
+	// otherwise masquerade as a completed, empty, zero-token turn. Empty
+	// answers must be errors, not silent successes.
+	var httpRes *http.Response
+	reqOpts = append(reqOpts, option.WithResponseInto(&httpRes))
 
 	stream := m.client.Messages.NewStreaming(ctx, params, reqOpts...)
 
 	return agentcore.StreamFunc(func(send agentcore.SendFunc) {
 		acc := anthropic.Message{}
+		sawEvent := false
 		for stream.Next() {
+			sawEvent = true
 			event := stream.Current()
 			if err := acc.Accumulate(event); err != nil {
 				send(agentcore.StreamPart{Kind: agentcore.StreamPartError, FinishReason: agentcore.FinishError, Err: err})
@@ -107,6 +117,18 @@ func (m *Model) Stream(ctx context.Context, req agentcore.Request) (agentcore.St
 		}
 		if err := stream.Err(); err != nil {
 			send(agentcore.StreamPart{Kind: agentcore.StreamPartError, FinishReason: agentcore.FinishError, Err: err})
+			return
+		}
+		if !sawEvent {
+			status := "unknown"
+			if httpRes != nil {
+				status = httpRes.Status
+			}
+			send(agentcore.StreamPart{
+				Kind:         agentcore.StreamPartError,
+				FinishReason: agentcore.FinishError,
+				Err:          fmt.Errorf("anthropic: upstream returned no stream events (HTTP %s) — check the base URL routes /v1/messages and honors stream:true", status),
+			})
 			return
 		}
 

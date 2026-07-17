@@ -71,6 +71,14 @@ type ComposeOptions struct {
 	OnToolInvocation func(ProviderToolInvocation)
 	// Logger receives composition warnings. Nil discards them.
 	Logger *slog.Logger
+	// AllowPrivateNetworks disables the SSRF IP guard's private/loopback/
+	// link-local block for the knowledge, skill, and MCP fetches. It is the
+	// dev/cluster escape hatch: local overlays address services over loopback
+	// and in-cluster (private) IPs, which the guard blocks by default. It MUST
+	// stay false in production. Default false = guard on (safe).
+	AllowPrivateNetworks bool
+	// resolver is the DNS seam for the SSRF guard. Nil uses net.DefaultResolver.
+	resolver ipResolver
 }
 
 // Composed is the result of [Compose]: the knowledge addendum for the system
@@ -105,15 +113,22 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		logger = slog.New(slog.DiscardHandler)
 	}
 
+	// One SSRF guard drives all three provider-URL sinks (knowledge, skills,
+	// MCP). The knowledge/skill fetches share a guarded HTTP client; the MCP
+	// connect path re-checks the endpoint host before connecting.
+	guard := newIPGuard(opts.AllowPrivateNetworks, opts.resolver)
+	httpClient := guard.wrapClient(opts.HTTPClient)
+
 	addendum := buildKnowledgeAddendum(ctx, docs, knowledgeOptions{
-		httpClient:           opts.HTTPClient,
+		httpClient:           httpClient,
+		guard:                guard,
 		timeout:              opts.KnowledgeTimeout,
 		maxBytesPerSource:    opts.KnowledgeMaxBytesPerSource,
 		maxSourcesPerService: opts.KnowledgeMaxSourcesPerService,
 		logger:               logger,
 	})
 
-	tools, sessions := connectTools(ctx, docs, opts, logger)
+	tools, sessions := connectTools(ctx, docs, opts, guard, logger)
 
 	// Skills: descriptions into the prompt, bodies behind the built-in
 	// load_skill tool (progressive disclosure).
@@ -126,7 +141,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 			addendum = addendum + "\n\n" + index
 		}
 		if _, exists := tools[LoadSkillToolName]; !exists {
-			tools[LoadSkillToolName] = newLoadSkillTool(skills, opts, logger)
+			tools[LoadSkillToolName] = newLoadSkillTool(skills, opts, httpClient, guard, logger)
 		}
 	}
 
@@ -147,10 +162,10 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 	}, nil
 }
 
-func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, logger *slog.Logger) (agentcore.ToolSet, []mcpSession) {
+func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, logger *slog.Logger) (agentcore.ToolSet, []mcpSession) {
 	connect := opts.connect
 	if connect == nil {
-		connect = defaultConnector()
+		connect = guardedConnector(defaultConnector(), guard)
 	}
 	timeout := opts.MCPConnectTimeout
 	if timeout <= 0 {
@@ -174,7 +189,12 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 			}
 			sessions = append(sessions, session)
 
-			serverTools, err := session.Tools(ctx)
+			// Bound tools/list with the same budget as connect: a provider that
+			// connects then hangs on the list call must never stall a chat turn.
+			// On timeout we degrade to no tools for this provider.
+			listCtx, cancelList := context.WithTimeout(ctx, timeout)
+			serverTools, err := session.Tools(listCtx)
+			cancelList()
 			if err != nil {
 				logger.Warn("capability.mcp.list_failed",
 					"service", serviceName, "server", server.Name, "error", err.Error())
@@ -245,6 +265,20 @@ var toolNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 func NamespaceToolName(serverName, toolName string) string {
 	sanitize := func(v string) string { return toolNameSanitizer.ReplaceAllString(v, "-") }
 	return sanitize(serverName) + ToolNamespaceSeparator + sanitize(toolName)
+}
+
+// guardedConnector wraps a connector with the SSRF guard: it refuses to connect
+// to an endpoint whose scheme is disallowed or that resolves to a non-routable
+// address (loopback, private, link-local incl. cloud IMDS) before the inner
+// connector touches the network. Test connectors injected via ComposeOptions
+// bypass this — they never reach the real network.
+func guardedConnector(inner mcpConnector, guard *ipGuard) mcpConnector {
+	return func(ctx context.Context, endpoint string) (mcpSession, error) {
+		if err := guard.checkURL(ctx, endpoint); err != nil {
+			return nil, err
+		}
+		return inner(ctx, endpoint)
+	}
 }
 
 // defaultConnector opens real MCP sessions via the mcptool client.

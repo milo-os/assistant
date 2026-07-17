@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 )
@@ -193,9 +194,16 @@ func (r *run) runStep(messages []Message, toolDefs []ToolDefinition) (text strin
 		case StreamPartStepFinish:
 			usage = part.Usage
 			reason = part.FinishReason
+		case StreamPartError:
+			// Every adapter emits StreamPartError to signal a failed or
+			// canceled model stream. It MUST propagate as a run failure —
+			// falling through here would report a truncated stream as a
+			// normal stop-completion (billing a half-answer as success).
+			r.emitError(part.Err)
+			return "", nil, Usage{}, "", false
 		default:
-			// Adapters only produce the three kinds above; ignore anything
-			// else defensively rather than corrupting the run.
+			// No adapter emits the remaining kinds mid-stream; ignore them
+			// defensively rather than corrupting the run.
 		}
 	}
 
@@ -241,8 +249,17 @@ func (r *run) executeTool(call ToolCall) ToolResult {
 	return ToolResult{ToolCallID: call.ID, Name: call.Name, Content: out}
 }
 
+// emitError ends the run with the terminal error part. It carries the usage
+// accumulated over the steps that completed before the failure (r.total) so a
+// mid-run failure still bills the inferences the provider already ran, and it
+// distinguishes a context cancellation ([FinishCanceled]) from any other
+// failure ([FinishError]) end to end.
 func (r *run) emitError(err error) {
-	r.emit(StreamPart{Kind: StreamPartError, FinishReason: FinishError, Err: err})
+	reason := FinishError
+	if errors.Is(err, context.Canceled) || r.ctx.Err() == context.Canceled {
+		reason = FinishCanceled
+	}
+	r.emit(StreamPart{Kind: StreamPartError, FinishReason: reason, Err: err, TotalUsage: r.total})
 }
 
 // assistantMessage builds the assistant turn recorded in history after a

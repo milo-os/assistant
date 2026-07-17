@@ -14,6 +14,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/milo-os/assistant/agentcore"
 )
@@ -23,6 +24,41 @@ import (
 type Turn struct {
 	UserText      string
 	AssistantText string
+}
+
+// MaxStoredContentLen caps how many bytes of a single user/assistant message
+// any store persists. Conversation memory truncates by token budget on replay
+// (see Truncate), so this is not a functional limit — it is a storage guard so
+// one pathological message (a pasted file, a runaway generation) cannot balloon
+// a row or an in-memory slice without bound. Both stores enforce it identically
+// so a conversation reads back the same whether durable or in-process.
+const MaxStoredContentLen = 32 * 1024
+
+// MaxTurnsPerConversation caps how many turns any one conversation retains.
+// Replay only ever reads the newest DefaultMaxRecentTurns (200), so a cap well
+// above that keeps far more than memory needs while bounding growth: the
+// Postgres store deletes older message pairs at append time, and the memory
+// store drops older turns. Fleet-level age-based retention is a follow-up.
+const MaxTurnsPerConversation = 1000
+
+// truncateContent clamps s to at most MaxStoredContentLen bytes, backing off to
+// a UTF-8 rune boundary so a text column never receives a split rune.
+func truncateContent(s string) string {
+	if len(s) <= MaxStoredContentLen {
+		return s
+	}
+	cut := MaxStoredContentLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// clampTurn returns turn with its texts truncated to MaxStoredContentLen.
+func clampTurn(turn Turn) Turn {
+	turn.UserText = truncateContent(turn.UserText)
+	turn.AssistantText = truncateContent(turn.AssistantText)
+	return turn
 }
 
 // Store persists and recalls a conversation's turns. Implementations must be
@@ -80,8 +116,12 @@ func (s *MemoryStore) Turns(_ context.Context, projectName, contextID string) ([
 	return out, nil
 }
 
-// Append implements [Store].
+// Append implements [Store]. Over-long turn text is truncated to
+// MaxStoredContentLen, and a conversation retains at most
+// MaxTurnsPerConversation turns (oldest dropped) so a long-lived process cannot
+// grow without bound.
 func (s *MemoryStore) Append(_ context.Context, projectName, contextID string, turn Turn) error {
+	turn = clampTurn(turn)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := storeKey{project: projectName, context: contextID}
@@ -91,7 +131,15 @@ func (s *MemoryStore) Append(_ context.Context, projectName, contextID string, t
 	} else {
 		s.meta[key] = &memoryMeta{createdAt: now, lastActiveAt: now}
 	}
-	s.turns[key] = append(s.turns[key], turn)
+	turns := append(s.turns[key], turn)
+	if len(turns) > MaxTurnsPerConversation {
+		// Copy the kept tail into a fresh slice so the dropped turns' text is
+		// released — re-slicing alone would pin the whole backing array.
+		trimmed := make([]Turn, MaxTurnsPerConversation)
+		copy(trimmed, turns[len(turns)-MaxTurnsPerConversation:])
+		turns = trimmed
+	}
+	s.turns[key] = turns
 	return nil
 }
 

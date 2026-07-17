@@ -88,6 +88,9 @@ func TestFullMockToolPath(t *testing.T) {
 		ModelMode: "mock",
 		Source:    fakeSource{docs: []capability.CapabilityDocument{diagnoseDoc(endpoint)}},
 		Emitter:   noopEmitter(),
+		// The test MCP server binds loopback; allow private so the SSRF guard
+		// (safe-default: block loopback/private) does not refuse it.
+		AllowPrivateCapabilityNetworks: true,
 	})
 
 	stream := conv.Run(context.Background(), Params{

@@ -51,6 +51,9 @@ func TestComposeDefaultConnector_RealMCPRoundTrip(t *testing.T) {
 
 	composed, err := Compose(context.Background(), []CapabilityDocument{doc}, ComposeOptions{
 		OnToolInvocation: func(inv ProviderToolInvocation) { invoked = append(invoked, inv.NamespacedToolName) },
+		// httptest serves on loopback; opt into the dev path so the SSRF guard
+		// permits it (production keeps the guard on).
+		AllowPrivateNetworks: true,
 	})
 	if err != nil {
 		t.Fatal(err)

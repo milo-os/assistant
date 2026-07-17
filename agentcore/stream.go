@@ -29,8 +29,12 @@ const (
 	// the overall finish reason and the aggregated usage across all steps;
 	// see StreamPart.FinishReason and StreamPart.TotalUsage.
 	StreamPartFinish StreamPartKind = "finish"
-	// StreamPartError is the terminal part of a failed run; see
-	// StreamPart.Err.
+	// StreamPartError is the terminal part of a failed or canceled run. It
+	// carries the cause (StreamPart.Err), whether the run failed or was
+	// canceled (StreamPart.FinishReason, one of [FinishError] or
+	// [FinishCanceled]), and the usage accumulated over the steps that
+	// completed before the failure (StreamPart.TotalUsage) so that work the
+	// provider already billed is not lost.
 	StreamPartError StreamPartKind = "error"
 )
 
@@ -42,7 +46,7 @@ const (
 //	ToolResult  -> ToolResult
 //	StepFinish  -> Usage, FinishReason
 //	Finish      -> FinishReason, TotalUsage
-//	Error       -> Err
+//	Error       -> Err, FinishReason, TotalUsage
 type StreamPart struct {
 	Kind StreamPartKind
 

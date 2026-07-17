@@ -31,7 +31,7 @@ func TestSkillsComposeIndexAndTool(t *testing.T) {
 
 	composed, err := Compose(context.Background(), []CapabilityDocument{
 		skillDoc("streaming.streamco.example", "streamco", "lag-triage", "Triage pipeline consumer lag", srv.URL+"/skills/lag.md"),
-	}, ComposeOptions{})
+	}, ComposeOptions{AllowPrivateNetworks: true}) // httptest loopback = dev path
 	if err != nil {
 		t.Fatal(err)
 	}

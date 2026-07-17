@@ -240,6 +240,51 @@ func TestStreamEmitsToolCall(t *testing.T) {
 	}
 }
 
+// TestMisroutedRequestFailsLoudly pins the fix for a silent-failure mode: a
+// proxy that returns HTTP 200 with a non-SSE body (HTML, or a JSON object
+// because it ignored stream:true) gives the SSE parser nothing to parse,
+// which surfaced as a COMPLETED, empty, zero-token turn. Any response with no
+// stream events must be an error part.
+func TestMisroutedRequestFailsLoudly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","content":[]}`)
+	}))
+	defer srv.Close()
+
+	m := New(Options{ModelID: "claude-test", BaseURL: srv.URL})
+	s, err := m.Stream(context.Background(), agentcore.Request{
+		Messages: []agentcore.Message{agentcore.UserMessage("hi")},
+	})
+	if err != nil {
+		return // an eager error is also acceptable
+	}
+	defer s.Close()
+
+	var sawError bool
+	for {
+		p, rerr := s.Recv()
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			sawError = true
+			break
+		}
+		if p.Kind == agentcore.StreamPartError {
+			sawError = true
+			break
+		}
+		if p.Kind == agentcore.StreamPartStepFinish {
+			t.Fatalf("misrouted request finished gracefully (usage %+v) — must error", p.Usage)
+		}
+	}
+	if !sawError {
+		t.Fatal("misrouted request produced neither an error part nor a stream error")
+	}
+}
+
 func mustStream(t *testing.T, m *Model, req agentcore.Request) agentcore.StreamReader {
 	t.Helper()
 	s, err := m.Stream(context.Background(), req)

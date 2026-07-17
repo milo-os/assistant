@@ -65,9 +65,13 @@ func run() error {
 
 	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           app,
+		Addr:    addr,
+		Handler: app,
+		// ReadHeaderTimeout guards slowloris on headers; ReadTimeout bounds the
+		// whole request read so a slow-drip body (paired with the middleware's
+		// MaxBytesReader size cap) can't tie up a connection indefinitely.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
 	}
 
 	log.Info("server.listening",

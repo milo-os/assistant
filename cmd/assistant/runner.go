@@ -73,12 +73,13 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 	}
 
 	conv := agent.New(agent.Deps{
-		Model:     model,
-		ModelMode: string(cfg.Model.Mode),
-		Source:    source,
-		Emitter:   emitter,
-		History:   store,
-		Logger:    log,
+		Model:                          model,
+		ModelMode:                      string(cfg.Model.Mode),
+		Source:                         source,
+		Emitter:                        emitter,
+		History:                        store,
+		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
+		Logger:                         log,
 	})
 	return conversationRunner{conv: conv}, cleanup, nil
 }
