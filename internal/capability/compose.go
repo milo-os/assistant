@@ -369,7 +369,13 @@ func connectWithTimeout(ctx context.Context, connect mcpConnector, endpoint stri
 		return r.session, r.err
 	case <-timer.C:
 		go func() {
-			if r := <-ch; r.session != nil {
+			// Close only a session the connector RETURNED SUCCESSFULLY. On
+			// failure the connector returns a typed-nil *Session in a non-nil
+			// mcpSession interface (the classic Go nil-interface trap), so a
+			// bare `r.session != nil` would be true and Close() would panic on
+			// the nil receiver — crashing the process from this goroutine. Gate
+			// on err == nil so a slow-then-failed connect degrades quietly.
+			if r := <-ch; r.err == nil && r.session != nil {
 				_ = r.session.Close()
 			}
 		}()
