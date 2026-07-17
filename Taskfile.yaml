@@ -28,8 +28,6 @@ vars:
   EG_NS: envoy-gateway-system
   AIGW_NS: envoy-ai-gateway-system
   AIGW_VERSION: v1.0.0
-  CNPG_OPERATOR_IMAGE: ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0
-  CNPG_POSTGRES_IMAGE: ghcr.io/cloudnative-pg/postgresql:17.8
   TOOL_DIR: '{{.ROOT_DIR}}/bin'
   CHAINSAW_VERSION: v0.2.15
 
@@ -126,14 +124,21 @@ tasks:
       # Stage 2: CloudNativePG operator (server-side: the CRDs are too big for
       # client-side apply) + the conversation-store Cluster. The Cluster apply
       # retries through the operator webhook's readiness window.
-      - |
-        if ! docker exec {{.TEST_INFRA_CLUSTER_NAME}}-control-plane crictl images | grep -q cloudnative-pg/postgresql; then
-          docker image inspect {{.CNPG_OPERATOR_IMAGE}} >/dev/null 2>&1 || docker pull {{.CNPG_OPERATOR_IMAGE}}
-          docker image inspect {{.CNPG_POSTGRES_IMAGE}} >/dev/null 2>&1 || docker pull {{.CNPG_POSTGRES_IMAGE}}
-          kind load docker-image {{.CNPG_OPERATOR_IMAGE}} {{.CNPG_POSTGRES_IMAGE}} --name {{.TEST_INFRA_CLUSTER_NAME}} || true
-          docker exec {{.TEST_INFRA_CLUSTER_NAME}}-control-plane crictl images | grep -q cloudnative-pg/postgresql \
-            || { echo "CNPG postgres image failed to load into kind" >&2; exit 1; }
-        fi
+      # The CNPG operator and postgres images are public upstream multi-arch
+      # images; kubelet pulls them from ghcr directly. We deliberately do NOT
+      # preload them via `kind load` — with docker's containerd image store
+      # (colima), kind's `ctr images import --all-platforms` fails on a
+      # multi-arch index ("content digest not found"), whereas a normal registry
+      # pull selects the node platform correctly. (The operator Deployment is
+      # imagePullPolicy:Always and the postgres image IfNotPresent, so both pull
+      # on their own.) An air-gapped environment would mirror these to a local
+      # registry instead.
+      #
+      # Ensure the target namespace FIRST: the conversation-store Cluster lives
+      # in it, but the overlay that declares it is applied in Stage 3 — on a
+      # fresh cluster the Cluster apply would otherwise fail "namespace not
+      # found" (and the retry below can't fix a missing namespace).
+      - kubectl create namespace {{.NS}} --dry-run=client -o yaml | kubectl apply -f -
       - kubectl apply --server-side --force-conflicts -f config/dependencies/cnpg/cnpg-operator-1.30.0.yaml
       - kubectl -n cnpg-system rollout status deploy/cnpg-controller-manager --timeout=300s
         || kubectl -n cnpg-system wait --for=condition=Available deploy/cnpg-controller-manager --timeout=300s
