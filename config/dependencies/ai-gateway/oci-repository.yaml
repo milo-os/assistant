@@ -1,0 +1,25 @@
+# Flux sources for the Envoy AI Gateway charts. Mirrors the version the
+# Taskfile previously installed imperatively (v1.0.0). Kept GitOps-managed so
+# the AI Gateway is reconciled and drift-corrected like every other shared
+# operator (cert-manager, Envoy Gateway) rather than being applied out-of-band.
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: OCIRepository
+metadata:
+  name: ai-gateway-crds
+  namespace: flux-system
+spec:
+  interval: 12h
+  url: oci://docker.io/envoyproxy/ai-gateway-crds-helm
+  ref:
+    tag: v1.0.0
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: OCIRepository
+metadata:
+  name: ai-gateway
+  namespace: flux-system
+spec:
+  interval: 12h
+  url: oci://docker.io/envoyproxy/ai-gateway-helm
+  ref:
+    tag: v1.0.0

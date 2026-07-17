@@ -1,0 +1,50 @@
+# The Envoy AI Gateway, installed via Flux (was previously `helm upgrade -i`
+# in dev:deploy Stage 1). Two releases: the CRDs first, then the controller
+# that depends on them. `dependsOn` gives Flux the ordering the old sequential
+# helm calls encoded, and `remediation.retries` lets a cold-start image-pull
+# blip self-heal instead of leaving a stuck release (the failure mode that
+# broke model routing before). Both target envoy-ai-gateway-system, matching
+# the extensionManager hostname the Envoy Gateway patch points at.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: ai-gateway-crds
+  namespace: flux-system
+spec:
+  interval: 15m
+  timeout: 5m
+  targetNamespace: envoy-ai-gateway-system
+  chartRef:
+    kind: OCIRepository
+    name: ai-gateway-crds
+    namespace: flux-system
+  install:
+    createNamespace: true
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: ai-gateway
+  namespace: flux-system
+spec:
+  interval: 15m
+  timeout: 5m
+  targetNamespace: envoy-ai-gateway-system
+  dependsOn:
+    - name: ai-gateway-crds
+  chartRef:
+    kind: OCIRepository
+    name: ai-gateway
+    namespace: flux-system
+  install:
+    createNamespace: true
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3

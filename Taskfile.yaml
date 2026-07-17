@@ -22,12 +22,14 @@ vars:
   IMAGE_SINK: ghcr.io/milo-os/assistant-sink
   IMAGE_TAG: dev
   TEST_INFRA_CLUSTER_NAME: test-infra
-  TEST_INFRA_REPO_REF: 'v0.6.4'
+  # v0.7.0 ships Envoy Gateway v1.8.2. The Envoy AI Gateway v1.0.x requires
+  # EG >= v1.8.1 — at the older EG 1.4.3 the AI Gateway never wires model
+  # routing (→ 404), so this floor is load-bearing for gateway-mode chat.
+  TEST_INFRA_REPO_REF: 'v0.7.0'
   KUBECONFIG_PATH: '{{.ROOT_DIR}}/.test-infra/kubeconfig'
   NS: patch-playground
   EG_NS: envoy-gateway-system
   AIGW_NS: envoy-ai-gateway-system
-  AIGW_VERSION: v1.0.0
   TOOL_DIR: '{{.ROOT_DIR}}/bin'
   CHAINSAW_VERSION: v0.2.15
 
@@ -61,7 +63,13 @@ tasks:
   dev:setup:
     desc: Bring up the full dev environment (kind cluster + operators + stack)
     cmds:
+      # On a cold VM every shared-operator image pulls at once, so the remote
+      # cluster-up's per-wait timeout (default 300s) can lapse before the images
+      # land — a false failure that a plain retry clears. Give the waits generous
+      # headroom so the single `task dev:setup` command succeeds from zero.
       - task: test-infra:cluster-up
+        vars:
+          WAIT_TIMEOUT: '900s'
       - task: dev:build
       - task: dev:load
       - task: dev:deploy
@@ -95,17 +103,17 @@ tasks:
     env:
       KUBECONFIG: '{{.KUBECONFIG_PATH}}'
     cmds:
-      # Stage 1: Envoy AI Gateway extension (additive shared infra).
-      # Idempotent and deliberately non-churning: a healthy installed
-      # controller is left untouched — helm --wait against a flapping shared
-      # cluster stalls, and re-rolling Envoy Gateway churns leader election.
-      - |
-        if ! kubectl -n {{.AIGW_NS}} get deploy ai-gateway-controller >/dev/null 2>&1; then
-          helm upgrade -i aieg-crd oci://docker.io/envoyproxy/ai-gateway-crds-helm \
-            --version {{.AIGW_VERSION}} --namespace {{.AIGW_NS}} --create-namespace --wait
-          helm upgrade -i aieg oci://docker.io/envoyproxy/ai-gateway-helm \
-            --version {{.AIGW_VERSION}} --namespace {{.AIGW_NS}} --create-namespace --wait
-        fi
+      # Stage 1: Envoy AI Gateway extension (additive shared infra), Flux-managed
+      # like every other operator. Apply the OCIRepository sources + HelmReleases
+      # (CRDs first, controller dependsOn them) and let Flux reconcile. This
+      # replaces the old imperative `helm upgrade -i --wait` calls: Flux's
+      # remediation.retries makes a cold-start image-pull blip self-heal instead
+      # of leaving a stuck release (that failure previously left `aieg` failed
+      # and permanently 404'd model routing). Idempotent: a healthy release is a
+      # no-op reconcile, so this no longer churns a running controller.
+      - kubectl apply -k config/dependencies/ai-gateway
+      - kubectl -n flux-system wait helmrelease/ai-gateway-crds --for=condition=Ready --timeout=600s
+      - kubectl -n flux-system wait helmrelease/ai-gateway --for=condition=Ready --timeout=600s
       - |
         if ! kubectl -n {{.EG_NS}} get cm envoy-gateway-config -o yaml 2>/dev/null | grep -q extensionManager; then
           kubectl -n flux-system patch helmrelease envoy-gateway --type merge \
