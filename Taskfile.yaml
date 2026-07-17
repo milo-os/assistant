@@ -67,7 +67,8 @@ tasks:
 
   # ── Cluster dev environment ─────────────────────────────────
   dev:setup:
-    desc: Bring up the full dev environment (kind cluster + operators + stack)
+    desc: Bring up the full dev environment (kind cluster + operators + stack).
+      OVERLAY=dev|dev-catalog|dev-anthropic
     cmds:
       # On a cold VM every shared-operator image pulls at once, so the remote
       # cluster-up's per-wait timeout (default 300s) can lapse before the images
@@ -79,6 +80,8 @@ tasks:
       - task: dev:build
       - task: dev:load
       - task: dev:deploy
+        vars:
+          OVERLAY: '{{.OVERLAY | default "dev"}}'
 
   dev:build:
     desc: Build the dev images (assistant compiled on the HOST — an in-image
@@ -174,7 +177,19 @@ tasks:
           sleep 10
         done
         echo "CNPG webhook never admitted the Cluster after ~8min" >&2; exit 1
-      # Stage 3: the stack overlay.
+      # Stage 3: the stack overlay. An *anthropic* overlay needs the
+      # anthropic-api-key Secret (direct api.anthropic.com); materialize it from
+      # key.txt (gitignored — never committed) before applying so the assistant
+      # pod can start. Whitespace is stripped so a trailing newline can't corrupt
+      # the key.
+      - |
+        case "{{.OVERLAY}}" in
+          *anthropic*)
+            test -f key.txt || { echo "OVERLAY={{.OVERLAY}} needs an Anthropic API key at ./key.txt" >&2; exit 1; }
+            kubectl -n {{.NS}} create secret generic anthropic-api-key \
+              --from-literal=key="$(tr -d '[:space:]' < key.txt)" \
+              --dry-run=client -o yaml | kubectl apply -f - ;;
+        esac
       - kubectl apply -k config/overlays/{{.OVERLAY}}
       # Stage 4: waits, dependency-first. CP-tolerant fallbacks — a flapping
       # controller-manager stalls `rollout status` on observedGeneration even
