@@ -137,12 +137,24 @@ tasks:
       - kubectl apply --server-side --force-conflicts -f config/dependencies/cnpg/cnpg-operator-1.30.0.yaml
       - kubectl -n cnpg-system rollout status deploy/cnpg-controller-manager --timeout=300s
         || kubectl -n cnpg-system wait --for=condition=Available deploy/cnpg-controller-manager --timeout=300s
+      # The Cluster CR is rejected until the operator's admission webhook is
+      # actually serving — Deployment-Available is necessary but not sufficient
+      # (the webhook Service endpoint populates a beat later, and on this shared
+      # cluster the operator can restart under control-plane contention). Wait
+      # for a webhook endpoint address first, then retry the apply generously
+      # (up to ~8min) so a first-boot operator restart doesn't fail the deploy.
       - |
-        for i in $(seq 1 18); do
-          kubectl apply -k config/dependencies/cnpg 2>/dev/null && exit 0
+        for i in $(seq 1 60); do
+          [ -n "$(kubectl -n cnpg-system get endpoints cnpg-webhook-service -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)" ] && break
+          sleep 5
+        done
+      - |
+        for i in $(seq 1 48); do
+          err=$(kubectl apply -k config/dependencies/cnpg 2>&1) && exit 0
+          echo "cnpg apply attempt $i not yet admitted: $(echo "$err" | tail -1)" >&2
           sleep 10
         done
-        echo "CNPG webhook never admitted the Cluster" >&2; exit 1
+        echo "CNPG webhook never admitted the Cluster after ~8min" >&2; exit 1
       # Stage 3: the stack overlay.
       - kubectl apply -k config/overlays/{{.OVERLAY}}
       # Stage 4: waits, dependency-first. CP-tolerant fallbacks — a flapping
