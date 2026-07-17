@@ -228,9 +228,10 @@ tasks:
 
   dev:chat:
     desc: >-
-      Chat with the assistant. Interactive by default; one-shot with a message:
-      task dev:chat MSG="Diagnose pipeline p-1 for StreamCo". Continue a thread
-      with CTX=<context-id>. Auto-starts a port-forward if one isn't running.
+      Chat with the assistant. Opens the full-screen TUI by default; one-shot
+      with a message: task dev:chat MSG="Diagnose pipeline p-1 for StreamCo";
+      basic line REPL with PLAIN=1. Continue a thread with CTX=<context-id>.
+      Auto-starts a port-forward if one isn't running.
     silent: true
     env:
       KUBECONFIG: '{{.KUBECONFIG_PATH}}'
@@ -247,8 +248,10 @@ tasks:
         fi
         if [ -n "{{.MSG}}" ]; then
           go run ./cmd/patch chat "{{.MSG}}" --project {{.PROJECT}} {{if .CTX}}--context-id {{.CTX}}{{end}}
-        else
+        elif [ -n "{{.PLAIN}}" ]; then
           go run ./cmd/patch chat -i --project {{.PROJECT}} {{if .CTX}}--context-id {{.CTX}}{{end}}
+        else
+          go run ./cmd/patch chat --tui --project {{.PROJECT}} {{if .CTX}}--context-id {{.CTX}}{{end}}
         fi
 
   dev:card:

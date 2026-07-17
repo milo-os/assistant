@@ -47,6 +47,7 @@ type command struct {
 	project     string
 	contextID   string
 	interactive bool
+	tui         bool
 
 	// task get / cancel
 	id string
@@ -75,8 +76,8 @@ func parseArgs(argv []string) command {
 		return common
 
 	case "chat":
-		if !flags.interactive && (len(rest) == 0 || rest[0] == "") {
-			return command{kind: cmdError, errMsg: "chat: missing message argument (or use --interactive)"}
+		if !flags.interactive && !flags.tui && (len(rest) == 0 || rest[0] == "") {
+			return command{kind: cmdError, errMsg: "chat: missing message argument (or use --interactive / --tui)"}
 		}
 		if flags.project == "" {
 			return command{kind: cmdError, errMsg: "chat: --project <name> is required"}
@@ -88,6 +89,7 @@ func parseArgs(argv []string) command {
 		common.project = flags.project
 		common.contextID = flags.contextID
 		common.interactive = flags.interactive
+		common.tui = flags.tui
 		return common
 
 	case "task":
@@ -122,6 +124,7 @@ type flags struct {
 	json        bool
 	help        bool
 	interactive bool
+	tui         bool
 	url         string
 	token       string
 	project     string
@@ -143,6 +146,8 @@ func extractFlags(argv []string) (flags, string) {
 			f.help = true
 		case arg == "--interactive" || arg == "-i":
 			f.interactive = true
+		case arg == "--tui":
+			f.tui = true
 		case arg == "--url" || strings.HasPrefix(arg, "--url="):
 			val, consumed, ok := valueFor(arg, argv, i)
 			if !ok {
@@ -211,6 +216,7 @@ Usage:
   patch card [--json]
   patch chat "<message>" --project <name> [--context-id <c>] [--json]
   patch chat -i --project <name> [--context-id <c>]
+  patch chat --tui --project <name> [--context-id <c>] ["<message>"]
   patch task get <id> [--json]
   patch task cancel <id> [--json]
 
@@ -220,6 +226,9 @@ Options:
                       replays that conversation's history into the turn
   -i, --interactive   Multi-turn chat session; the conversation id is kept
                       across turns (Ctrl-D or /quit to leave)
+      --tui           Full-screen Bubble Tea chat UI: scrollable transcript,
+                      live-streamed answers rendered as markdown, spinner while
+                      the assistant works (Ctrl-C or /quit to leave)
   --url <url>         Service base URL (overrides PATCH_URL)
   --token <token>     Bearer token (overrides PATCH_TOKEN)
   --json              Emit raw JSON (events for chat, objects otherwise)

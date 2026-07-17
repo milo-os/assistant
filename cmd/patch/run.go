@@ -56,6 +56,9 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 			return fail(io, err)
 		}
 		defer client.Destroy()
+		if cmd.tui {
+			return runChatTUI(ctx, client, cmd.project, cmd.contextID, cmd.message)
+		}
 		if cmd.interactive {
 			return runRepl(ctx, client, cmd.project, cmd.contextID, cmd.message, io)
 		}
