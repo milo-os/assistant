@@ -211,9 +211,11 @@ type chatModel struct {
 	picker pickerState
 
 	// suggestIndex is the highlighted entry in the slash-command suggestion
-	// bar (see currentSuggestions). Reset to 0 whenever the input text
+	// list (see currentSuggestions). Reset to 0 whenever the input text
 	// changes so a fresh prefix always starts at the top match.
 	suggestIndex int
+
+	termHeight int // last WindowSizeMsg height, so View can resize vp around a variable-height suggestion block
 
 	firstMessage string // sent automatically once, on first layout
 	sentFirst    bool
@@ -758,6 +760,19 @@ var helpText = []struct{ cmd, desc string }{
 // row, but they're two distinct completable commands here.
 var commandNames = []string{"/resume", "/clear", "/export", "/status", "/help", "/quit", "/exit"}
 
+// commandDescriptions is what the suggestion list shows next to each command
+// (see suggestionBar); unlike helpText it keys /quit and /exit separately
+// since they're independently completable here.
+var commandDescriptions = map[string]string{
+	"/resume": "browse and resume a past conversation (with a live preview)",
+	"/clear":  "start a fresh conversation, clearing this transcript",
+	"/export": "save this transcript to a file",
+	"/status": "show the current project, conversation, and turn count",
+	"/help":   "show the command list",
+	"/quit":   "leave",
+	"/exit":   "leave",
+}
+
 // isExactCommand reports whether text is already a fully-typed command, so
 // Enter can run it directly without consulting suggestions.
 func isExactCommand(text string) bool {
@@ -790,25 +805,63 @@ func (m *chatModel) currentSuggestions() []string {
 	return matchCommands(text)
 }
 
-// suggestionBar renders the inline slash-command suggestion line shown above
-// the input box: matching commands, the highlighted one styled distinctly,
-// or "" when there's nothing to suggest (in which case the caller keeps the
-// existing blank layout row instead — see View).
+// suggestionBar renders the slash-command suggestion list shown above the
+// input box, one command per line with the highlighted entry styled
+// distinctly, so ↑/↓ moves the highlight the same direction it moves on
+// screen. It's windowed to maxSuggestionRows (scrolled to keep the
+// highlighted entry in view) and always returns exactly m.suggestionRows()
+// lines — blank ones when there's nothing to suggest — so View's layout
+// never has to guess how tall this block is.
 func (m *chatModel) suggestionBar() string {
 	matches := m.currentSuggestions()
+	rows := m.suggestionRows()
 	if len(matches) == 0 {
-		return ""
+		return strings.Repeat("\n", rows-1)
 	}
 	idx := m.suggestIndex % len(matches)
-	parts := make([]string, len(matches))
-	for i, c := range matches {
+
+	start := 0
+	if len(matches) > rows {
+		start = max(idx-rows/2, 0)
+		start = min(start, len(matches)-rows)
+	}
+	end := min(start+rows, len(matches))
+
+	lines := make([]string, 0, rows)
+	for i := start; i < end; i++ {
+		cmd := padCommand(matches[i])
+		desc := commandDescriptions[matches[i]]
 		if i == idx {
-			parts[i] = m.st.you.Render(c)
+			lines = append(lines, m.st.you.Render(cmd)+"  "+m.st.hint.Render(desc+"   tab complete · ↑↓ select"))
 		} else {
-			parts[i] = m.st.subtle.Render(c)
+			lines = append(lines, m.st.subtle.Render(cmd)+"  "+m.st.subtle.Render(desc))
 		}
 	}
-	return strings.Join(parts, "   ") + m.st.hint.Render("   tab complete · ↑↓ select")
+	for len(lines) < rows {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// commandColumnWidth is the widest slash command name, so descriptions in the
+// suggestion list line up in a column regardless of which commands the
+// current prefix has narrowed the list down to.
+var commandColumnWidth = func() int {
+	w := 0
+	for _, c := range commandNames {
+		if len(c) > w {
+			w = len(c)
+		}
+	}
+	return w
+}()
+
+// padCommand right-pads a command name to commandColumnWidth.
+func padCommand(cmd string) string {
+	if pad := commandColumnWidth - len(cmd); pad > 0 {
+		return cmd + strings.Repeat(" ", pad)
+	}
+	return cmd
 }
 
 // helpView renders the /help overlay: every slash command and what it does.
@@ -897,9 +950,12 @@ func (m *chatModel) View() tea.View {
 	}
 	// One blank line between each major region for an even vertical rhythm:
 	// header → blank → transcript → status → gap/suggestions → bordered input.
-	// The row above the input is always exactly one line — blank normally, or
-	// the slash-command suggestion bar while typing "/" — so layout height
-	// never changes based on whether suggestions are showing.
+	// The suggestion block grows downward (vertically, so ↑/↓ tracks it) up to
+	// maxSuggestionRows; the viewport shrinks by the same amount so total
+	// layout height stays constant instead of pushing the input off-screen.
+	if h := m.viewportHeight(); h != m.vp.Height() {
+		m.vp.SetHeight(h)
+	}
 	gap := m.suggestionBar()
 	body := strings.Join([]string{
 		m.st.header.Render("patch") + m.st.subtle.Render("  ·  project "+m.project),
@@ -978,18 +1034,46 @@ func (m *chatModel) contentWidth() int {
 	return w
 }
 
+// maxSuggestionRows caps how tall the vertical slash-command suggestion list
+// can grow (matches are windowed around the highlighted one beyond this).
+const maxSuggestionRows = 4
+
+// suggestionRows is how many lines the row above the input currently needs:
+// 1 (blank) when nothing is suggested, or one line per suggestion up to
+// maxSuggestionRows. The viewport is resized around this each render so the
+// suggestion list can grow downward without the input box or status line
+// jumping around.
+func (m *chatModel) suggestionRows() int {
+	if n := len(m.currentSuggestions()); n > 0 {
+		if n > maxSuggestionRows {
+			return maxSuggestionRows
+		}
+		return n
+	}
+	return 1
+}
+
+// viewportHeight computes the transcript viewport's height from the last
+// known terminal height, chrome (outer box padding, header, header gap,
+// status line, bordered input), and the current suggestion block size.
+func (m *chatModel) viewportHeight() int {
+	// outer box padding (2) + header (1) + header gap (1) + status (1) +
+	// bordered input (3 = border top/bottom + one text row) = 8 rows of fixed
+	// chrome; suggestionRows() adds the variable row(s) above the input.
+	h := m.termHeight - 8 - m.suggestionRows()
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 // layout (re)sizes the viewport/input and rebuilds the glamour renderer for the
 // new width, then re-renders. On the first layout it fires the auto first turn.
 func (m *chatModel) layout(width, height int) tea.Cmd {
 	m.width = width
+	m.termHeight = height
 	cw := m.contentWidth()
-	// Vertical budget: outer box padding (2) + header (1) + header gap (1) +
-	// status (1) + separator (1) + bordered input (3 = border top/bottom + one
-	// text row) = 9 rows of chrome; the rest is the transcript viewport.
-	vpHeight := height - 9
-	if vpHeight < 1 {
-		vpHeight = 1
-	}
+	vpHeight := m.viewportHeight()
 	// Text field width: content width minus the input box's border (2 cols) and
 	// inner padding (2 cols) and the "> " prompt (2 cols), so the box stays
 	// within the content column.
