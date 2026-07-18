@@ -143,6 +143,14 @@ type Config struct {
 	// composed.
 	CapabilityProviderURL string
 
+	// PersonaPromptFile is the path to a file containing the persona section
+	// of the system prompt (env PERSONA_PROMPT_FILE), read once at startup.
+	// Empty ⇒ agent.DefaultPersona. A platform provider sets this to mount
+	// their own identity/voice text via a ConfigMap without a rebuild; the
+	// tool-use and provenance rules stay fixed regardless (see
+	// internal/agent.BuildSystemPrompt).
+	PersonaPromptFile string
+
 	// ConversationStoreURL is the PostgreSQL URL for durable conversation
 	// history (env CONVERSATION_STORE_URL). Empty ⇒ in-memory history
 	// (process lifetime). When set, an unreachable database fails boot —
@@ -347,6 +355,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		},
 		CapabilityDocsFixture:          capabilityDocsFixture,
 		CapabilityProviderURL:          capabilityProviderURL,
+		PersonaPromptFile:              env("PERSONA_PROMPT_FILE"),
 		ConversationStoreURL:           conversationStoreURL,
 		AllowPrivateCapabilityNetworks: isTruthy(env("CAPABILITY_ALLOW_PRIVATE_NETWORKS")),
 		Model: ModelConfig{

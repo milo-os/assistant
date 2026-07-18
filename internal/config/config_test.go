@@ -93,6 +93,26 @@ func TestLoad_CapabilityProviderURL(t *testing.T) {
 	}
 }
 
+func TestLoad_PersonaPromptFile(t *testing.T) {
+	cfg, err := load(t, map[string]string{"AUTH_DEV_TOKENS": "t:s:*", "PERSONA_PROMPT_FILE": "/config/persona.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PersonaPromptFile != "/config/persona.md" {
+		t.Errorf("persona prompt file = %q", cfg.PersonaPromptFile)
+	}
+}
+
+func TestLoad_PersonaPromptFileDefaultsEmpty(t *testing.T) {
+	cfg, err := load(t, map[string]string{"AUTH_DEV_TOKENS": "t:s:*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PersonaPromptFile != "" {
+		t.Errorf("persona prompt file = %q, want empty", cfg.PersonaPromptFile)
+	}
+}
+
 func TestLoad_CapabilitySourcesMutuallyExclusive(t *testing.T) {
 	_, err := load(t, map[string]string{
 		"AUTH_DEV_TOKENS":         "t:s:*",

@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
 
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/agent"
@@ -23,6 +25,18 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 	model, err := agent.ResolveModel(cfg.Model, log)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	var persona string
+	if cfg.PersonaPromptFile != "" {
+		raw, err := os.ReadFile(cfg.PersonaPromptFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read persona prompt file %s: %w", cfg.PersonaPromptFile, err)
+		}
+		persona = string(raw)
+		log.Info("agent.persona.source", "type", "file", "path", cfg.PersonaPromptFile)
+	} else {
+		log.Info("agent.persona.source", "type", "default")
 	}
 
 	// Source selection (fixture and provider URL are mutually exclusive — the
@@ -76,6 +90,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 		Model:                          model,
 		ModelMode:                      string(cfg.Model.Mode),
 		Source:                         source,
+		Persona:                        persona,
 		Emitter:                        emitter,
 		History:                        store,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,

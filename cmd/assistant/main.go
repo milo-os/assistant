@@ -115,6 +115,7 @@ func run() error {
 		"durableTasks", durableTasks != nil,
 		"capabilityDocsFixture", nullable(cfg.CapabilityDocsFixture),
 		"capabilityProviderUrl", nullable(cfg.CapabilityProviderURL),
+		"personaPromptFile", nullable(cfg.PersonaPromptFile),
 		"usageGateway", nullable(cfg.Usage.GatewayURL),
 	)
 

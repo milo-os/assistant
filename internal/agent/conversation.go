@@ -58,6 +58,10 @@ type Deps struct {
 	// Source supplies a project's capability documents. Nil means the
 	// assistant runs with no provider capabilities.
 	Source capability.Source
+	// Persona overrides the identity/voice section of the system prompt
+	// (empty uses [DefaultPersona]). The fixed operating rules always follow
+	// it — see [BuildSystemPrompt].
+	Persona string
 	// Emitter delivers usage events. Required (a no-op emitter is fine).
 	Emitter *usage.Emitter
 	// HTTPClient fetches provider knowledge. Nil uses the default client.
@@ -198,7 +202,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 
 	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
 		Model:           c.deps.Model,
-		System:          BuildSystemPrompt(composed.SystemPromptAddendum),
+		System:          BuildSystemPrompt(c.deps.Persona, composed.SystemPromptAddendum),
 		Messages:        messages,
 		Tools:           composed.Tools,
 		StepLimit:       c.deps.StepLimit,

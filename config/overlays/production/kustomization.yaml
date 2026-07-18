@@ -111,3 +111,17 @@ patches:
           - name: USAGE_GATEWAY_API_KEY
             valueFrom:
               secretKeyRef: { name: assistant-usage-collector, key: apiKey }
+          # ── Persona (optional) ──
+          # Unset ⇒ agent.DefaultPersona (the built-in Datum voice). A platform
+          # provider wanting their own identity/voice sets PERSONA_PROMPT_FILE to
+          # a mounted file — the fixed tool-use/provenance rules in
+          # internal/agent.BuildSystemPrompt always still apply, so this can only
+          # change branding, never the safety-relevant instructions. Mirrors the
+          # capability-documents ConfigMap mount in config/overlays/dev:
+          #
+          #   - name: PERSONA_PROMPT_FILE
+          #     value: /config/persona/persona.md
+          #
+          # ...plus a volumeMount (name: persona, mountPath: /config/persona,
+          # readOnly: true) and a matching `volumes:` entry sourced from a
+          # configMapGenerator (key: persona.md) in this overlay.
