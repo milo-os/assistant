@@ -275,8 +275,10 @@ Options:
                       across turns (Ctrl-D or /quit to leave)
       --tui           Full-screen Bubble Tea chat UI: scrollable transcript,
                       live-streamed answers rendered as markdown, spinner
-                      while the assistant works. Slash commands: /resume
-                      (browse/resume a past conversation), /clear (start a
+                      while the assistant works, tab-completion for slash
+                      commands. Slash commands: /resume (browse/resume a past
+                      conversation, with a live preview of each one's
+                      transcript as you move the cursor), /clear (start a
                       fresh one), /export (save the transcript to a file),
                       /status (show project/conversation/turn count), /help
                       (list commands), /quit or /exit (leave; Ctrl-C also

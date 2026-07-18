@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -67,6 +68,14 @@ type (
 		items     []assistantv1alpha1.ConversationMessage
 		err       error
 	}
+	// pickerPreviewMsg delivers one conversation's transcript (or an error) for
+	// the picker's preview pane — the same fetch as pickerTranscriptMsg, but
+	// cached by contextID instead of resuming into the main chat.
+	pickerPreviewMsg struct {
+		contextID string
+		items     []assistantv1alpha1.ConversationMessage
+		err       error
+	}
 )
 
 // transcriptTurn is one unstyled turn, parallel to chatModel.turns (which
@@ -87,6 +96,27 @@ type pickerState struct {
 	err     string
 	items   []assistantv1alpha1.Conversation
 	cursor  int
+
+	// preview/previewErr/previewPending back the preview pane: the highlighted
+	// conversation's transcript is fetched lazily as the cursor moves and
+	// cached by contextID (conversation Name) so revisiting an item never
+	// re-fetches. previewPending guards against firing a second fetch for the
+	// same id while one is already in flight.
+	preview        map[string][]assistantv1alpha1.ConversationMessage
+	previewErr     map[string]string
+	previewPending map[string]bool
+}
+
+// newPickerState returns an open, loading picker with its preview caches
+// ready to write to (a zero pickerState's maps are nil).
+func newPickerState() pickerState {
+	return pickerState{
+		open:           true,
+		loading:        true,
+		preview:        map[string][]assistantv1alpha1.ConversationMessage{},
+		previewErr:     map[string]string{},
+		previewPending: map[string]bool{},
+	}
 }
 
 // styles bundles the lipgloss styles that depend on the terminal background, so
@@ -179,6 +209,11 @@ type chatModel struct {
 	overlay string
 
 	picker pickerState
+
+	// suggestIndex is the highlighted entry in the slash-command suggestion
+	// bar (see currentSuggestions). Reset to 0 whenever the input text
+	// changes so a fresh prefix always starts at the top match.
+	suggestIndex int
 
 	firstMessage string // sent automatically once, on first layout
 	sentFirst    bool
@@ -313,6 +348,15 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.picker.items = msg.items
 		m.picker.cursor = 0
+		return m, m.maybeLoadPreview()
+
+	case pickerPreviewMsg:
+		delete(m.picker.previewPending, msg.contextID)
+		if msg.err != nil {
+			m.picker.previewErr[msg.contextID] = msg.err.Error()
+			return m, nil
+		}
+		m.picker.preview[msg.contextID] = msg.items
 		return m, nil
 
 	case pickerTranscriptMsg:
@@ -366,12 +410,19 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
+		// A highlighted (or sole) suggestion resolves on Enter, same as
+		// completing with Tab first then submitting — lets "/re" + Enter run
+		// /resume directly instead of being sent as a literal message.
+		if matches := m.currentSuggestions(); len(matches) > 0 {
+			text = matches[m.suggestIndex%len(matches)]
+		}
+		m.suggestIndex = 0
 		switch text {
 		case "/quit", "/exit":
 			return m, tea.Quit
 		case "/resume":
 			m.ti.Reset()
-			m.picker = pickerState{open: true, loading: true}
+			m.picker = newPickerState()
 			return m, tea.Batch(m.loadPickerList(), m.sp.Tick)
 		case "/clear":
 			m.ti.Reset()
@@ -402,6 +453,33 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.ti.Reset()
 		return m, m.submit(text)
+	case "tab":
+		// Complete to the highlighted suggestion without submitting — lets the
+		// user see/edit before running, and is a no-op when there's nothing to
+		// suggest (already exact, or not a "/" prefix at all).
+		if matches := m.currentSuggestions(); len(matches) > 0 {
+			m.ti.SetValue(matches[m.suggestIndex%len(matches)])
+			m.ti.CursorEnd()
+		}
+		return m, nil
+	case "up", "down":
+		// Cycle the highlighted suggestion while one is showing; otherwise fall
+		// through to the same (currently a no-op) forwarding default does for
+		// these keys, so behavior outside "/" typing is unchanged.
+		if matches := m.currentSuggestions(); len(matches) > 0 {
+			if msg.String() == "up" {
+				m.suggestIndex = (m.suggestIndex - 1 + len(matches)) % len(matches)
+			} else {
+				m.suggestIndex = (m.suggestIndex + 1) % len(matches)
+			}
+			return m, nil
+		}
+		if msg.Text == "" && !isEditingKey(msg.String()) {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.ti, cmd = m.ti.Update(msg)
+		return m, cmd
 	case "pgup", "pgdown", "shift+up", "shift+down":
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
@@ -416,6 +494,7 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.ti, cmd = m.ti.Update(msg)
+		m.suggestIndex = 0 // a new prefix invalidates the old highlighted index
 		return m, cmd
 	}
 }
@@ -432,12 +511,12 @@ func (m *chatModel) onPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.picker.cursor > 0 {
 			m.picker.cursor--
 		}
-		return m, nil
+		return m, m.maybeLoadPreview()
 	case "down", "j":
 		if m.picker.cursor < len(m.picker.items)-1 {
 			m.picker.cursor++
 		}
-		return m, nil
+		return m, m.maybeLoadPreview()
 	case "enter":
 		if m.picker.loading || len(m.picker.items) == 0 {
 			return m, nil
@@ -487,29 +566,81 @@ func (m *chatModel) loadPickerList() tea.Cmd {
 	}
 }
 
-// loadPickerTranscript fetches one conversation's full transcript (the
-// messages subresource) in the background, for Update to fold into m.turns
-// on arrival. Same off-goroutine caveat as loadPickerList.
+// fetchTranscript fetches one conversation's full transcript (the messages
+// subresource) over kubectl. Shared by loadPickerTranscript (resume) and
+// loadPickerPreview (the picker's preview pane) — same data, different
+// destination Msg.
+func fetchTranscript(ctx context.Context, kubeconfig, project, contextID string) ([]assistantv1alpha1.ConversationMessage, error) {
+	path := fmt.Sprintf(
+		"/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/conversations/%s/messages",
+		project, contextID)
+	out, err := kubectlJSON(ctx, kubeconfig, "get", "--raw", path)
+	if err != nil {
+		return nil, errors.New(kubectlErrorText(err))
+	}
+	var msgs assistantv1alpha1.ConversationMessages
+	if err := json.Unmarshal(out, &msgs); err != nil {
+		return nil, err
+	}
+	return msgs.Items, nil
+}
+
+// loadPickerTranscript fetches one conversation's full transcript in the
+// background, for Update to fold into m.turns on arrival (resuming it as the
+// active chat). Same off-goroutine caveat as loadPickerList.
 func (m *chatModel) loadPickerTranscript(contextID string) tea.Cmd {
 	ctx, kubeconfig, project := m.ctx, m.kubeconfig, m.project
 	return func() tea.Msg {
-		path := fmt.Sprintf(
-			"/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/conversations/%s/messages",
-			project, contextID)
-		out, err := kubectlJSON(ctx, kubeconfig, "get", "--raw", path)
+		items, err := fetchTranscript(ctx, kubeconfig, project, contextID)
 		if err != nil {
-			return pickerTranscriptMsg{err: errors.New(kubectlErrorText(err))}
-		}
-		var msgs assistantv1alpha1.ConversationMessages
-		if err := json.Unmarshal(out, &msgs); err != nil {
 			return pickerTranscriptMsg{err: err}
 		}
-		return pickerTranscriptMsg{contextID: contextID, items: msgs.Items}
+		return pickerTranscriptMsg{contextID: contextID, items: items}
 	}
 }
 
-// pickerView renders the /resume conversation picker as a full-screen overlay:
-// a loading spinner, an error, "no conversations", or a cursor-navigable list.
+// loadPickerPreview fetches one conversation's transcript in the background
+// for the preview pane — the result is cached in m.picker.preview, never
+// resumed into the main chat. Same off-goroutine caveat as loadPickerList.
+func (m *chatModel) loadPickerPreview(contextID string) tea.Cmd {
+	ctx, kubeconfig, project := m.ctx, m.kubeconfig, m.project
+	return func() tea.Msg {
+		items, err := fetchTranscript(ctx, kubeconfig, project, contextID)
+		if err != nil {
+			return pickerPreviewMsg{contextID: contextID, err: err}
+		}
+		return pickerPreviewMsg{contextID: contextID, items: items}
+	}
+}
+
+// maybeLoadPreview kicks off a background fetch for the currently
+// highlighted conversation's preview, unless it is already cached or already
+// in flight. Called whenever the cursor moves and when the list first loads.
+func (m *chatModel) maybeLoadPreview() tea.Cmd {
+	if len(m.picker.items) == 0 {
+		return nil
+	}
+	id := m.picker.items[m.picker.cursor].Name
+	if _, ok := m.picker.preview[id]; ok {
+		return nil
+	}
+	if _, ok := m.picker.previewErr[id]; ok {
+		return nil
+	}
+	if m.picker.previewPending[id] {
+		return nil
+	}
+	m.picker.previewPending[id] = true
+	return m.loadPickerPreview(id)
+}
+
+// pickerListWidth is the fixed width of the picker's left-hand conversation
+// list column when a preview pane is shown alongside it.
+const pickerListWidth = 44
+
+// pickerView renders the /resume conversation picker as a full-screen
+// overlay: a loading spinner, an error, "no conversations", or a
+// cursor-navigable list with a live preview of the highlighted conversation.
 func (m *chatModel) pickerView() tea.View {
 	var b strings.Builder
 	b.WriteString(m.st.header.Render("resume a conversation") + m.st.subtle.Render("  ·  project "+m.project))
@@ -524,6 +655,7 @@ func (m *chatModel) pickerView() tea.View {
 	default:
 		for i, c := range m.picker.items {
 			line := fmt.Sprintf("%s   %-4s  %d msgs", c.Name, ago(c.Status.LastActiveAt.Time), c.Status.MessageCount)
+			line = lipgloss.NewStyle().MaxWidth(pickerListWidth).Render(line)
 			if i == m.picker.cursor {
 				b.WriteString(m.st.you.Render("> " + line))
 			} else {
@@ -534,21 +666,149 @@ func (m *chatModel) pickerView() tea.View {
 	}
 	b.WriteString("\n" + m.st.hint.Render("↑/↓ select · enter resume · esc cancel"))
 
-	v := tea.NewView(m.st.box.Render(b.String()))
+	body := b.String()
+	if !m.picker.loading && m.picker.err == "" && len(m.picker.items) > 0 {
+		body = lipgloss.JoinHorizontal(lipgloss.Top, b.String(), "    ", m.previewPane())
+	}
+
+	v := tea.NewView(m.st.box.Render(body))
 	v.AltScreen = true
 	return v
+}
+
+// pickerPreviewMaxLines caps how many messages the preview pane shows: the
+// conversation's opening message (what it was about) plus its most recent
+// exchange (where it left off) — the two most useful signals for "do I want
+// to resume this one," without needing the full transcript.
+const pickerPreviewMaxLines = 6
+
+// previewPane renders the highlighted conversation's transcript preview —
+// answering "what's in this conversation" directly in the picker instead of
+// forcing a resume-and-look. Truncated to pickerPreviewMaxLines messages: the
+// opening message plus the most recent tail.
+func (m *chatModel) previewPane() string {
+	var b strings.Builder
+	b.WriteString(m.st.header.Render("preview"))
+	b.WriteString("\n\n")
+	if len(m.picker.items) == 0 {
+		return b.String()
+	}
+	id := m.picker.items[m.picker.cursor].Name
+	switch {
+	case m.picker.previewErr[id] != "":
+		b.WriteString(m.st.err.Render("⚠ " + m.picker.previewErr[id]))
+	// preview[id] == nil while pending means the fetch (kicked off by
+	// maybeLoadPreview, which marks pending before returning its Cmd) is
+	// still in flight; once it lands, either preview[id] or previewErr[id]
+	// above is populated and pending is cleared, so this is never confused
+	// with a legitimately empty conversation.
+	case m.picker.preview[id] == nil && m.picker.previewPending[id]:
+		b.WriteString(m.st.subtle.Render("loading preview…"))
+	default:
+		items := m.picker.preview[id]
+		if len(items) == 0 {
+			b.WriteString(m.st.subtle.Render("(no messages)"))
+			break
+		}
+		shown := items
+		if len(shown) > pickerPreviewMaxLines {
+			tail := append([]assistantv1alpha1.ConversationMessage{}, items[0])
+			tail = append(tail, items[len(items)-(pickerPreviewMaxLines-1):]...)
+			shown = tail
+		}
+		for i, mm := range shown {
+			label, style := m.st.you.Render("You"), m.st.userText
+			if mm.Role == "assistant" {
+				label, style = m.st.patch.Render("Patch"), m.st.subtle
+			}
+			b.WriteString(label + ": " + style.Render(previewLine(mm.Content, 64)) + "\n")
+			if i == 0 && len(items) > pickerPreviewMaxLines {
+				b.WriteString(m.st.subtle.Render("⋮") + "\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+// previewLine collapses a message to one line and truncates it to maxRunes,
+// so a multi-paragraph message doesn't blow out the preview pane's height.
+func previewLine(s string, maxRunes int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
 }
 
 // helpText lists every slash command; shared by /help's overlay and the
 // --help usage text (args.go) so the two can't drift out of sync in spirit,
 // though they're rendered differently (plain vs styled).
 var helpText = []struct{ cmd, desc string }{
-	{"/resume", "browse and resume a past conversation"},
+	{"/resume", "browse and resume a past conversation (with a live preview)"},
 	{"/clear", "start a fresh conversation, clearing this transcript"},
 	{"/export", "save this transcript to a file"},
 	{"/status", "show the current project, conversation, and turn count"},
 	{"/help", "show this list"},
 	{"/quit, /exit", "leave"},
+}
+
+// commandNames is every literal slash command the input recognizes, for
+// autocomplete matching — helpText groups /quit and /exit into one display
+// row, but they're two distinct completable commands here.
+var commandNames = []string{"/resume", "/clear", "/export", "/status", "/help", "/quit", "/exit"}
+
+// isExactCommand reports whether text is already a fully-typed command, so
+// Enter can run it directly without consulting suggestions.
+func isExactCommand(text string) bool {
+	return slices.Contains(commandNames, text)
+}
+
+// matchCommands returns every command with the given prefix, in
+// commandNames' fixed order (stable across keystrokes, so the highlighted
+// index in currentSuggestions doesn't jump around as the prefix narrows).
+func matchCommands(prefix string) []string {
+	var out []string
+	for _, c := range commandNames {
+		if strings.HasPrefix(c, prefix) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// currentSuggestions returns the slash-command completions for the input's
+// current value, or nil when there's nothing to suggest (not a "/" prefix,
+// no matches, or already an exact command). Used by both the suggestion bar
+// (View) and the tab/enter/up/down key handling (onKey), so they always
+// agree on what's being offered.
+func (m *chatModel) currentSuggestions() []string {
+	text := strings.TrimSpace(m.ti.Value())
+	if !strings.HasPrefix(text, "/") || isExactCommand(text) {
+		return nil
+	}
+	return matchCommands(text)
+}
+
+// suggestionBar renders the inline slash-command suggestion line shown above
+// the input box: matching commands, the highlighted one styled distinctly,
+// or "" when there's nothing to suggest (in which case the caller keeps the
+// existing blank layout row instead — see View).
+func (m *chatModel) suggestionBar() string {
+	matches := m.currentSuggestions()
+	if len(matches) == 0 {
+		return ""
+	}
+	idx := m.suggestIndex % len(matches)
+	parts := make([]string, len(matches))
+	for i, c := range matches {
+		if i == idx {
+			parts[i] = m.st.you.Render(c)
+		} else {
+			parts[i] = m.st.subtle.Render(c)
+		}
+	}
+	return strings.Join(parts, "   ") + m.st.hint.Render("   tab complete · ↑↓ select")
 }
 
 // helpView renders the /help overlay: every slash command and what it does.
@@ -633,16 +893,20 @@ func (m *chatModel) View() tea.View {
 	if m.working {
 		status = m.sp.View() + " " + m.st.subtle.Render("thinking…")
 	} else {
-		status = m.st.hint.Render("enter to send · pgup/pgdn scroll · /help for commands · ctrl+c or /quit to leave")
+		status = m.st.hint.Render("enter to send · pgup/pgdn scroll · / for commands (tab completes) · ctrl+c or /quit to leave")
 	}
 	// One blank line between each major region for an even vertical rhythm:
-	// header → blank → transcript → status → blank → bordered input.
+	// header → blank → transcript → status → gap/suggestions → bordered input.
+	// The row above the input is always exactly one line — blank normally, or
+	// the slash-command suggestion bar while typing "/" — so layout height
+	// never changes based on whether suggestions are showing.
+	gap := m.suggestionBar()
 	body := strings.Join([]string{
 		m.st.header.Render("patch") + m.st.subtle.Render("  ·  project "+m.project),
 		"", // gap below the header
 		m.vp.View(),
 		status,
-		"", // gap above the input box
+		gap,
 		m.st.inputBox.Render(m.ti.View()),
 	}, "\n")
 
