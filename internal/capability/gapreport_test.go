@@ -121,6 +121,32 @@ func TestGapReportBoundsSurfaceAsToolErrors(t *testing.T) {
 	}
 }
 
+// TestGapReportDescriptionWarnsAgainstQuotingUserContent pins the one
+// mitigation available for the free-text summary field: since nothing in
+// this codebase scrubs it, the tool's own description must instruct the
+// model to describe the gap abstractly and never quote/paraphrase the
+// user's actual message content. This can only check the instruction is
+// present, not that a model obeys it.
+func TestGapReportDescriptionWarnsAgainstQuotingUserContent(t *testing.T) {
+	store := gapreport.NewMemoryStore()
+	composed, err := Compose(context.Background(), []CapabilityDocument{gapReportDoc("streamco-platform")}, ComposeOptions{
+		GapReports:      store,
+		ExpectedProject: "demo-project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer composed.Close()
+
+	tool := composed.Tools[GapReportToolName("streamco")]
+	desc := tool.Definition().Description
+	for _, want := range []string{"ABSTRACTLY", "Do NOT quote", "Bad:", "Good:"} {
+		if !strings.Contains(desc, want) {
+			t.Fatalf("tool description missing privacy guidance %q; got: %s", want, desc)
+		}
+	}
+}
+
 func TestGapReportMultipleProvidersGetDistinctTools(t *testing.T) {
 	store := gapreport.NewMemoryStore()
 	other := gapReportDoc("streamco-platform")

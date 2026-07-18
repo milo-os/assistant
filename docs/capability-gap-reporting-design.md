@@ -149,6 +149,24 @@ provider MCP tools today.
 No system-prompt addendum is needed (unlike memory's index) — this is a
 write-only action tool, nothing to inject as context.
 
+**Residual privacy constraint on `summary`.** `summary` is free text the
+model composes live from the conversation, and it lands in a project the
+*provider's* team can read — a project the consumer conversation's own
+participants have no relationship to. There is no code-level scrubbing of
+that field (redacting PII/credentials/identifiers reliably is a much larger,
+unreliable NLP problem, out of scope here), and `internal/gapreport`'s
+bounds (`MaxSummaryLen` etc.) only cap length, not content. The only
+mitigation is instructional: `Definition().Description` explicitly tells
+the model to describe the gap *abstractly* (what kind of tool/lookup/data
+was missing and why it mattered) and never to quote, paraphrase, or
+otherwise carry over the user's actual message text, names, identifiers,
+credentials, or other sensitive details, with a concrete bad/good example
+pair so the model has a pattern to match rather than an abstract rule to
+weigh. This is a deliberate, disclosed limitation, not enforcement — a
+model can still ignore the instruction, the same trust boundary every other
+tool-description usage protocol in this codebase (memory, skills) already
+relies on.
+
 ### 4. Wiring: `Compose()` (`internal/capability/compose.go`)
 
 - `ComposeOptions` gains `GapReports gapreport.Store` (nil disables the

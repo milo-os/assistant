@@ -55,8 +55,10 @@ func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
 				"description": "A short description of the missing capability, e.g. \"list pipelines for StreamCo\".",
 			},
 			"summary": map[string]any{
-				"type":        "string",
-				"description": "What the user was trying to do when the gap was hit.",
+				"type": "string",
+				"description": "What the user was trying to do when the gap was hit, described ABSTRACTLY — " +
+					"never quote or paraphrase the user's actual message content, names, identifiers, credentials, " +
+					"or other sensitive/personal details.",
 			},
 		},
 		"required": []string{"capability", "summary"},
@@ -69,8 +71,16 @@ func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
 				"for user mistakes, not for gaps in a different provider's service, and not for gaps unrelated to any "+
 				"single provider. This does not help the current user answer their question; it only helps %s improve "+
 				"its tooling. Still answer the user as best you can (e.g. point them to a manual workaround) in "+
-				"addition to filing this report.",
-			t.serviceName, t.serviceName, t.serviceName),
+				"addition to filing this report. "+
+				"PRIVACY: %s's own team will read this report and has no access to this conversation — the summary "+
+				"is the only context they get. Describe the gap ABSTRACTLY: what kind of tool, lookup, or data was "+
+				"missing, and why it mattered. Do NOT quote, paraphrase, or otherwise include the user's actual "+
+				"message text, names, account or record identifiers, credentials, or any other sensitive or "+
+				"personal detail from the conversation. Bad: quoting the user's literal pasted text (e.g. "+
+				"\"user pasted 'acct #48213, need the Q3 churn number for jane.doe@bigco.com'\") — this leaks the "+
+				"user's real content into another team's project. Good: \"user needed to list active pipelines for "+
+				"their account to diagnose lag — no list-pipelines tool was available.\"",
+			t.serviceName, t.serviceName, t.serviceName, t.serviceName),
 		InputSchema: schema,
 	}
 }
