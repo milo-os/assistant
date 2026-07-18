@@ -157,11 +157,15 @@ func TestHistoryNilStoreSingleTurn(t *testing.T) {
 }
 
 // TestHistoryTruncationBudget: oldest turns fall out of the prompt once the
-// replay budget is exceeded, newest survive.
+// replay budget is exceeded, newest survive. SummarizationDisabled so this
+// pins plain Truncate mechanics in isolation from compaction (covered
+// separately in summarize_test.go) — the tight 30-token budget here would
+// otherwise cross CompactionThresholdRatio well before Truncate has anything
+// to do.
 func TestHistoryTruncationBudget(t *testing.T) {
 	model := &recordingModel{}
 	conv := New(Deps{Model: model, ModelMode: "mock", Emitter: noopEmitter(),
-		History: history.NewMemoryStore(), HistoryTokenBudget: 30})
+		History: history.NewMemoryStore(), HistoryTokenBudget: 30, SummarizationDisabled: true})
 
 	p := Params{ProjectName: "demo-project", ContextID: "conv-t"}
 	// ~100 chars/turn => ~25 estimated tokens: budget 30 fits exactly one turn.

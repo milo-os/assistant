@@ -106,6 +106,122 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		}
 	})
 
+	t.Run("compact replaces stored turns with summary+keep", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("compact")
+		for i := 1; i <= 5; i++ {
+			err := s.Append(ctx, project, contextID, Turn{
+				UserText:      fmt.Sprintf("u%d", i),
+				AssistantText: fmt.Sprintf("a%d", i),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		summary := NewSummaryTurn("digest of u1-u3")
+		keep := []Turn{
+			{UserText: "u4", AssistantText: "a4"},
+			{UserText: "u5", AssistantText: "a5"},
+		}
+		if err := s.Compact(ctx, project, contextID, summary, keep); err != nil {
+			t.Fatal(err)
+		}
+		turns, err := s.Turns(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(turns) != 3 {
+			t.Fatalf("got %d turns after compact, want 3 (summary+2 keep): %+v", len(turns), turns)
+		}
+		if !IsSummaryTurn(turns[0]) || turns[0].AssistantText != "digest of u1-u3" {
+			t.Fatalf("turns[0] = %+v, want the summary turn first", turns[0])
+		}
+		if turns[1] != keep[0] || turns[2] != keep[1] {
+			t.Fatalf("kept turns out of order: %+v", turns[1:])
+		}
+
+		// Conversation listing reflects the new, smaller turn count.
+		conv, err := s.(Reader).GetConversation(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if conv.TurnCount != 3 {
+			t.Fatalf("TurnCount after compact = %d, want 3", conv.TurnCount)
+		}
+	})
+
+	t.Run("compact with empty keep leaves only the summary", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("compact-empty")
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "u1", AssistantText: "a1"}); err != nil {
+			t.Fatal(err)
+		}
+		summary := NewSummaryTurn("everything digested")
+		if err := s.Compact(ctx, project, contextID, summary, nil); err != nil {
+			t.Fatal(err)
+		}
+		turns, err := s.Turns(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(turns) != 1 || !IsSummaryTurn(turns[0]) || turns[0].AssistantText != "everything digested" {
+			t.Fatalf("turns after empty-keep compact = %+v, want just the summary", turns)
+		}
+	})
+
+	t.Run("compact on a fresh conversation (no prior turns)", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("compact-fresh")
+		summary := NewSummaryTurn("digest")
+		keep := []Turn{{UserText: "u1", AssistantText: "a1"}}
+		if err := s.Compact(ctx, project, contextID, summary, keep); err != nil {
+			t.Fatal(err)
+		}
+		turns, err := s.Turns(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(turns) != 2 || !IsSummaryTurn(turns[0]) || turns[1] != keep[0] {
+			t.Fatalf("turns after compact on fresh conversation = %+v", turns)
+		}
+	})
+
+	t.Run("append after compact continues the sequence correctly", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("compact-append")
+		for i := 1; i <= 4; i++ {
+			err := s.Append(ctx, project, contextID, Turn{
+				UserText:      fmt.Sprintf("u%d", i),
+				AssistantText: fmt.Sprintf("a%d", i),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		summary := NewSummaryTurn("digest of u1-u2")
+		keep := []Turn{{UserText: "u3", AssistantText: "a3"}, {UserText: "u4", AssistantText: "a4"}}
+		if err := s.Compact(ctx, project, contextID, summary, keep); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "u5", AssistantText: "a5"}); err != nil {
+			t.Fatal(err)
+		}
+		turns, err := s.Turns(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(turns) != 4 {
+			t.Fatalf("got %d turns, want 4 (summary + 2 kept + 1 appended): %+v", len(turns), turns)
+		}
+		if !IsSummaryTurn(turns[0]) {
+			t.Fatalf("turns[0] should still be the summary: %+v", turns[0])
+		}
+		last := turns[len(turns)-1]
+		if last.UserText != "u5" || last.AssistantText != "a5" {
+			t.Fatalf("appended turn after compact = %+v, want u5/a5", last)
+		}
+	})
+
 	t.Run("concurrent appends never collide", func(t *testing.T) {
 		s := newStore(t)
 		project, contextID := fresh("conc")

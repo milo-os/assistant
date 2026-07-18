@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -40,6 +42,40 @@ const DefaultHistoryTokenBudget = 6000
 // distinct from a normal completion.
 const DefaultTurnTimeout = 120 * time.Second
 
+// SummaryBatchTurns is how many of a conversation's oldest turns one
+// compaction pass folds into a summary (a small fixed batch, not "everything
+// Truncate would otherwise drop" — see docs/conversation-summarization-design.md
+// #3). If the stored turns already begin with a summary turn (a conversation
+// being compacted for the second-plus time), that summary is included as the
+// first thing folded into the new one — "anchored iterative summarization" —
+// simply because it's turns[0] and this batch always starts from turns[0].
+const SummaryBatchTurns = 15
+
+// CompactionThresholdRatio is the fraction of the history token budget at
+// which [Conversation.loadHistory] triggers compaction — before Truncate
+// would actually have to drop anything, so a turn is never caught needing to
+// both compact and still overflow (docs/conversation-summarization-design.md
+// #1).
+const CompactionThresholdRatio = 0.8
+
+// summarizeSystemPrompt instructs the plain, non-tool completion
+// internal/agent's summarize helper issues to compact aging history.
+const summarizeSystemPrompt = "You compact conversation history for an AI assistant. " +
+	"Read the exchange below (it may itself begin with a prior compaction digest) and write " +
+	"one compact, third-person digest of what was discussed, what was decided, and any open " +
+	"threads. Write a summary, not a transcript: omit pleasantries and restate only what a " +
+	"later turn would need to answer a follow-up correctly. Be concise."
+
+// summarizeUserPrompt is appended as the final message of a summarize request,
+// after the turns being compacted (rendered via history.Messages).
+const summarizeUserPrompt = "Summarize the conversation above into a compact digest."
+
+// summarizeMaxOutputTokens bounds the summarize model call's output. It is
+// sized comfortably above history.MaxSummaryTurnLen (in tokens, roughly
+// MaxSummaryTurnLen/4) so the model is never cut off before the digest is
+// truncated for storage.
+const summarizeMaxOutputTokens = 1536
+
 // State is the terminal state of a conversation task.
 type State string
 
@@ -72,6 +108,15 @@ type Deps struct {
 	// making follow-up messages in the same A2A context conversational. Nil
 	// disables memory: every turn is answered standalone.
 	History history.Store
+	// SummarizationDisabled skips compaction entirely: loadHistory behaves
+	// exactly as it did before summarization existed — plain Truncate, no
+	// extra summarize model call, no History.Compact call ever issued. False
+	// (the default) compacts aging history once replay crosses
+	// CompactionThresholdRatio of the token budget. An escape hatch for
+	// load-testing or a customer that wants zero synthetic model calls
+	// injected into their history (see
+	// docs/conversation-summarization-design.md "Still open").
+	SummarizationDisabled bool
 	// Memory backs the memory_remember / memory_forget tools: durable,
 	// project-scoped facts that persist across conversations and users (unlike
 	// History, which is per-conversation and windowed). Nil disables the
@@ -258,7 +303,10 @@ func turnContext(ctx context.Context, timeout time.Duration) (context.Context, c
 
 // loadHistory returns the conversation's prior turns, truncated to the token
 // budget. Any store failure degrades to an empty memory (the turn is still
-// answered) rather than failing the chat.
+// answered) rather than failing the chat. Before truncating, and unless
+// SummarizationDisabled, it compacts aging history once the stored turns'
+// estimated cost crosses CompactionThresholdRatio of the budget — see
+// [Conversation.maybeCompact] and docs/conversation-summarization-design.md.
 func (c *Conversation) loadHistory(ctx context.Context, params Params) []history.Turn {
 	if c.deps.History == nil || params.ContextID == "" {
 		return nil
@@ -273,7 +321,94 @@ func (c *Conversation) loadHistory(ctx context.Context, params Params) []history
 	if budget <= 0 {
 		budget = DefaultHistoryTokenBudget
 	}
+	if !c.deps.SummarizationDisabled {
+		turns = c.maybeCompact(ctx, params, turns, budget)
+	}
 	return history.Truncate(turns, budget)
+}
+
+// maybeCompact synchronously summarizes the oldest SummaryBatchTurns turns
+// into one digest and persists [summary]+keep via History.Compact, once the
+// stored turns' estimated token cost crosses CompactionThresholdRatio of
+// budget. Below the threshold, or on any failure (summarize errors, or
+// Compact errors), it returns turns unchanged — compaction never blocks or
+// fails the turn; the caller falls open to plain Truncate exactly as before
+// this feature existed (docs/conversation-summarization-design.md #4).
+//
+// Because the batch is always turns[:batchLen] starting at index 0, a summary
+// turn already at the head of turns (a conversation compacted before) is
+// folded into the new digest alongside the newly-aging raw turns — anchored
+// iterative summarization, not a one-shot summary that never updates again.
+func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []history.Turn, budget int) []history.Turn {
+	if len(turns) == 0 || budget <= 0 {
+		return turns
+	}
+	threshold := int(float64(budget) * CompactionThresholdRatio)
+	if history.EstimateTokens(turns) <= threshold {
+		return turns
+	}
+
+	batchLen := SummaryBatchTurns
+	if batchLen > len(turns) {
+		batchLen = len(turns)
+	}
+	toSummarize := turns[:batchLen]
+	keep := turns[batchLen:]
+
+	summary, err := summarize(ctx, c.deps.Model, toSummarize)
+	if err != nil {
+		c.logger.Warn("agent.history.summarize_failed",
+			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
+		return turns
+	}
+	if err := c.deps.History.Compact(ctx, params.ProjectName, params.ContextID, summary, keep); err != nil {
+		c.logger.Warn("agent.history.compact_failed",
+			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
+		return turns
+	}
+
+	compacted := make([]history.Turn, 0, 1+len(keep))
+	compacted = append(compacted, summary)
+	compacted = append(compacted, keep...)
+	return compacted
+}
+
+// summarize issues one plain, non-tool model completion over turns and
+// returns a summary turn holding the digest — not a full [agentcore.Run] turn
+// (no capability composition, no tool loop, nothing user-facing). turns is
+// rendered the same way history.Messages already renders replay context, plus
+// a fixed instruction to produce a compact digest rather than a transcript.
+func summarize(ctx context.Context, model agentcore.Model, turns []history.Turn) (history.Turn, error) {
+	messages := append(history.Messages(turns), agentcore.UserMessage(summarizeUserPrompt))
+	stream, err := model.Stream(ctx, agentcore.Request{
+		System:          summarizeSystemPrompt,
+		Messages:        messages,
+		MaxOutputTokens: summarizeMaxOutputTokens,
+	})
+	if err != nil {
+		return history.Turn{}, fmt.Errorf("agent: summarize: %w", err)
+	}
+	defer stream.Close()
+
+	var text strings.Builder
+	for {
+		part, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return history.Turn{}, fmt.Errorf("agent: summarize: %w", err)
+		}
+		if part.Kind == agentcore.StreamPartTextDelta {
+			text.WriteString(part.Text)
+		}
+	}
+
+	digest := strings.TrimSpace(text.String())
+	if digest == "" {
+		return history.Turn{}, errors.New("agent: summarize: model produced an empty digest")
+	}
+	return history.NewSummaryTurn(digest), nil
 }
 
 // loadDocuments fetches the project's capability documents, degrading to none

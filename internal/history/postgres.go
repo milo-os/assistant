@@ -330,6 +330,71 @@ func (s *PostgresStore) Append(ctx context.Context, projectName, contextID strin
 	return nil
 }
 
+// Compact implements [Store.Compact]: one transaction that deletes every
+// existing message row for the conversation and re-inserts summary followed
+// by keep as fresh, sequential (project_name, context_id, seq) pairs starting
+// at 1 again. Old seq values cannot simply be reused once the rows between
+// them are gone, so this renumbers from scratch rather than trying to splice
+// into the existing sequence — the conversation's turn_count is reset to
+// match (1 + len(keep)) in the same transaction so later Appends continue the
+// new, shorter sequence correctly.
+func (s *PostgresStore) Compact(ctx context.Context, projectName, contextID string, summary Turn, keep []Turn) error {
+	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
+	defer cancel()
+	summary = clampTurn(summary)
+
+	turns := make([]Turn, 0, 1+len(keep))
+	turns = append(turns, summary)
+	for _, t := range keep {
+		turns = append(turns, clampTurn(t))
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("conversation store: begin compact: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM messages WHERE project_name = $1 AND context_id = $2`,
+		projectName, contextID); err != nil {
+		return fmt.Errorf("conversation store: compact: delete messages: %w", err)
+	}
+
+	batch := &pgx.Batch{}
+	for i, t := range turns {
+		turnNo := int64(i + 1)
+		batch.Queue(
+			`INSERT INTO messages (project_name, context_id, seq, role, content)
+			 VALUES ($1, $2, $3, 'user', $4), ($1, $2, $5, 'assistant', $6)`,
+			projectName, contextID, 2*turnNo-1, t.UserText, 2*turnNo, t.AssistantText)
+	}
+	br := tx.SendBatch(ctx, batch)
+	for range turns {
+		if _, err := br.Exec(); err != nil {
+			br.Close()
+			return fmt.Errorf("conversation store: compact: insert messages: %w", err)
+		}
+	}
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("conversation store: compact: insert messages: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO conversations (project_name, context_id, turn_count)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (project_name, context_id) DO UPDATE
+		   SET turn_count = $3, last_active_at = now()`,
+		projectName, contextID, int64(len(turns))); err != nil {
+		return fmt.Errorf("conversation store: compact: update conversation: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("conversation store: compact: commit: %w", err)
+	}
+	return nil
+}
+
 // ListConversations implements [Lister]: the project's conversations, newest
 // activity first. limit <= 0 uses 100.
 func (s *PostgresStore) ListConversations(ctx context.Context, projectName string, limit int) ([]Conversation, error) {

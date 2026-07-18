@@ -71,17 +71,52 @@ const MaxStoredContentLen = 32 * 1024
 // store drops older turns. Fleet-level age-based retention is a follow-up.
 const MaxTurnsPerConversation = 1000
 
-// truncateContent clamps s to at most MaxStoredContentLen bytes, backing off to
-// a UTF-8 rune boundary so a text column never receives a split rune.
-func truncateContent(s string) string {
-	if len(s) <= MaxStoredContentLen {
+// MaxSummaryTurnLen caps how many bytes of digest a summary turn's
+// AssistantText holds. A summarization pass exists precisely to make stored
+// history smaller, so its output must be far more compact than
+// MaxStoredContentLen (the general per-message guard) — mirrors
+// [gapreport.MaxSummaryLen]'s posture of a small fixed cap, sized up from
+// gapreport's because a conversation digest needs more room than a one-line
+// capability-gap summary.
+const MaxSummaryTurnLen = 4000
+
+// summaryUserMarker is the fixed UserText of a summary turn — a synthesized
+// compaction digest, never something a user actually typed. See
+// [IsSummaryTurn] and [NewSummaryTurn].
+const summaryUserMarker = "[conversation summary]"
+
+// IsSummaryTurn reports whether t is a compaction digest (produced by
+// conversation summarization) rather than an ordinary user/assistant
+// exchange. AssistantText holds the digest itself.
+func IsSummaryTurn(t Turn) bool {
+	return t.UserText == summaryUserMarker
+}
+
+// NewSummaryTurn returns a summary turn holding digest, truncated to
+// MaxSummaryTurnLen (backing off to a UTF-8 rune boundary) so a pathological
+// digest cannot itself become the next budget problem. Callers should use
+// this rather than constructing a Turn directly so every summary turn is
+// recognized identically by [IsSummaryTurn].
+func NewSummaryTurn(digest string) Turn {
+	return Turn{UserText: summaryUserMarker, AssistantText: truncateBytes(digest, MaxSummaryTurnLen)}
+}
+
+// truncateBytes clamps s to at most max bytes, backing off to a UTF-8 rune
+// boundary so a text column never receives a split rune.
+func truncateBytes(s string, max int) string {
+	if len(s) <= max {
 		return s
 	}
-	cut := MaxStoredContentLen
+	cut := max
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
 	return s[:cut]
+}
+
+// truncateContent clamps s to at most MaxStoredContentLen bytes.
+func truncateContent(s string) string {
+	return truncateBytes(s, MaxStoredContentLen)
 }
 
 // clampTurn returns turn with its texts truncated to MaxStoredContentLen.
@@ -99,6 +134,11 @@ type Store interface {
 	Turns(ctx context.Context, projectName, contextID string) ([]Turn, error)
 	// Append records one completed turn at the end of the conversation.
 	Append(ctx context.Context, projectName, contextID string, turn Turn) error
+	// Compact atomically replaces every stored turn with summary followed by
+	// keep, preserving keep's order. Used only by the summarization
+	// compaction step (internal/agent); never called from the normal chat
+	// Append path.
+	Compact(ctx context.Context, projectName, contextID string, summary Turn, keep []Turn) error
 }
 
 // MemoryStore is an in-process [Store] and [Lister]. History lives for the
@@ -169,6 +209,28 @@ func (s *MemoryStore) Append(_ context.Context, projectName, contextID string, t
 		trimmed := make([]Turn, MaxTurnsPerConversation)
 		copy(trimmed, turns[len(turns)-MaxTurnsPerConversation:])
 		turns = trimmed
+	}
+	s.turns[key] = turns
+	return nil
+}
+
+// Compact implements [Store.Compact]: replaces the conversation's turn slice
+// under the same mutex Append uses, and touches lastActiveAt the same way
+// Append does — compaction is conversation activity, not a background sweep.
+func (s *MemoryStore) Compact(_ context.Context, projectName, contextID string, summary Turn, keep []Turn) error {
+	summary = clampTurn(summary)
+	turns := make([]Turn, 0, 1+len(keep))
+	turns = append(turns, summary)
+	turns = append(turns, keep...)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := storeKey{project: projectName, context: contextID}
+	now := time.Now()
+	if m, ok := s.meta[key]; ok {
+		m.lastActiveAt = now
+	} else {
+		s.meta[key] = &memoryMeta{createdAt: now, lastActiveAt: now}
 	}
 	s.turns[key] = turns
 	return nil
@@ -289,4 +351,16 @@ func Messages(turns []Turn) []agentcore.Message {
 // metering records).
 func estimateTokens(t Turn) int {
 	return (len(t.UserText) + len(t.AssistantText)) / 4
+}
+
+// EstimateTokens sums [estimateTokens]'s heuristic across turns. Exposed so
+// callers that need to reason about replay cost before it's time to actually
+// call [Truncate] (the summarization compaction trigger, in particular) share
+// the exact same heuristic Truncate uses rather than reimplementing it.
+func EstimateTokens(turns []Turn) int {
+	total := 0
+	for _, t := range turns {
+		total += estimateTokens(t)
+	}
+	return total
 }
