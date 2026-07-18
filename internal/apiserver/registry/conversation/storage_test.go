@@ -164,6 +164,36 @@ func TestMessagesGet(t *testing.T) {
 	}
 }
 
+// A summary turn (history.Store.Compact's digest) must reach the API
+// consumer with role "summary" verbatim, not silently collapsed into
+// "assistant" — see docs/conversation-summarization-design.md §2.
+func TestMessagesGetRendersSummaryRoleDistinctly(t *testing.T) {
+	now := time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)
+	reader := &fakeReader{
+		convs: map[string][]history.Conversation{"demo": {{ProjectName: "demo", ContextID: "ctx-1"}}},
+		msgs: map[string][]history.Message{
+			"demo|ctx-1": {
+				{Seq: 1, Role: "summary", Content: "digest of earlier turns", CreatedAt: now},
+				{Seq: 2, Role: "user", Content: "what's next", CreatedAt: now},
+				{Seq: 3, Role: "assistant", Content: "here's the plan", CreatedAt: now},
+			},
+		},
+	}
+	rest := NewMessagesREST(reader)
+
+	obj, err := rest.Get(nsCtx("demo"), "ctx-1", &metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	msgs := obj.(*assistant.ConversationMessages)
+	if len(msgs.Items) != 3 {
+		t.Fatalf("items = %+v, want 3", msgs.Items)
+	}
+	if msgs.Items[0].Role != "summary" || msgs.Items[0].Content != "digest of earlier turns" {
+		t.Fatalf("items[0] = %+v, want the summary role/content preserved", msgs.Items[0])
+	}
+}
+
 func TestMessagesGetUnknownConversationIsNotFound(t *testing.T) {
 	rest := NewMessagesREST(&fakeReader{convs: map[string][]history.Conversation{}})
 	_, err := rest.Get(nsCtx("demo"), "missing", &metav1.GetOptions{})

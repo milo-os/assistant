@@ -17,6 +17,7 @@ import (
 func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 	Store
 	Lister
+	Reader
 }) {
 	ctx := context.Background()
 
@@ -222,6 +223,53 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		}
 	})
 
+	t.Run("Messages renders a summary turn distinctly", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("messages-summary")
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "u1", AssistantText: "a1"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "u2", AssistantText: "a2"}); err != nil {
+			t.Fatal(err)
+		}
+		summary := NewSummaryTurn("digest of u1")
+		keep := []Turn{{UserText: "u2", AssistantText: "a2"}}
+		if err := s.Compact(ctx, project, contextID, summary, keep); err != nil {
+			t.Fatal(err)
+		}
+
+		msgs, err := s.Messages(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Expect exactly 3 messages: 1 summary row + 1 user + 1 assistant for
+		// the kept turn — never a spurious user-role row for the summary
+		// turn's internal marker text.
+		if len(msgs) != 3 {
+			t.Fatalf("got %d messages, want 3 (summary + user + assistant): %+v", len(msgs), msgs)
+		}
+		if msgs[0].Role != "summary" || msgs[0].Content != "digest of u1" {
+			t.Fatalf("msgs[0] = %+v, want Role summary with the digest content", msgs[0])
+		}
+		for _, m := range msgs {
+			if m.Content == summaryUserMarker {
+				t.Fatalf("summary turn's internal marker leaked into a rendered message: %+v", msgs)
+			}
+		}
+		if msgs[1].Role != "user" || msgs[1].Content != "u2" {
+			t.Fatalf("msgs[1] = %+v, want the kept turn's user message", msgs[1])
+		}
+		if msgs[2].Role != "assistant" || msgs[2].Content != "a2" {
+			t.Fatalf("msgs[2] = %+v, want the kept turn's assistant message", msgs[2])
+		}
+		// seq stays a dense, monotonically increasing 1-based index.
+		for i, m := range msgs {
+			if m.Seq != int64(i+1) {
+				t.Fatalf("msgs[%d].Seq = %d, want %d (dense monotonic seq)", i, m.Seq, i+1)
+			}
+		}
+	})
+
 	t.Run("concurrent appends never collide", func(t *testing.T) {
 		s := newStore(t)
 		project, contextID := fresh("conc")
@@ -280,6 +328,7 @@ func TestMemoryStoreConformance(t *testing.T) {
 	storeConformance(t, func(t *testing.T) interface {
 		Store
 		Lister
+		Reader
 	} {
 		return NewMemoryStore()
 	})
@@ -293,6 +342,7 @@ func TestPostgresStoreConformance(t *testing.T) {
 	storeConformance(t, func(t *testing.T) interface {
 		Store
 		Lister
+		Reader
 	} {
 		s, err := NewPostgresStore(context.Background(), url, slog.New(slog.DiscardHandler))
 		if err != nil {

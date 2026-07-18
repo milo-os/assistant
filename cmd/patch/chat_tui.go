@@ -372,10 +372,18 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.raw = m.raw[:0]
 		m.answer.Reset()
 		for _, mm := range msg.items {
-			if mm.Role == "user" {
+			switch mm.Role {
+			case "user":
 				m.turns = append(m.turns, m.turnBlock(m.st.you.Render("You"),
 					m.st.userText.Width(m.contentWidth()).Render(mm.Content)))
-			} else {
+			case "summary":
+				// A compaction digest, not something the assistant said —
+				// rendered de-emphasized (m.st.subtle, the same token used
+				// elsewhere for placeholder/loading text) so it reads as
+				// synthetic history rather than a turn of the conversation.
+				m.turns = append(m.turns, m.turnBlock(m.st.subtle.Render("Summary"),
+					m.st.subtle.Width(m.contentWidth()).Render(mm.Content)))
+			default:
 				m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), m.renderMarkdown(mm.Content)))
 			}
 			m.raw = append(m.raw, transcriptTurn{role: mm.Role, content: mm.Content})
@@ -720,8 +728,11 @@ func (m *chatModel) previewPane() string {
 		}
 		for i, mm := range shown {
 			label, style := m.st.you.Render("You"), m.st.userText
-			if mm.Role == "assistant" {
+			switch mm.Role {
+			case "assistant":
 				label, style = m.st.patch.Render("Patch"), m.st.subtle
+			case "summary":
+				label, style = m.st.subtle.Render("Summary"), m.st.subtle
 			}
 			b.WriteString(label + ": " + style.Render(previewLine(mm.Content, 64)) + "\n")
 			if i == 0 && len(items) > pickerPreviewMaxLines {
@@ -917,6 +928,8 @@ func (m *chatModel) exportTranscript() (string, error) {
 			label = "Patch"
 		case "system":
 			label = "System"
+		case "summary":
+			label = "Summary"
 		}
 		fmt.Fprintf(&b, "## %s\n\n%s\n\n", label, t.content)
 	}

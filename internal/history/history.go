@@ -283,10 +283,16 @@ func (s *MemoryStore) GetConversation(_ context.Context, projectName, contextID 
 	}, nil
 }
 
-// Messages implements [Reader]. Each stored turn expands to a user message
-// (seq 2k-1) and an assistant message (seq 2k); createdAt is the
-// conversation's last-active time since the memory store keeps no per-message
-// timestamp (the durable store does).
+// Messages implements [Reader]. Each ordinary stored turn expands to a user
+// message and an assistant message; a summary turn (see [IsSummaryTurn])
+// renders as a single message with Role "summary" instead — its UserText is
+// the internal compaction marker, not something a human said, so pairing it
+// with a synthetic user row would misrepresent it as part of the transcript.
+// seq is assigned per emitted message (1 for a summary turn, 2 for an
+// ordinary turn), so it stays a dense, monotonically increasing 1-based index
+// regardless of how many summary turns a conversation has accumulated;
+// createdAt is the conversation's last-active time since the memory store
+// keeps no per-message timestamp (the durable store does).
 func (s *MemoryStore) Messages(_ context.Context, projectName, contextID string) ([]Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -300,12 +306,17 @@ func (s *MemoryStore) Messages(_ context.Context, projectName, contextID string)
 		ts = m.lastActiveAt
 	}
 	out := make([]Message, 0, 2*len(turns))
-	for i, t := range turns {
-		seq := int64(2 * i)
-		out = append(out,
-			Message{Seq: seq + 1, Role: "user", Content: t.UserText, CreatedAt: ts},
-			Message{Seq: seq + 2, Role: "assistant", Content: t.AssistantText, CreatedAt: ts},
-		)
+	seq := int64(0)
+	for _, t := range turns {
+		if IsSummaryTurn(t) {
+			seq++
+			out = append(out, Message{Seq: seq, Role: "summary", Content: t.AssistantText, CreatedAt: ts})
+			continue
+		}
+		seq++
+		out = append(out, Message{Seq: seq, Role: "user", Content: t.UserText, CreatedAt: ts})
+		seq++
+		out = append(out, Message{Seq: seq, Role: "assistant", Content: t.AssistantText, CreatedAt: ts})
 	}
 	return out, nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -248,6 +249,68 @@ func TestPreviewPaneRendersCachedMessages(t *testing.T) {
 	out := m.previewPane()
 	if !containsAll(out, "diagnose pipeline p-7", "found the issue") {
 		t.Fatalf("preview pane should show the cached transcript, got:\n%s", out)
+	}
+}
+
+func TestPreviewPaneRendersSummaryDistinctly(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState()
+	m.picker.items = []assistantv1alpha1.Conversation{testConversation("conv-a")}
+	m.picker.preview["conv-a"] = []assistantv1alpha1.ConversationMessage{
+		{Role: "summary", Content: "compacted digest of earlier turns"},
+		{Role: "user", Content: "what's next"},
+	}
+	out := m.previewPane()
+	if !containsAll(out, "Summary", "compacted digest of earlier turns") {
+		t.Fatalf("preview pane should label a summary message distinctly, got:\n%s", out)
+	}
+}
+
+func TestPickerTranscriptMsgRendersSummaryDistinctly(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(pickerTranscriptMsg{
+		contextID: "conv-a",
+		items: []assistantv1alpha1.ConversationMessage{
+			{Role: "summary", Content: "compacted digest of earlier turns"},
+			{Role: "user", Content: "what's next"},
+			{Role: "assistant", Content: "here's the plan"},
+		},
+	})
+	if len(m.raw) != 3 || m.raw[0].role != "summary" {
+		t.Fatalf("resumed transcript should preserve the summary role, got: %+v", m.raw)
+	}
+	joined := strings.Join(m.turns, "\n")
+	if !containsAll(joined, "Summary", "compacted digest of earlier turns") {
+		t.Fatalf("resumed transcript should render the summary turn distinctly, got:\n%s", joined)
+	}
+}
+
+func TestExportTranscriptLabelsSummaryDistinctly(t *testing.T) {
+	dir := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	m := newTestModel()
+	m.raw = []transcriptTurn{
+		{role: "summary", content: "compacted digest of earlier turns"},
+		{role: "user", content: "what's next"},
+	}
+	name, err := m.exportTranscript()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(string(data), "## Summary", "compacted digest of earlier turns") {
+		t.Fatalf("exported transcript should label the summary turn distinctly, got:\n%s", data)
 	}
 }
 

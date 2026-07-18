@@ -244,9 +244,17 @@ func (s *PostgresStore) GetConversation(ctx context.Context, projectName, contex
 }
 
 // Messages implements [Reader]: a conversation's message rows, oldest first.
-// Unlike [PostgresStore.Turns] this returns each row verbatim (seq, role,
-// content, created_at) without pairing into turns — the read view surfaces the
-// raw transcript.
+// The underlying table always stores a summary turn as an ordinary
+// ('user','assistant') row pair — the CHECK(role IN ('user','assistant'))
+// constraint on the messages table admits nothing else, and Compact never
+// needed to change that shape (see the design doc's read-path note): the
+// summary marker lives in the row content, the same signal [IsSummaryTurn]
+// uses in memory. So this pairs adjacent rows by seq (turn k is rows
+// 2k-1/2k, same arithmetic [PostgresStore.Turns] uses) purely to recognize
+// that marker, then renders a recognized pair as a single Role:"summary"
+// message (dropping the synthetic user row) and everything else as the
+// verbatim user/assistant rows it always was. Output seq is renumbered
+// densely from 1 as messages are emitted, matching [MemoryStore.Messages].
 func (s *PostgresStore) Messages(ctx context.Context, projectName, contextID string) ([]Message, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
 	defer cancel()
@@ -260,16 +268,56 @@ func (s *PostgresStore) Messages(ctx context.Context, projectName, contextID str
 	}
 	defer rows.Close()
 
-	var out []Message
+	type rawRow struct {
+		role, content string
+		createdAt     time.Time
+	}
+	byTurn := map[int64][2]*rawRow{} // turn number (1-based) -> [user, assistant]
+	var order []int64
 	for rows.Next() {
-		var m Message
-		if err := rows.Scan(&m.Seq, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+		var (
+			seq  int64
+			r, c string
+			ts   time.Time
+		)
+		if err := rows.Scan(&seq, &r, &c, &ts); err != nil {
 			return nil, fmt.Errorf("conversation store: scan message: %w", err)
 		}
-		out = append(out, m)
+		turnNo := (seq + 1) / 2
+		pair, seen := byTurn[turnNo]
+		if !seen {
+			order = append(order, turnNo)
+		}
+		row := &rawRow{role: r, content: c, createdAt: ts}
+		if seq%2 == 1 {
+			pair[0] = row
+		} else {
+			pair[1] = row
+		}
+		byTurn[turnNo] = pair
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("conversation store: load messages: %w", err)
+	}
+
+	var out []Message
+	outSeq := int64(0)
+	for _, turnNo := range order {
+		pair := byTurn[turnNo]
+		user, assistant := pair[0], pair[1]
+		if user != nil && user.content == summaryUserMarker && assistant != nil {
+			outSeq++
+			out = append(out, Message{Seq: outSeq, Role: "summary", Content: assistant.content, CreatedAt: assistant.createdAt})
+			continue
+		}
+		if user != nil {
+			outSeq++
+			out = append(out, Message{Seq: outSeq, Role: user.role, Content: user.content, CreatedAt: user.createdAt})
+		}
+		if assistant != nil {
+			outSeq++
+			out = append(out, Message{Seq: outSeq, Role: assistant.role, Content: assistant.content, CreatedAt: assistant.createdAt})
+		}
 	}
 	return out, nil
 }
