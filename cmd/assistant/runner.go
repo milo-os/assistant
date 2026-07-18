@@ -13,6 +13,7 @@ import (
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/config"
 	"github.com/milo-os/assistant/internal/history"
+	"github.com/milo-os/assistant/internal/memory"
 	"github.com/milo-os/assistant/internal/usage"
 )
 
@@ -86,6 +87,26 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 			"note", "CONVERSATION_STORE_URL not set — conversation history will not survive restarts")
 	}
 
+	// Project memory (memory_remember/memory_forget): same database as
+	// conversation history, a separate table. Durable when
+	// CONVERSATION_STORE_URL is set, in-process otherwise — same fallback
+	// shape as history, just for project-scoped facts instead of per-turn
+	// replay.
+	var mem memory.Store
+	if cfg.ConversationStoreURL != "" {
+		pg, err := memory.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
+		if err != nil {
+			return nil, nil, err
+		}
+		mem = pg
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); pg.Close() }
+	} else {
+		mem = memory.NewMemoryStore()
+		log.Info("memory.store", "type", "memory",
+			"note", "CONVERSATION_STORE_URL not set — project memory will not survive restarts")
+	}
+
 	conv := agent.New(agent.Deps{
 		Model:                          model,
 		ModelMode:                      string(cfg.Model.Mode),
@@ -93,6 +114,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 		Persona:                        persona,
 		Emitter:                        emitter,
 		History:                        store,
+		Memory:                         mem,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
 		Logger:                         log,
 	})

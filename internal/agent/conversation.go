@@ -12,6 +12,7 @@ import (
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/history"
+	"github.com/milo-os/assistant/internal/memory"
 	"github.com/milo-os/assistant/internal/usage"
 )
 
@@ -70,6 +71,11 @@ type Deps struct {
 	// making follow-up messages in the same A2A context conversational. Nil
 	// disables memory: every turn is answered standalone.
 	History history.Store
+	// Memory backs the memory_remember / memory_forget tools: durable,
+	// project-scoped facts that persist across conversations and users (unlike
+	// History, which is per-conversation and windowed). Nil disables the
+	// feature — no tools are composed.
+	Memory memory.Store
 	// AllowPrivateCapabilityNetworks relaxes the capability SSRF guard's
 	// loopback/RFC1918 block (link-local/metadata stay blocked either way). The
 	// platform's capability endpoints are in-cluster private ClusterIPs, so real
@@ -176,6 +182,8 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	composed, _ := capability.Compose(ctx, docs, capability.ComposeOptions{
 		HTTPClient:           c.deps.HTTPClient,
 		AllowPrivateNetworks: c.deps.AllowPrivateCapabilityNetworks,
+		Memory:               c.deps.Memory,
+		ExpectedProject:      params.ProjectName,
 		OnToolInvocation: func(inv capability.ProviderToolInvocation) {
 			mu.Lock()
 			invocations = append(invocations, inv)

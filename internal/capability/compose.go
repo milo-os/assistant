@@ -11,6 +11,7 @@ import (
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/agentcore/mcptool"
+	"github.com/milo-os/assistant/internal/memory"
 )
 
 // Tool composition defaults (Tier 2).
@@ -100,6 +101,13 @@ type ComposeOptions struct {
 	// scoping authority (the CRD projection has no spec-level project field to
 	// cross-check; if one is added later, extend scopeDocuments to verify it).
 	ExpectedProject string
+	// Memory, when non-nil, enables the memory_remember / memory_forget
+	// built-in tools (see internal/capability/memory.go) scoped to
+	// ExpectedProject, plus a "Project memory:" addendum section listing the
+	// project's current facts. Nil disables the feature entirely — no tools,
+	// no addendum section. Also requires ExpectedProject to be set, since the
+	// tools need a project to scope reads/writes to.
+	Memory memory.Store
 	// resolver is the DNS seam for the SSRF guard. Nil uses net.DefaultResolver.
 	resolver ipResolver
 }
@@ -174,6 +182,31 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		}
 		if _, exists := tools[LoadSkillToolName]; !exists {
 			tools[LoadSkillToolName] = newLoadSkillTool(skills, opts, httpClient, guard, logger)
+		}
+	}
+
+	// Project memory: registers memory_remember/memory_forget and folds the
+	// project's current facts into the addendum, exactly like the skills
+	// index above. A List failure degrades to "no facts shown" rather than
+	// failing composition — the tools still register, so the model can still
+	// remember things even if reading the current snapshot failed.
+	if opts.Memory != nil && opts.ExpectedProject != "" {
+		facts, err := opts.Memory.List(ctx, opts.ExpectedProject)
+		if err != nil {
+			logger.Warn("capability.memory.list_failed", "project", opts.ExpectedProject, "error", err.Error())
+		}
+		if index := buildMemoryIndex(facts); index != "" {
+			if addendum == "" {
+				addendum = index
+			} else {
+				addendum = addendum + "\n\n" + index
+			}
+		}
+		if _, exists := tools[RememberMemoryToolName]; !exists {
+			tools[RememberMemoryToolName] = &rememberMemoryTool{store: opts.Memory, project: opts.ExpectedProject}
+		}
+		if _, exists := tools[ForgetMemoryToolName]; !exists {
+			tools[ForgetMemoryToolName] = &forgetMemoryTool{store: opts.Memory, project: opts.ExpectedProject}
 		}
 	}
 

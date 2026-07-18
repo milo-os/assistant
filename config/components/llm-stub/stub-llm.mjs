@@ -137,6 +137,26 @@ function findDiagnoseTool(tools) {
   return fns.find((t) => /pipeline_diagnose/i.test(t.function.name))?.function.name;
 }
 
+// ── Project memory scripting (mirrors internal/capability/memory.go) ──
+// A fixed key ("fact") so two "remember" turns in the same conversation
+// deterministically collide, letting a live check exercise the
+// memory_remember conflict-confirm flow with plain chat messages:
+//   "remember that X"                -> memory_remember{key:fact, value:X}
+//   "remember that Y (confirmed)"    -> memory_remember{key:fact, value:Y, confirm:true}
+//   "forget that"                    -> memory_forget{key:fact}
+const rememberRe = /remember that (.+?)(\s*\(confirmed?\))?$/i;
+const forgetRe = /forget that/i;
+
+function findMemoryTool(tools, name) {
+  return (tools ?? []).find((t) => t?.type === 'function' && t.function?.name === name)?.function.name;
+}
+
+function wantedRemember(userText) {
+  const m = rememberRe.exec(userText.trim());
+  if (!m) return undefined;
+  return { value: m[1].trim(), confirm: Boolean(m[2]) };
+}
+
 function extractPipelineId(userText) {
   const explicit = /\bp-[a-z0-9]+\b/i.exec(userText);
   if (explicit) return explicit[0];
@@ -169,6 +189,12 @@ function decide(body) {
     if (/^"?Skill /.test(String(toolResult))) {
       return { kind: 'text', text: summarizeSkill(toolResult), finish: 'stop' };
     }
+    // memory_remember/memory_forget results are already user-facing prose
+    // (see internal/capability/memory.go) — relay verbatim so a conflict
+    // report surfaces as-is instead of being paraphrased away.
+    if (/^(Remembered:|Forgot |No project memory found|A project memory fact for)/.test(String(toolResult))) {
+      return { kind: 'text', text: String(toolResult), finish: 'stop' };
+    }
     return { kind: 'text', text: summarizeToolResult(toolResult), finish: 'stop' };
   }
   const userText = latestUserText(messages);
@@ -178,6 +204,18 @@ function decide(body) {
   const skillName = wantedSkill(userText);
   if (skillName && findLoadSkillTool(tools)) {
     return { kind: 'tool', toolName: 'load_skill', toolArgs: JSON.stringify({ skill: skillName }), finish: 'tool_calls' };
+  }
+  if (forgetRe.test(userText) && findMemoryTool(tools, 'memory_forget')) {
+    return { kind: 'tool', toolName: 'memory_forget', toolArgs: JSON.stringify({ key: 'fact' }), finish: 'tool_calls' };
+  }
+  const remember = wantedRemember(userText);
+  if (remember && findMemoryTool(tools, 'memory_remember')) {
+    return {
+      kind: 'tool',
+      toolName: 'memory_remember',
+      toolArgs: JSON.stringify({ key: 'fact', value: remember.value, confirm: remember.confirm }),
+      finish: 'tool_calls',
+    };
   }
   const diagnoseTool = wantsDiagnose(userText) ? findDiagnoseTool(tools) : undefined;
   if (diagnoseTool) {
