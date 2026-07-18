@@ -64,6 +64,20 @@ Then ask it to *"Diagnose pipeline p-1 for StreamCo"* and watch it call
 the provider's tool and explain the result. Full walkthrough (and a
 no-cluster local run) in [docs/development.md](docs/development.md).
 
+Conversations are durable. Browse and resume past threads — this reads the
+aggregated apiserver (`assistant.miloapis.com`) with your k8s identity, so it
+uses `KUBECONFIG`, not `PATCH_TOKEN`:
+
+```bash
+task dev:chats                       # list this project's conversations
+task dev:chats ID=<context-id>       # show one transcript
+task dev:chat CTX=<context-id>       # resume it
+
+# or directly:
+go run ./cmd/patch conversations list --project demo-project
+go run ./cmd/patch conversations show <context-id> --project demo-project
+```
+
 ## Documentation
 
 - [**Product & architecture**](docs/product-architecture.md) — what Patch

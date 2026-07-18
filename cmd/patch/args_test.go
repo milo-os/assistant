@@ -29,14 +29,49 @@ func TestParseArgs(t *testing.T) {
 			want: command{kind: cmdChat, message: "hello world", project: "demo"},
 		},
 		{
+			name: "chat --tui with kubeconfig",
+			argv: []string{"chat", "--tui", "--project", "demo", "--kubeconfig", "/kc"},
+			want: command{kind: cmdChat, project: "demo", tui: true, kubeconfig: "/kc"},
+		},
+		{
 			name: "chat missing message",
 			argv: []string{"chat", "--project", "demo"},
-			want: command{kind: cmdError, errMsg: "chat: missing message argument (or use --interactive)"},
+			want: command{kind: cmdError, errMsg: "chat: missing message argument (or use --interactive / --tui)"},
 		},
 		{
 			name: "chat missing project",
 			argv: []string{"chat", "hi"},
 			want: command{kind: cmdError, errMsg: "chat: --project <name> is required"},
+		},
+		{
+			name: "conversations list",
+			argv: []string{"conversations", "list", "--project", "demo"},
+			want: command{kind: cmdConvList, project: "demo"},
+		},
+		{
+			name: "conversations show with id and kubeconfig",
+			argv: []string{"conversations", "show", "ctx-1", "--project", "demo", "--kubeconfig", "/kc"},
+			want: command{kind: cmdConvShow, project: "demo", contextID: "ctx-1", kubeconfig: "/kc"},
+		},
+		{
+			name: "conv alias list --json",
+			argv: []string{"conv", "list", "--project", "demo", "--json"},
+			want: command{kind: cmdConvList, project: "demo", json: true},
+		},
+		{
+			name: "conversations missing project",
+			argv: []string{"conversations", "list"},
+			want: command{kind: cmdError, errMsg: "conversations list: --project <name> is required"},
+		},
+		{
+			name: "conversations show missing id",
+			argv: []string{"conversations", "show", "--project", "demo"},
+			want: command{kind: cmdError, errMsg: "conversations show: missing <context-id> argument"},
+		},
+		{
+			name: "conversations bad subcommand",
+			argv: []string{"conversations", "delete", "--project", "demo"},
+			want: command{kind: cmdError, errMsg: `conversations: expected "list" or "show", got "delete"`},
 		},
 		{
 			name: "task get",

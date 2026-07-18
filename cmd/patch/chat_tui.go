@@ -21,10 +21,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
+	"time"
 
 	spin "charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -36,6 +39,8 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
+
+	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
 )
 
 // Streaming messages delivered to the model via p.Send from the turn goroutine.
@@ -50,7 +55,39 @@ type (
 	}
 	// streamErrMsg is a transport/stream error surfaced by the a2a client.
 	streamErrMsg struct{ err error }
+	// pickerListMsg delivers the picker's conversation listing (or an error).
+	pickerListMsg struct {
+		items []assistantv1alpha1.Conversation
+		err   error
+	}
+	// pickerTranscriptMsg delivers the selected conversation's full transcript
+	// (or an error) to resume from.
+	pickerTranscriptMsg struct {
+		contextID string
+		items     []assistantv1alpha1.ConversationMessage
+		err       error
+	}
 )
+
+// transcriptTurn is one unstyled turn, parallel to chatModel.turns (which
+// holds already-rendered, ANSI-styled blocks for the viewport). /export walks
+// this slice instead, so the exported file is plain text.
+type transcriptTurn struct {
+	role    string // "user", "assistant", or "system" (a stream/transport error)
+	content string
+}
+
+// pickerState is the chat TUI's conversation picker: a `/resume` overlay that
+// lists the project's conversations (via the conversations apiserver, same
+// kubectl path as `patch conversations list`) and loads the selected one's
+// transcript to resume without leaving the TUI.
+type pickerState struct {
+	open    bool
+	loading bool
+	err     string
+	items   []assistantv1alpha1.Conversation
+	cursor  int
+}
 
 // styles bundles the lipgloss styles that depend on the terminal background, so
 // they can be rebuilt as one unit when the background is learned.
@@ -118,10 +155,11 @@ func newInputStyles(dark bool) textinput.Styles {
 // pointer receiver so the streaming goroutine (which holds *tea.Program) and
 // Update mutate one shared model.
 type chatModel struct {
-	ctx     context.Context
-	prog    *tea.Program
-	client  *a2aclient.Client
-	project string
+	ctx        context.Context
+	prog       *tea.Program
+	client     *a2aclient.Client
+	project    string
+	kubeconfig string // for the /resume picker's kubectl calls; "" uses normal resolution
 
 	vp       viewport.Model
 	ti       textinput.Model
@@ -130,10 +168,17 @@ type chatModel struct {
 	st       styles
 
 	contextID string
-	turns     []string        // finalized, already-rendered conversation blocks
-	answer    strings.Builder // in-progress assistant answer (raw markdown)
+	turns     []string         // finalized, already-rendered conversation blocks
+	raw       []transcriptTurn // parallel to turns, unstyled — source for /export
+	answer    strings.Builder  // in-progress assistant answer (raw markdown)
 	working   bool
 	dark      bool
+
+	// overlay is "" (normal chat), "help", or "status" — a read-only reference
+	// screen shown full-screen and dismissed by any keypress (see onKey).
+	overlay string
+
+	picker pickerState
 
 	firstMessage string // sent automatically once, on first layout
 	sentFirst    bool
@@ -141,7 +186,7 @@ type chatModel struct {
 	width        int // full terminal width; content width subtracts padding
 }
 
-func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextID, firstMessage string) int {
+func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextID, firstMessage, kubeconfig string) int {
 	st := newStyles(false) // provisional (light) until the background is learned
 
 	sp := spin.New(spin.WithSpinner(spin.Dot), spin.WithStyle(st.patch))
@@ -155,6 +200,7 @@ func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextI
 		ctx:          ctx,
 		client:       client,
 		project:      project,
+		kubeconfig:   kubeconfig,
 		contextID:    contextID,
 		vp:           viewport.New(),
 		ti:           ti,
@@ -206,7 +252,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onKey(msg)
 
 	case spin.TickMsg:
-		if !m.working {
+		if !m.working && !m.picker.loading {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -231,13 +277,24 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			answer = strings.TrimRight(answer, "\n") + "\n" + m.st.err.Render("⚠ "+note)
 		}
 		m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), answer))
+		rawAnswer := m.answer.String()
+		if msg.failed {
+			note := msg.failMsg
+			if note == "" {
+				note = "the task failed"
+			}
+			rawAnswer = strings.TrimRight(rawAnswer, "\n") + "\n⚠ " + note
+		}
+		m.raw = append(m.raw, transcriptTurn{role: "assistant", content: rawAnswer})
 		m.answer.Reset()
 		m.working = false
 		m.rebuildViewport()
 		return m, nil
 
 	case streamErrMsg:
-		m.turns = append(m.turns, m.st.err.Render("patch: "+friendlyError(msg.err)))
+		errText := friendlyError(msg.err)
+		m.turns = append(m.turns, m.st.err.Render("patch: "+errText))
+		m.raw = append(m.raw, transcriptTurn{role: "system", content: "error: " + errText})
 		m.answer.Reset()
 		m.working = false
 		m.rebuildViewport()
@@ -247,14 +304,60 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
+
+	case pickerListMsg:
+		m.picker.loading = false
+		if msg.err != nil {
+			m.picker.err = msg.err.Error()
+			return m, nil
+		}
+		m.picker.items = msg.items
+		m.picker.cursor = 0
+		return m, nil
+
+	case pickerTranscriptMsg:
+		m.picker.loading = false
+		if msg.err != nil {
+			m.picker.err = msg.err.Error()
+			return m, nil
+		}
+		m.contextID = msg.contextID
+		m.turns = m.turns[:0]
+		m.raw = m.raw[:0]
+		m.answer.Reset()
+		for _, mm := range msg.items {
+			if mm.Role == "user" {
+				m.turns = append(m.turns, m.turnBlock(m.st.you.Render("You"),
+					m.st.userText.Width(m.contentWidth()).Render(mm.Content)))
+			} else {
+				m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), m.renderMarkdown(mm.Content)))
+			}
+			m.raw = append(m.raw, transcriptTurn{role: mm.Role, content: mm.Content})
+		}
+		m.picker = pickerState{}
+		m.rebuildViewport()
+		return m, nil
 	}
 	return m, nil
 }
 
 func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Ctrl-C/D always quits, picker open or not — a universal escape hatch
+	// regardless of what overlay is showing.
 	switch msg.String() {
 	case "ctrl+c", "ctrl+d":
 		return m, tea.Quit
+	}
+	if m.picker.open {
+		return m.onPickerKey(msg)
+	}
+	if m.overlay != "" {
+		// Any key dismisses an overlay — it's a read-only reference screen,
+		// not a mode with its own input.
+		m.overlay = ""
+		return m, nil
+	}
+	switch msg.String() {
 	case "enter":
 		if m.working {
 			return m, nil
@@ -263,8 +366,39 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		if text == "/quit" || text == "/exit" {
+		switch text {
+		case "/quit", "/exit":
 			return m, tea.Quit
+		case "/resume":
+			m.ti.Reset()
+			m.picker = pickerState{open: true, loading: true}
+			return m, tea.Batch(m.loadPickerList(), m.sp.Tick)
+		case "/clear":
+			m.ti.Reset()
+			m.contextID = ""
+			m.turns = nil
+			m.raw = nil
+			m.answer.Reset()
+			m.rebuildViewport()
+			return m, nil
+		case "/help":
+			m.ti.Reset()
+			m.overlay = "help"
+			return m, nil
+		case "/status":
+			m.ti.Reset()
+			m.overlay = "status"
+			return m, nil
+		case "/export":
+			m.ti.Reset()
+			path, err := m.exportTranscript()
+			if err != nil {
+				m.turns = append(m.turns, m.st.err.Render("⚠ export failed: "+err.Error()))
+			} else {
+				m.turns = append(m.turns, m.st.subtle.Render("exported to "+path))
+			}
+			m.rebuildViewport()
+			return m, nil
 		}
 		m.ti.Reset()
 		return m, m.submit(text)
@@ -286,6 +420,36 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// onPickerKey handles input while the /resume conversation picker is open. It
+// swallows every key (nothing reaches the text input) so typing while
+// browsing can't leak into the message field.
+func (m *chatModel) onPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.picker = pickerState{}
+		return m, nil
+	case "up", "k":
+		if m.picker.cursor > 0 {
+			m.picker.cursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.picker.cursor < len(m.picker.items)-1 {
+			m.picker.cursor++
+		}
+		return m, nil
+	case "enter":
+		if m.picker.loading || len(m.picker.items) == 0 {
+			return m, nil
+		}
+		id := m.picker.items[m.picker.cursor].Name
+		m.picker.loading = true
+		m.picker.err = ""
+		return m, tea.Batch(m.loadPickerTranscript(id), m.sp.Tick)
+	}
+	return m, nil
+}
+
 // isEditingKey reports whether a non-printable key (empty .Text) is still a
 // legitimate line-editing key the text input should handle.
 func isEditingKey(s string) bool {
@@ -299,17 +463,177 @@ func isEditingKey(s string) bool {
 	return false
 }
 
+// loadPickerList fetches the project's conversation listing in the background
+// (the same kubectl path as `patch conversations list`), newest activity
+// first. It captures ctx/kubeconfig/project by value at call time rather than
+// reading m inside the closure — like stream(), this runs off the Update
+// goroutine, so it must never touch mutable model state directly; only the
+// returned Msg, handled in Update, may.
+func (m *chatModel) loadPickerList() tea.Cmd {
+	ctx, kubeconfig, project := m.ctx, m.kubeconfig, m.project
+	return func() tea.Msg {
+		out, err := kubectlJSON(ctx, kubeconfig, "get", "conversations", "-n", project, "-o", "json")
+		if err != nil {
+			return pickerListMsg{err: errors.New(kubectlErrorText(err))}
+		}
+		var list assistantv1alpha1.ConversationList
+		if err := json.Unmarshal(out, &list); err != nil {
+			return pickerListMsg{err: err}
+		}
+		sort.SliceStable(list.Items, func(i, j int) bool {
+			return list.Items[i].Status.LastActiveAt.After(list.Items[j].Status.LastActiveAt.Time)
+		})
+		return pickerListMsg{items: list.Items}
+	}
+}
+
+// loadPickerTranscript fetches one conversation's full transcript (the
+// messages subresource) in the background, for Update to fold into m.turns
+// on arrival. Same off-goroutine caveat as loadPickerList.
+func (m *chatModel) loadPickerTranscript(contextID string) tea.Cmd {
+	ctx, kubeconfig, project := m.ctx, m.kubeconfig, m.project
+	return func() tea.Msg {
+		path := fmt.Sprintf(
+			"/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/conversations/%s/messages",
+			project, contextID)
+		out, err := kubectlJSON(ctx, kubeconfig, "get", "--raw", path)
+		if err != nil {
+			return pickerTranscriptMsg{err: errors.New(kubectlErrorText(err))}
+		}
+		var msgs assistantv1alpha1.ConversationMessages
+		if err := json.Unmarshal(out, &msgs); err != nil {
+			return pickerTranscriptMsg{err: err}
+		}
+		return pickerTranscriptMsg{contextID: contextID, items: msgs.Items}
+	}
+}
+
+// pickerView renders the /resume conversation picker as a full-screen overlay:
+// a loading spinner, an error, "no conversations", or a cursor-navigable list.
+func (m *chatModel) pickerView() tea.View {
+	var b strings.Builder
+	b.WriteString(m.st.header.Render("resume a conversation") + m.st.subtle.Render("  ·  project "+m.project))
+	b.WriteString("\n\n")
+	switch {
+	case m.picker.loading:
+		b.WriteString(m.sp.View() + " " + m.st.subtle.Render("loading…"))
+	case m.picker.err != "":
+		b.WriteString(m.st.err.Render("⚠ " + m.picker.err))
+	case len(m.picker.items) == 0:
+		b.WriteString(m.st.subtle.Render("no conversations in project " + m.project))
+	default:
+		for i, c := range m.picker.items {
+			line := fmt.Sprintf("%s   %-4s  %d msgs", c.Name, ago(c.Status.LastActiveAt.Time), c.Status.MessageCount)
+			if i == m.picker.cursor {
+				b.WriteString(m.st.you.Render("> " + line))
+			} else {
+				b.WriteString("  " + m.st.subtle.Render(line))
+			}
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n" + m.st.hint.Render("↑/↓ select · enter resume · esc cancel"))
+
+	v := tea.NewView(m.st.box.Render(b.String()))
+	v.AltScreen = true
+	return v
+}
+
+// helpText lists every slash command; shared by /help's overlay and the
+// --help usage text (args.go) so the two can't drift out of sync in spirit,
+// though they're rendered differently (plain vs styled).
+var helpText = []struct{ cmd, desc string }{
+	{"/resume", "browse and resume a past conversation"},
+	{"/clear", "start a fresh conversation, clearing this transcript"},
+	{"/export", "save this transcript to a file"},
+	{"/status", "show the current project, conversation, and turn count"},
+	{"/help", "show this list"},
+	{"/quit, /exit", "leave"},
+}
+
+// helpView renders the /help overlay: every slash command and what it does.
+// Dismissed by any keypress (see onKey).
+func (m *chatModel) helpView() tea.View {
+	var b strings.Builder
+	b.WriteString(m.st.header.Render("patch commands"))
+	b.WriteString("\n\n")
+	for _, h := range helpText {
+		b.WriteString("  " + m.st.you.Render(h.cmd) + "  " + m.st.subtle.Render(h.desc) + "\n")
+	}
+	b.WriteString("\n" + m.st.hint.Render("any key to dismiss"))
+
+	v := tea.NewView(m.st.box.Render(b.String()))
+	v.AltScreen = true
+	return v
+}
+
+// statusView renders the /status overlay: the current session's project,
+// conversation id, and turn count. Dismissed by any keypress (see onKey).
+func (m *chatModel) statusView() tea.View {
+	ctx := m.contextID
+	if ctx == "" {
+		ctx = "(none yet — starts on your first message)"
+	}
+	var b strings.Builder
+	b.WriteString(m.st.header.Render("session status"))
+	b.WriteString("\n\n")
+	fmt.Fprintf(&b, "  %s  %s\n", m.st.you.Render("project"), m.project)
+	fmt.Fprintf(&b, "  %s  %s\n", m.st.you.Render("context"), ctx)
+	fmt.Fprintf(&b, "  %s  %d\n", m.st.you.Render("turns"), len(m.raw))
+	b.WriteString("\n" + m.st.hint.Render("any key to dismiss"))
+
+	v := tea.NewView(m.st.box.Render(b.String()))
+	v.AltScreen = true
+	return v
+}
+
+// exportTranscript writes the current conversation to a plain-text markdown
+// file in the working directory, returning its name. Walks m.raw (unstyled)
+// rather than m.turns (ANSI-styled for the viewport).
+func (m *chatModel) exportTranscript() (string, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# patch conversation\n\nproject: %s\n", m.project)
+	if m.contextID != "" {
+		fmt.Fprintf(&b, "context: %s\n", m.contextID)
+	}
+	fmt.Fprintf(&b, "exported: %s\n\n", time.Now().Format(time.RFC3339))
+	for _, t := range m.raw {
+		label := "You"
+		switch t.role {
+		case "assistant":
+			label = "Patch"
+		case "system":
+			label = "System"
+		}
+		fmt.Fprintf(&b, "## %s\n\n%s\n\n", label, t.content)
+	}
+	name := "patch-chat-" + time.Now().Format("20060102-150405") + ".md"
+	if err := os.WriteFile(name, []byte(b.String()), 0o644); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 func (m *chatModel) View() tea.View {
 	if !m.ready {
 		v := tea.NewView(m.st.box.Render("starting patch chat…"))
 		v.AltScreen = true
 		return v
 	}
+	if m.picker.open {
+		return m.pickerView()
+	}
+	switch m.overlay {
+	case "help":
+		return m.helpView()
+	case "status":
+		return m.statusView()
+	}
 	var status string
 	if m.working {
 		status = m.sp.View() + " " + m.st.subtle.Render("thinking…")
 	} else {
-		status = m.st.hint.Render("enter to send · pgup/pgdn scroll · ctrl+c or /quit to leave")
+		status = m.st.hint.Render("enter to send · pgup/pgdn scroll · /help for commands · ctrl+c or /quit to leave")
 	}
 	// One blank line between each major region for an even vertical rhythm:
 	// header → blank → transcript → status → blank → bordered input.
@@ -332,6 +656,7 @@ func (m *chatModel) View() tea.View {
 // asynchronously via p.Send from the goroutine started here.
 func (m *chatModel) submit(text string) tea.Cmd {
 	m.turns = append(m.turns, m.turnBlock(m.st.you.Render("You"), m.st.userText.Width(m.contentWidth()).Render(text)))
+	m.raw = append(m.raw, transcriptTurn{role: "user", content: text})
 	m.answer.Reset()
 	m.working = true
 	m.rebuildViewport()

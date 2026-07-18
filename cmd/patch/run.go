@@ -26,6 +26,12 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 	case cmdError:
 		io.Err("patch: " + cmd.errMsg + "\n\n" + usage)
 		return 2
+	case cmdConvList:
+		// Conversations are the apiserver read view (kubectl + your k8s
+		// identity), not the A2A service — no PATCH_URL/PATCH_TOKEN needed.
+		return runConversationsList(ctx, cmd, io)
+	case cmdConvShow:
+		return runConversationsShow(ctx, cmd, io)
 	}
 
 	baseURL := cmd.url
@@ -57,7 +63,7 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 		}
 		defer client.Destroy()
 		if cmd.tui {
-			return runChatTUI(ctx, client, cmd.project, cmd.contextID, cmd.message)
+			return runChatTUI(ctx, client, cmd.project, cmd.contextID, cmd.message, cmd.kubeconfig)
 		}
 		if cmd.interactive {
 			return runRepl(ctx, client, cmd.project, cmd.contextID, cmd.message, io)
