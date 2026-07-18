@@ -168,17 +168,27 @@ gapreport.Store`; `cmd/assistant/runner.go` builds a
 same database) when configured, else an in-process fallback with a log
 line noting reports won't survive restarts.
 
-### 6. Read path: how StreamCo's team actually sees these
+### 6. Read path: how StreamCo's team actually sees these (shipped)
 
-Follow the existing `conversations` read-view precedent
-(`docs/conversation-apiserver-design.md`): expose gap reports through the
-same aggregated apiserver pattern, scoped by the caller's k8s identity
-against `providerProject` — i.e. `kubectl get capabilitygapreports
---project streamco-platform` (or `patch gaps list --project
-streamco-platform`), authorized the same way `conversations show` already
-is. This reuses existing project-scoped RBAC rather than inventing a new
-auth model — a StreamCo team member only sees reports where
-`provider_project` matches a project they already have access to.
+Follows the existing `conversations` read-view precedent
+(`docs/conversation-apiserver-design.md`): gap reports are exposed through
+the same aggregated apiserver pattern, scoped by the caller's k8s identity
+against `providerProject` — `kubectl get capabilitygapreports -n
+streamco-platform`, or `patch gaps list --project streamco-platform`,
+authorized the same way `conversations show` already is (delegated
+authn/authz to the front kube-apiserver's RBAC; no service-specific
+`ProtectedResource`/`Role` config exists for either resource). This reuses
+existing project-scoped RBAC rather than inventing a new auth model — a
+StreamCo team member only sees reports where `provider_project` matches a
+project they already have access to.
+
+Implemented as `assistant.miloapis.com/v1alpha1` `CapabilityGapReport` (a
+new hand-written API type alongside `Conversation`, following the same
+internal/versioned/conversion/deepcopy/OpenAPI pattern — this repo has no
+wired codegen), registered in `internal/apiserver/registry/capabilitygapreport`
+implementing `Storage`/`Scoper`/`Lister`/`SingularNameProvider` only (no
+`Getter`; `gapreport.Store` has no single-item lookup and the CLI only
+lists).
 
 ## Non-goals
 
@@ -199,12 +209,11 @@ auth model — a StreamCo team member only sees reports where
 
 ## Open questions
 
-1. Does the service catalog actually have "which Milo project does this
+1. ~~Does the service catalog actually have "which Milo project does this
    service's team operate in" as an existing fact it can populate into
-   `reportingProject`, or does that require new catalog-side modeling?
-   This is the load-bearing assumption of the whole design — worth
-   confirming with the control-plane side before building the assistant
-   half.
+   `reportingProject`?~~ Resolved: yes — `spec.reportingProject` is set
+   directly on the capability document (see design #1), populated by the
+   service catalog from its own service registration.
 2. Should `report_capability_gap` be visible to the model as a *tool*
    (self-serve, like memory) or should we require it be a **skill**-gated
    action, so providers can review/tune the exact phrasing of when it's
@@ -215,7 +224,7 @@ auth model — a StreamCo team member only sees reports where
    dedup-by-similar-capability-string-per-conversation guard before
    inserting, not just the hard per-project cap.
 
-## Files touched/added (once catalog side confirms `reportingProject`)
+## Files touched/added (shipped — write path + read path)
 
 - `internal/capability/document.go` — `CapabilitySpec.ReportingProject`.
 - `docs/capabilities.md` — schema addition, example.
@@ -230,7 +239,19 @@ auth model — a StreamCo team member only sees reports where
   registration call.
 - `internal/agent/conversation.go` — `Deps.GapReports`, `Compose` call
   site.
+- `internal/agent/gapreport_test.go` (new).
 - `cmd/assistant/runner.go` — construct/wire the store.
-- Read path (separate follow-up, larger scope — new aggregated-apiserver
-  resource, RBAC, `patch gaps` subcommand): tracked separately, not part
-  of the write-path change above.
+- `pkg/apis/assistant/types.go`, `v1alpha1/types.go`,
+  `register.go`/`v1alpha1/register.go`,
+  `v1alpha1/conversion.go`/`conversion_impl.go`,
+  `zz_generated.deepcopy.go` (both packages),
+  `v1alpha1/zz_generated.model_name.go` — `CapabilityGapReport` API type.
+- `pkg/generated/openapi/zz_generated.openapi.go` — OpenAPI schema.
+- `internal/apiserver/registry/capabilitygapreport/storage.go` (new) +
+  `storage_test.go` — `CapabilityGapReportREST`, scoped by
+  `internal/tenant.ProjectFromContext`.
+- `internal/apiserver/apiserver.go` — `ExtraConfig.GapReports`, storage
+  registration.
+- `cmd/conversations-apiserver/serve.go` — wire the gap-report store.
+- `cmd/patch/args.go`, `cmd/patch/gaps.go` (new), `cmd/patch/run.go` —
+  `patch gaps list --project <provider>`.

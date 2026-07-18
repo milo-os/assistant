@@ -11,6 +11,7 @@
       "serviceName": "streaming.streamco.example",
       "serviceAgentRef": { "name": "streamco-streaming-agent" },
       "configurationVersion": "v1-playground",
+      "reportingProject": "streamco-platform",
       "knowledge": {
         "concepts": [
           { "gvk": { "group": "streaming.streamco.example", "kind": "Stream" }, "summary": "A live media stream" }
