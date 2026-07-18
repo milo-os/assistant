@@ -11,6 +11,7 @@ import (
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/capability"
+	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
 	"github.com/milo-os/assistant/internal/usage"
@@ -76,6 +77,12 @@ type Deps struct {
 	// History, which is per-conversation and windowed). Nil disables the
 	// feature — no tools are composed.
 	Memory memory.Store
+	// GapReports backs the report_capability_gap__<service> tools: lets
+	// the model flag that a provider service is missing a tool or lookup
+	// a user needed, written to THAT PROVIDER's own project (see
+	// internal/gapreport), never to params.ProjectName. Nil disables the
+	// feature entirely.
+	GapReports gapreport.Store
 	// AllowPrivateCapabilityNetworks relaxes the capability SSRF guard's
 	// loopback/RFC1918 block (link-local/metadata stay blocked either way). The
 	// platform's capability endpoints are in-cluster private ClusterIPs, so real
@@ -184,6 +191,8 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		AllowPrivateNetworks: c.deps.AllowPrivateCapabilityNetworks,
 		Memory:               c.deps.Memory,
 		ExpectedProject:      params.ProjectName,
+		GapReports:           c.deps.GapReports,
+		ContextID:            params.ContextID,
 		OnToolInvocation: func(inv capability.ProviderToolInvocation) {
 			mu.Lock()
 			invocations = append(invocations, inv)

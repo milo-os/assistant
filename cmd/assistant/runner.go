@@ -12,6 +12,7 @@ import (
 	"github.com/milo-os/assistant/internal/agent"
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/config"
+	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
 	"github.com/milo-os/assistant/internal/usage"
@@ -107,6 +108,26 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 			"note", "CONVERSATION_STORE_URL not set — project memory will not survive restarts")
 	}
 
+	// Capability-gap reports (report_capability_gap__<service>): same database
+	// as history/memory, a separate table, same durable-vs-in-process
+	// fallback. Unlike memory this is keyed by the PROVIDER's own project
+	// (spec.reportingProject on the capability document), never by the
+	// conversation's project — see internal/gapreport.
+	var gaps gapreport.Store
+	if cfg.ConversationStoreURL != "" {
+		pg, err := gapreport.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
+		if err != nil {
+			return nil, nil, err
+		}
+		gaps = pg
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); pg.Close() }
+	} else {
+		gaps = gapreport.NewMemoryStore()
+		log.Info("gapreport.store", "type", "memory",
+			"note", "CONVERSATION_STORE_URL not set — capability-gap reports will not survive restarts")
+	}
+
 	conv := agent.New(agent.Deps{
 		Model:                          model,
 		ModelMode:                      string(cfg.Model.Mode),
@@ -115,6 +136,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 		Emitter:                        emitter,
 		History:                        store,
 		Memory:                         mem,
+		GapReports:                     gaps,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
 		Logger:                         log,
 	})

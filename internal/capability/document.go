@@ -121,6 +121,14 @@ type CapabilitySpec struct {
 	Tools                *Tools     `json:"tools,omitempty"`
 	Skills               []Skill    `json:"skills,omitempty"`
 	Authority            *Authority `json:"authority,omitempty"`
+	// ReportingProject is the Milo project where this service's own team
+	// reviews capability-gap reports (see internal/gapreport) — resolved by
+	// the service catalog from its own service registration, distinct from
+	// Metadata.Namespace (the consumer project this document was entitled
+	// to). Optional: when a document declares Tools but no
+	// ReportingProject, capability-gap reporting is simply unavailable for
+	// that service (no tool is registered) rather than an error.
+	ReportingProject string `json:"reportingProject,omitempty"`
 }
 
 // Metadata mirrors the object metadata carried on the CRD projection.

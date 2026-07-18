@@ -11,6 +11,7 @@ import (
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/agentcore/mcptool"
+	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/memory"
 )
 
@@ -108,6 +109,20 @@ type ComposeOptions struct {
 	// no addendum section. Also requires ExpectedProject to be set, since the
 	// tools need a project to scope reads/writes to.
 	Memory memory.Store
+	// ContextID, when set, is the conversation this composition is running
+	// for. It is threaded into gap reports as provenance only (see
+	// GapReports) — it plays no role in tool scoping or tenant isolation.
+	ContextID string
+	// GapReports, when non-nil, enables one report_capability_gap__<service>
+	// tool per composed document that declares spec.reportingProject (see
+	// internal/capability/gapreport.go): the model can flag that a provider
+	// service is missing a tool or lookup a user needed, and the report is
+	// written to that PROVIDER's own project — never ExpectedProject, the
+	// consumer's project — so the team that owns the missing capability sees
+	// it without the user having to report it themselves. A document with
+	// tools but no reportingProject simply gets no gap-report tool. Nil
+	// disables the feature entirely.
+	GapReports gapreport.Store
 	// resolver is the DNS seam for the SSRF guard. Nil uses net.DefaultResolver.
 	resolver ipResolver
 }
@@ -207,6 +222,32 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		}
 		if _, exists := tools[ForgetMemoryToolName]; !exists {
 			tools[ForgetMemoryToolName] = &forgetMemoryTool{store: opts.Memory, project: opts.ExpectedProject}
+		}
+	}
+
+	// Capability-gap reporting: one tool instance per document that declares
+	// a ReportingProject, closed over THAT document's own ServiceName and
+	// ReportingProject. The model's tool input never carries a project or
+	// service — it can only pick which of these pre-scoped tool instances to
+	// call — so a report can never be misdirected to a provider it wasn't
+	// actually composed from.
+	if opts.GapReports != nil {
+		for _, doc := range docs {
+			if doc.Spec.ReportingProject == "" {
+				continue
+			}
+			name := GapReportToolName(doc.Spec.ServiceRef.Name)
+			if _, exists := tools[name]; exists {
+				continue // first registration wins, deterministically
+			}
+			tools[name] = &reportCapabilityGapTool{
+				store:           opts.GapReports,
+				name:            name,
+				serviceName:     doc.Spec.ServiceName,
+				providerProject: doc.Spec.ReportingProject,
+				consumerProject: opts.ExpectedProject,
+				contextID:       opts.ContextID,
+			}
 		}
 	}
 

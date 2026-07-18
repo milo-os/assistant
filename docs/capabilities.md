@@ -37,6 +37,7 @@ invalid documents with clear errors):
   "spec": {
     "serviceRef":  { "name": "streamco" },
     "serviceName": "streaming.streamco.example",   // used as the tool-invocation meter dimension
+    "reportingProject": "streamco-platform",        // where this service's capability-gap reports land
     "knowledge": {
       "sources":  [{ "type": "LLMDocs", "url": "https://…/llms-full.txt" }],
       "concepts": [{ "gvk": { "group": "…", "kind": "Stream" }, "summary": "…" }]
@@ -148,6 +149,12 @@ from this **document schema version (v1)**.
     "serviceName":          "string",              // REQUIRED (tool-invocation meter dimension)
     "serviceAgentRef":      { "name": "string" },  // REQUIRED, name REQUIRED
     "configurationVersion": "string",              // REQUIRED (provider config revision)
+    "reportingProject":     "string",              // optional — the provider's OWN project,
+                                                    // where its team reviews capability-gap
+                                                    // reports (see capability-gap-reporting-design.md).
+                                                    // Distinct from metadata.namespace, which is the
+                                                    // CONSUMER project this document was entitled to.
+                                                    // Omitted => gap reporting unavailable for this service.
 
     "knowledge": {                                 // optional
       "sources": [{
@@ -196,6 +203,7 @@ from this **document schema version (v1)**.
         "serviceName": "streaming.streamco.example",
         "serviceAgentRef": { "name": "streamco-agent" },
         "configurationVersion": "v1",
+        "reportingProject": "streamco-platform",
         "knowledge": {
           "sources": [
             { "type": "LLMDocs", "title": "Overview", "url": "http://127.0.0.1:7810/llms-full.txt" }

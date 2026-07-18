@@ -9,6 +9,7 @@ require (
 	github.com/a2aproject/a2a-go/v2 v2.3.1
 	github.com/anthropics/anthropic-sdk-go v1.57.0
 	github.com/charmbracelet/glamour v1.0.0
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/modelcontextprotocol/go-sdk v1.6.1
@@ -70,7 +71,6 @@ require (
 	github.com/google/cel-go v0.26.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.1.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3 // indirect

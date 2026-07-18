@@ -22,7 +22,9 @@ import (
 func noopEmitter() *usage.Emitter { return usage.NewEmitter(usage.EmitterConfig{}) }
 
 // fakeSource returns fixed documents for any project.
-type fakeSource struct{ docs []capability.CapabilityDocument }
+type fakeSource struct {
+	docs []capability.CapabilityDocument
+}
 
 func (s fakeSource) Documents(context.Context, string) ([]capability.CapabilityDocument, error) {
 	return s.docs, nil
