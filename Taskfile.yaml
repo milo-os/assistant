@@ -295,6 +295,41 @@ tasks:
         fi
         go run ./cmd/patch card --url "$PATCH_URL"
 
+  dev:patch:
+    desc: >-
+      Run any patch CLI subcommand against the dev env without building:
+      task dev:patch -- <args>. Examples:
+      task dev:patch -- card;
+      task dev:patch -- conversations list;
+      task dev:patch -- chat "Diagnose pipeline p-1 for StreamCo";
+      task dev:patch -- gaps list --project streamco-platform.
+      Auto-starts the assistant port-forward and wires
+      PATCH_URL/PATCH_TOKEN/KUBECONFIG. A `--project {{.PROJECT}}` default is
+      injected when you don't pass one (harmless for card/task, which ignore it).
+    silent: true
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+      PATCH_URL: '{{.PATCH_URL}}'
+      PATCH_TOKEN: '{{.PATCH_TOKEN}}'
+    cmds:
+      - |
+        # Ensure the HTTP transport is reachable (reuse an existing forward, e.g.
+        # from `task dev:forward`); conversations/gaps use kubectl+KUBECONFIG and
+        # don't need it, but starting it is harmless and keeps this one task
+        # uniform across every subcommand.
+        if ! curl -sf -m 2 -o /dev/null "$PATCH_URL/healthz" 2>/dev/null; then
+          echo "→ port-forwarding svc/assistant → localhost:1986 …" >&2
+          kubectl -n {{.NS}} port-forward svc/assistant 1986:7820 >/dev/null 2>&1 &
+          for i in $(seq 1 30); do curl -sf -m 2 -o /dev/null "$PATCH_URL/healthz" 2>/dev/null && break; sleep 0.5; done
+        fi
+        # Default --project to {{.PROJECT}} unless the caller already passed one,
+        # so `task dev:patch -- conversations list` just works.
+        case " {{.CLI_ARGS}} " in
+          *" --project "*|*" --project="*) proj="" ;;
+          *)                               proj="--project {{.PROJECT}}" ;;
+        esac
+        go run ./cmd/patch {{.CLI_ARGS}} $proj
+
   dev:clean:
     desc: Remove this environment's namespace + GatewayClass (shared operators stay)
     env:
