@@ -8,10 +8,17 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ../../base
+  - ../../base/conversations-apiserver
   - ../../components/gateway
   - ../../components/llm-stub
   - ../../components/streamco
   - ../../components/sink
+
+# The APIService that registers the conversations aggregated apiserver with the
+# kube-aggregator. A Component (not a plain resource) so a production overlay can
+# compose the same registration with a different TLS/caBundle posture.
+components:
+  - ../../components/api-registration
 
 images:
   - name: ghcr.io/milo-os/assistant
@@ -19,6 +26,8 @@ images:
   - name: ghcr.io/milo-os/assistant-streamco
     newTag: dev
   - name: ghcr.io/milo-os/assistant-sink
+    newTag: dev
+  - name: ghcr.io/milo-os/conversations-apiserver
     newTag: dev
 
 configMapGenerator:
@@ -44,6 +53,16 @@ secretGenerator:
         app.kubernetes.io/part-of: agent-framework-playground
 
 patches:
+  # Dev has no cluster CA to trust for the aggregated apiserver's self-signed
+  # serving cert, so tell the aggregator to skip TLS verification. Production
+  # injects a real caBundle instead of this.
+  - target:
+      kind: APIService
+      name: v1alpha1.assistant.miloapis.com
+    patch: |-
+      - op: replace
+        path: /spec/insecureSkipTLSVerify
+        value: true
   - target:
       kind: Deployment
       name: assistant

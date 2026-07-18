@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -105,6 +106,7 @@ type PostgresStore struct {
 var (
 	_ Store  = (*PostgresStore)(nil)
 	_ Lister = (*PostgresStore)(nil)
+	_ Reader = (*PostgresStore)(nil)
 )
 
 // NewPostgresStore connects to databaseURL (a postgres:// URL), verifies the
@@ -159,6 +161,10 @@ func buildPoolConfig(databaseURL string) (*pgxpool.Config, error) {
 
 // Close releases the connection pool.
 func (s *PostgresStore) Close() { s.pool.Close() }
+
+// Ping verifies the database connection is alive. Used by the conversations
+// apiserver's readyz check.
+func (s *PostgresStore) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
 // Turns implements [Store]: the conversation's newest turns (bounded by
 // DefaultMaxRecentTurns), oldest first, reconstructed from the message rows
@@ -216,6 +222,56 @@ func (s *PostgresStore) Turns(ctx context.Context, projectName, contextID string
 		return nil, nil
 	}
 	return turns, nil
+}
+
+// GetConversation implements [Reader]: one conversation's metadata by
+// (project, context) key, or [ErrConversationNotFound] if absent.
+func (s *PostgresStore) GetConversation(ctx context.Context, projectName, contextID string) (Conversation, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
+	defer cancel()
+	var c Conversation
+	err := s.pool.QueryRow(ctx,
+		`SELECT project_name, context_id, created_at, last_active_at, turn_count
+		 FROM conversations WHERE project_name = $1 AND context_id = $2`,
+		projectName, contextID).Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Conversation{}, ErrConversationNotFound
+	}
+	if err != nil {
+		return Conversation{}, fmt.Errorf("conversation store: get conversation: %w", err)
+	}
+	return c, nil
+}
+
+// Messages implements [Reader]: a conversation's message rows, oldest first.
+// Unlike [PostgresStore.Turns] this returns each row verbatim (seq, role,
+// content, created_at) without pairing into turns — the read view surfaces the
+// raw transcript.
+func (s *PostgresStore) Messages(ctx context.Context, projectName, contextID string) ([]Message, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
+	defer cancel()
+	rows, err := s.pool.Query(ctx,
+		`SELECT seq, role, content, created_at FROM messages
+		 WHERE project_name = $1 AND context_id = $2
+		 ORDER BY seq ASC`,
+		projectName, contextID)
+	if err != nil {
+		return nil, fmt.Errorf("conversation store: load messages: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.Seq, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("conversation store: scan message: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("conversation store: load messages: %w", err)
+	}
+	return out, nil
 }
 
 // Append implements [Store]: one transaction that bumps the conversation's

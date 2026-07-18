@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# No `namespace:` transformer: every resource hardcodes its namespace, because
+# the auth-reader RoleBinding must stay in kube-system while everything else is
+# in patch-playground. A transformer would clobber the RoleBinding's namespace
+# (it runs after patches, so a patch can't reliably pin it back).
+resources:
+  - serviceaccount.yaml
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+  - rbac-auth-reader.yaml
+  - rbac-cluster.yaml
+
+images:
+  - name: ghcr.io/milo-os/conversations-apiserver
+    newTag: latest

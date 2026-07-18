@@ -123,6 +123,8 @@ export PATCH_TOKEN=dev-token
 ./patch chat -i --project demo-project                # interactive multi-turn session
 ./patch chat "and the second finding?" \
   --project demo-project --context-id <c>             # continue a conversation
+./patch conversations list --project demo-project     # browse past conversations
+./patch conversations show <c> --project demo-project # preview one transcript
 ./patch task get <taskId>
 ./patch task cancel <taskId>
 ```
@@ -143,6 +145,16 @@ Behaviour:
   line is a turn, the conversation id is threaded automatically, so the
   whole session shares memory. `Ctrl-D` or `/quit` to leave. An optional
   positional message is sent as the first turn.
+- **`patch conversations list --project <p>`** — a table (context-id,
+  created, last-active, message count) of the project's durable
+  conversations, newest activity first. **`conversations show <context-id>
+  --project <p>`** prints one full transcript. Unlike the other commands
+  these read the **aggregated apiserver** (`assistant.miloapis.com`) via
+  `kubectl` under your **k8s identity** — the read view of decision #7,
+  where an apiserver is not a chat transport. They use `KUBECONFIG`
+  (or `--kubeconfig`), **not** `PATCH_URL`/`PATCH_TOKEN`. Pick a
+  context-id here, then resume it with `patch chat --context-id <id>`.
+  `--json` emits the raw apiserver objects.
 - **`patch task get|cancel <id>`** — the corresponding A2A methods.
 - Auth/transport failures print a clear `patch: …` message to stderr and
   exit non-zero (401 → "unauthorized", 403 → "forbidden").

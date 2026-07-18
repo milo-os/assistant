@@ -1,0 +1,64 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: conversations-apiserver
+  namespace: patch-playground
+spec:
+  podSelector:
+    matchLabels:
+      app: conversations-apiserver
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Ingress: the kube-aggregator (in kube-system, on the control plane) proxies
+  # every assistant.miloapis.com API call to :8443. Consumers (kubectl, the
+  # portal/CLI) never connect to this pod directly — they go through the front
+  # proxy. namespaceSelector-only (not podSelector) so kustomize's label
+  # transformer can't rewrite the peer selector onto external pods.
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8443
+
+  # Egress: DNS, the CloudNativePG store (5432, same namespace), and the
+  # kube-apiserver for delegated TokenReview / SubjectAccessReview.
+  egress:
+    # DNS — UDP and TCP for large responses.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # CloudNativePG store in this namespace (conversation-store-rw:5432).
+    - to:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432
+    # kube-apiserver for delegated authn/authz (TokenReview/SAR) — reachable
+    # via kubernetes.default.svc (default ns :443) and the kube-system endpoint.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 6443
+        - protocol: TCP
+          port: 443

@@ -1,0 +1,48 @@
+# Cluster RBAC the delegated authn/authz stack needs. The `system:auth-delegator`
+# binding lets the server create TokenReviews + SubjectAccessReviews (delegated
+# authn/authz); the bespoke ClusterRole covers the extension-apiserver-authentication
+# configmap read + API Priority & Fairness informers the generic apiserver runs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: conversations-apiserver
+rules:
+  # Read extension-apiserver-authentication for delegated auth.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["extension-apiserver-authentication"]
+    verbs: ["get", "list", "watch"]
+  # API Priority and Fairness informers.
+  - apiGroups: ["flowcontrol.apiserver.k8s.io"]
+    resources: ["flowschemas", "prioritylevelconfigurations"]
+    verbs: ["get", "list", "watch"]
+  # SubjectAccessReview for delegated authorization.
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: conversations-apiserver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: conversations-apiserver
+subjects:
+  - kind: ServiceAccount
+    name: conversations-apiserver
+    namespace: patch-playground
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: conversations-apiserver:system:auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: conversations-apiserver
+    namespace: patch-playground

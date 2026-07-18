@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: conversations-apiserver
+spec:
+  # minAvailable=1 keeps the aggregated apiserver reachable across voluntary
+  # disruption (node drain, rolling update) once a production overlay scales it
+  # past one replica. The dev overlay runs a single replica, where this simply
+  # asks the scheduler to drain gracefully.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: conversations-apiserver

@@ -1,0 +1,104 @@
+# The conversations aggregated API server: a read-only KRM view
+# (assistant.miloapis.com/v1alpha1 Conversations + messages subresource) over
+# the shared conversations/messages Postgres tables the A2A assistant writes on
+# the chat hot path. It reuses the SAME CloudNativePG store as the assistant —
+# the `conversation-store-app` secret's `uri` key — so it lives in
+# patch-playground alongside the store and the assistant Deployment.
+#
+# TLS: no --tls-cert-file/--tls-private-key-file is set, so the server
+# self-signs its serving cert on boot into --cert-dir=/tmp. That is safe here
+# because the dev overlay marks the APIService insecureSkipTLSVerify=true — the
+# kube-aggregator does not verify the serving cert. A production overlay would
+# mount a cert-manager cert and inject a caBundle instead.
+#
+# Delegated authn/authz: no --authentication-kubeconfig/--authorization-kubeconfig
+# is set, so the server falls back to its in-cluster client for TokenReview and
+# SubjectAccessReview — i.e. the kind cluster's own apiserver/RBAC (design
+# decision #3). The requestheader client CA is discovered from the kube-system
+# `extension-apiserver-authentication` configmap (which the auth-reader
+# RoleBinding + cluster RBAC grant read access to), so no CA volume is mounted.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conversations-apiserver
+  namespace: patch-playground
+  labels:
+    app: conversations-apiserver
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: conversations-apiserver }
+  template:
+    metadata:
+      labels:
+        app: conversations-apiserver
+        app.kubernetes.io/part-of: agent-framework-playground
+    spec:
+      serviceAccountName: conversations-apiserver
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: apiserver
+          image: ghcr.io/milo-os/conversations-apiserver
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /usr/local/bin/conversations-apiserver
+            - serve
+          args:
+            - --secure-port=8443
+            # Self-signed serving cert lands here (root fs is read-only).
+            - --cert-dir=/tmp
+            - --authorization-always-allow-paths=/healthz,/readyz,/livez
+          ports:
+            - containerPort: 8443
+              name: https
+              protocol: TCP
+          env:
+            # Same durable store as the assistant: the CNPG-generated
+            # `conversation-store-app` secret's `uri` points at the cluster's
+            # -rw service. The apiserver reads (list/get/messages) the tables
+            # the assistant writes; it fails fast if the store is unreachable.
+            - name: CONVERSATION_STORE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: conversation-store-app
+                  key: uri
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

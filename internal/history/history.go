@@ -11,6 +11,7 @@ package history
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -18,6 +19,35 @@ import (
 
 	"github.com/milo-os/assistant/agentcore"
 )
+
+// ErrConversationNotFound is returned by [Reader.GetConversation] when no
+// conversation exists for the (project, context) key. Callers (the apiserver
+// read view) map it to a 404.
+var ErrConversationNotFound = errors.New("conversation not found")
+
+// Message is a single stored message row, exposed to the read view
+// (apiserver messages subresource). seq is the absolute 1-based message index
+// within the conversation.
+type Message struct {
+	Seq       int64
+	Role      string
+	Content   string
+	CreatedAt time.Time
+}
+
+// Reader is the read-only view over stored conversations, consumed by the
+// conversations apiserver. It is separate from [Store] (the chat hot path) and
+// [Lister] so the apiserver depends only on what it needs. Both [MemoryStore]
+// and [PostgresStore] implement it.
+type Reader interface {
+	Lister
+	// GetConversation returns one conversation's metadata, or
+	// [ErrConversationNotFound] if the (project, context) key is unknown.
+	GetConversation(ctx context.Context, projectName, contextID string) (Conversation, error)
+	// Messages returns a conversation's messages, oldest first (ascending seq).
+	// An unknown conversation yields nil, nil.
+	Messages(ctx context.Context, projectName, contextID string) ([]Message, error)
+}
 
 // Turn is one completed exchange: what the user said and what the assistant
 // answered.
@@ -93,6 +123,7 @@ type storeKey struct {
 var (
 	_ Store  = (*MemoryStore)(nil)
 	_ Lister = (*MemoryStore)(nil)
+	_ Reader = (*MemoryStore)(nil)
 )
 
 // NewMemoryStore returns an empty in-memory store.
@@ -168,6 +199,51 @@ func (s *MemoryStore) ListConversations(_ context.Context, projectName string, l
 	sort.Slice(out, func(i, j int) bool { return out[i].LastActiveAt.After(out[j].LastActiveAt) })
 	if len(out) > limit {
 		out = out[:limit]
+	}
+	return out, nil
+}
+
+// GetConversation implements [Reader].
+func (s *MemoryStore) GetConversation(_ context.Context, projectName, contextID string) (Conversation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := storeKey{project: projectName, context: contextID}
+	m, ok := s.meta[key]
+	if !ok {
+		return Conversation{}, ErrConversationNotFound
+	}
+	return Conversation{
+		ProjectName:  projectName,
+		ContextID:    contextID,
+		CreatedAt:    m.createdAt,
+		LastActiveAt: m.lastActiveAt,
+		TurnCount:    int64(len(s.turns[key])),
+	}, nil
+}
+
+// Messages implements [Reader]. Each stored turn expands to a user message
+// (seq 2k-1) and an assistant message (seq 2k); createdAt is the
+// conversation's last-active time since the memory store keeps no per-message
+// timestamp (the durable store does).
+func (s *MemoryStore) Messages(_ context.Context, projectName, contextID string) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := storeKey{project: projectName, context: contextID}
+	turns := s.turns[key]
+	if len(turns) == 0 {
+		return nil, nil
+	}
+	ts := time.Time{}
+	if m, ok := s.meta[key]; ok {
+		ts = m.lastActiveAt
+	}
+	out := make([]Message, 0, 2*len(turns))
+	for i, t := range turns {
+		seq := int64(2 * i)
+		out = append(out,
+			Message{Seq: seq + 1, Role: "user", Content: t.UserText, CreatedAt: ts},
+			Message{Seq: seq + 2, Role: "assistant", Content: t.AssistantText, CreatedAt: ts},
+		)
 	}
 	return out, nil
 }

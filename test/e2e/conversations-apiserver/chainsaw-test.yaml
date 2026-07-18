@@ -1,0 +1,118 @@
+# Conversations aggregated apiserver: the read view over durable chat history
+# is reachable through the kube-aggregator. Seed a real conversation via the
+# chat path (patch CLI -> assistant), then prove a milo k8s identity can
+# discover it with plain kubectl: list, get, and the messages subresource all
+# work AND are project-scoped — a project with no conversations lists empty
+# (not an error), which is the tenancy-isolation contract.
+#
+# Self-contained: seeds its own conversation with a unique marker so the run
+# does not depend on whatever history already exists in the store. Seeding
+# posts over the port the agent card advertises (PUBLIC_BASE_URL, :1986 in dev),
+# reusing an existing `task dev:forward` if one is already up and otherwise
+# standing up its own short-lived port-forward.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: conversations-apiserver
+spec:
+  # The environment is persistent — never delete anything from it.
+  skipDelete: true
+  steps:
+    - name: apiservice-available
+      try:
+        - assert:
+            resource:
+              apiVersion: apiregistration.k8s.io/v1
+              kind: APIService
+              metadata:
+                name: v1alpha1.assistant.miloapis.com
+              status:
+                conditions:
+                  - type: Available
+                    status: "True"
+    - name: seed-and-discover
+      try:
+        - script:
+            timeout: 240s
+            content: |
+              set -euo pipefail
+              PROJECT=demo-project
+              EMPTY_PROJECT=e2e-no-conversations
+              # The agent card advertises PUBLIC_BASE_URL (:1986 in dev), and the
+              # a2a client posts to that URL, so seeding must reach :1986. Reuse
+              # an existing forward if one is up; otherwise start our own.
+              PORT=1986
+              if ! curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
+                kubectl -n patch-playground port-forward svc/assistant ${PORT}:7820 >/dev/null 2>&1 &
+                PF=$!
+                trap 'kill ${PF} 2>/dev/null || true' EXIT
+                for i in $(seq 1 30); do
+                  curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null && break
+                  [ "$i" = 30 ] && { echo "assistant not reachable over port-forward" >&2; exit 1; }
+                  sleep 1
+                done
+              fi
+
+              REPO="$(git rev-parse --show-toplevel)"
+              cd "${REPO}"
+              export PATCH_URL="http://127.0.0.1:${PORT}" PATCH_TOKEN=pg-demo-token
+
+              # Seed one conversation with a unique marker so we can find it
+              # unambiguously in the store regardless of prior history.
+              MARKER="apiserver-e2e-$(date +%s)-$$"
+              CTX=$(go run ./cmd/patch chat "remember the marker ${MARKER}" --project "${PROJECT}" 2>&1 >/dev/null \
+                | sed -n 's/^context: \([^ ]*\).*/\1/p')
+              [ -n "${CTX}" ] || { echo "no contextId from seed turn" >&2; exit 1; }
+              echo "seeded conversation ${CTX} in ${PROJECT} (marker ${MARKER})"
+
+              # get: the single conversation is served with the expected shape.
+              GOT=$(kubectl get conversation "${CTX}" -n "${PROJECT}" \
+                -o jsonpath='{.metadata.name}/{.metadata.namespace}/{.status.messageCount}')
+              echo "get -> ${GOT}"
+              [ "${GOT}" = "${CTX}/${PROJECT}/1" ] \
+                || { echo "FAIL: get returned unexpected shape ${GOT}" >&2; exit 1; }
+
+              # list: the seeded conversation appears in the project's listing.
+              kubectl get conversations -n "${PROJECT}" -o jsonpath='{.items[*].metadata.name}' \
+                | tr ' ' '\n' | grep -qx "${CTX}" \
+                || { echo "FAIL: seeded conversation not in project list" >&2; exit 1; }
+              echo "PASS: list includes the seeded conversation"
+
+              # messages subresource: the whole transcript is embedded, and the
+              # user turn carries the marker we seeded.
+              MSGS=$(kubectl get --raw \
+                "/apis/assistant.miloapis.com/v1alpha1/namespaces/${PROJECT}/conversations/${CTX}/messages")
+              echo "messages -> ${MSGS}"
+              echo "${MSGS}" | grep -qF "${MARKER}" \
+                || { echo "FAIL: messages subresource missing the seeded marker" >&2; exit 1; }
+              echo "${MSGS}" | grep -q '"role":"assistant"' \
+                || { echo "FAIL: messages subresource missing the assistant reply" >&2; exit 1; }
+              echo "PASS: messages subresource returns the transcript"
+
+              # Tenancy isolation: a project with no conversations lists empty —
+              # an empty collection, not a 404/error. The seeded conversation in
+              # ${PROJECT} must NOT leak into ${EMPTY_PROJECT}.
+              EMPTY=$(kubectl get conversations -n "${EMPTY_PROJECT}" -o jsonpath='{.items}')
+              echo "empty-project items -> ${EMPTY}"
+              [ "${EMPTY}" = "[]" ] \
+                || { echo "FAIL: expected empty list for ${EMPTY_PROJECT}, got ${EMPTY}" >&2; exit 1; }
+              kubectl get conversation "${CTX}" -n "${EMPTY_PROJECT}" >/dev/null 2>&1 \
+                && { echo "FAIL: conversation leaked across projects" >&2; exit 1; }
+              echo "PASS: cross-project isolation (empty list, no leak)"
+
+              # Not-found: pin the REST server's actual response for a missing
+              # conversation (via --raw, bypassing kubectl's client-side
+              # "does the namespace exist" courtesy follow-up, which rewrites
+              # the error to a misleading "namespace not found" for a logical
+              # project namespace that has no backing core/v1 Namespace object
+              # — that's a kubectl display quirk, not a server bug; this
+              # asserts what the server itself actually returns).
+              STATUS=$(kubectl get --raw \
+                "/apis/assistant.miloapis.com/v1alpha1/namespaces/${PROJECT}/conversations/does-not-exist" 2>&1) \
+                && { echo "FAIL: expected a 404 for a missing conversation, got success: ${STATUS}" >&2; exit 1; }
+              echo "not-found response -> ${STATUS}"
+              echo "${STATUS}" | grep -qF 'Error from server (NotFound)' \
+                || { echo "FAIL: expected a NotFound error, got: ${STATUS}" >&2; exit 1; }
+              echo "${STATUS}" | grep -qF 'conversations.assistant.miloapis.com "does-not-exist" not found' \
+                || { echo "FAIL: expected the conversation-specific not-found message, got: ${STATUS}" >&2; exit 1; }
+              echo "PASS: not-found returns the real conversation 404, not a namespace error"

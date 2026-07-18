@@ -1,6 +1,9 @@
 # Conversation aggregated apiserver — design & build plan
 
-Status: **Phase 1 complete** (API types + scheme, commit `dd63ecd`). Phases 2–5 open.
+Status: **All phases complete.** Phase 1 (API types + scheme, `dd63ecd`), Phases 2–4
+(bespoke REST + apiserver binary, config/dev-overlay wiring, kubectl-based CLI) live-verified
+against the kind dev stack, and Phase 5 (unit + chainsaw e2e) done — see the per-phase
+notes in the [Phasing](#phasing) section below for deviations.
 
 This is the implementation spec for exposing conversations as a Kubernetes KRM
 resource via a **milo aggregated API server**, so milo users authenticate with
@@ -170,11 +173,12 @@ set `insecureSkipTLSVerify: true` and rely on in-cluster authn/authz (kind).
 
 ---
 
-## CLI / portal integration (list + resume)
+## CLI / portal integration (list + resume) — DONE (Phase 4)
 
-- `patch conversations list` (client-go against `assistant.miloapis.com`, or `kubectl get conversations -n <project>`) → pick a `context-id`.
+- `patch conversations list --project <p>` — table (context-id, created, last-active, message count). `patch conversations show <context-id> --project <p>` — full transcript. Both **shell out to `kubectl`** (`get conversations` / raw `messages` subresource GET) rather than embedding client-go: `cmd/patch` is a deliberately thin `a2a-go` client with no k8s client dep, and kubectl already carries the kubeconfig + serving-cert TLS trust for the aggregated apiserver (the verified Phase 3 path). The command deserializes into the local `pkg/apis/assistant/v1alpha1` types (pure apimachinery, already a dep). Auth is the caller's **k8s identity via `KUBECONFIG`/`--kubeconfig`**, not `PATCH_TOKEN` — consistent with decision #7 (an apiserver is not a chat transport). Code: `cmd/patch/conversations.go`.
 - Resume: `patch chat --context-id <id>` (or `task dev:chat CTX=<id>` / the TUI's `--context-id`).
-- Nice-to-have: a **conversation picker in the Bubble Tea TUI** (`cmd/patch/chat_tui.go`) — open to a recent-conversations list, pick to reopen. Plus a `task dev:chats` helper.
+- `task dev:chats` helper added (list; `ID=<id>` shows one transcript). Reads the cluster directly via `KUBECONFIG` — no port-forward (unlike `dev:chat`), since conversations come from the apiserver, not the A2A service.
+- Deferred: the **Bubble Tea TUI conversation picker** (`cmd/patch/chat_tui.go`) — a nice-to-have that adds an interactive selection state hard to test headlessly; the list/show commands cover the discovery deliverable.
 
 ---
 
@@ -183,8 +187,20 @@ set `insecureSkipTLSVerify: true` and rely on in-cluster authn/authz (kind).
 - **Phase 1 — DONE** (`dd63ecd`): `pkg/apis/assistant` types + scheme; k8s.io/apiserver v0.36.0 deps; Go 1.26.
 - **Phase 2:** bespoke REST over `internal/history` (+ `GetConversation`), `internal/apiserver`, `cmd/conversations-apiserver/serve.go` with delegated authn/authz, `internal/tenant`. Add `pkg/generated/openapi`. Deliverable: the binary runs locally against the store; `curl`/kubectl through a local secure port lists/gets.
 - **Phase 3:** `config/` (deployment, service, RBAC, APIService, milo ProtectedResource/Roles) + dev overlay wiring into `task dev:setup`. Deliverable: `kubectl get conversations -n demo-project` works in the kind cluster (in-cluster authz).
-- **Phase 4:** CLI (`patch conversations list`) + optional TUI conversation picker; `task dev:chats`.
-- **Phase 5:** tests — unit (REST over the store) + e2e (chainsaw: kubectl list/get against kind).
+- **Phase 4 — DONE:** CLI (`patch conversations list`/`show`, kubectl-based) + `task dev:chats`. TUI picker deferred.
+- **Phase 5 — DONE:** tests. Unit — `internal/apiserver/registry/conversation/storage_test.go`
+  (fake-Reader get/list/404/tenancy/messages, from Phase 2), plus new
+  `internal/tenant/tenant_test.go` (ProjectFromContext: namespace-only dev path, Extra
+  match/mismatch→Forbidden, non-Project parent ignored, missing/empty namespace→BadRequest,
+  multi-valued Extra) and `cmd/conversations-apiserver/serve_test.go` (the required-DSN
+  `validate()` guard). E2e — `test/e2e/conversations-apiserver/chainsaw-test.yaml`: asserts the
+  APIService is Available, seeds a marked conversation via the chat path, then proves plain
+  `kubectl get conversations`/`get conversation <id>` + the raw `messages` subresource all work
+  and are project-scoped (a project with no conversations lists `[]`, not an error; no
+  cross-project leak). Runs green via `task e2e -- test/e2e/conversations-apiserver`.
+  Deviation: seeding posts to the agent card's advertised `PUBLIC_BASE_URL` (`:1986` in dev),
+  reusing an existing `task dev:forward` or standing up its own, since the a2a client dials the
+  card URL rather than the fetch URL.
 
 ---
 

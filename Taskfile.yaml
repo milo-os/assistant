@@ -18,6 +18,7 @@ dotenv: ['.env']
 
 vars:
   IMAGE_ASSISTANT: ghcr.io/milo-os/assistant
+  IMAGE_APISERVER: ghcr.io/milo-os/conversations-apiserver
   IMAGE_STREAMCO: ghcr.io/milo-os/assistant-streamco
   IMAGE_SINK: ghcr.io/milo-os/assistant-sink
   IMAGE_TAG: dev
@@ -96,14 +97,16 @@ tasks:
     cmds:
       - mkdir -p deploy/.build
       - CGO_ENABLED=0 GOOS=linux GOARCH={{.GOARCH}} go build -trimpath -ldflags="-s -w" -o deploy/.build/assistant ./cmd/assistant
+      - CGO_ENABLED=0 GOOS=linux GOARCH={{.GOARCH}} go build -trimpath -ldflags="-s -w" -o deploy/.build/conversations-apiserver ./cmd/conversations-apiserver
       - docker build --provenance=false --sbom=false -t {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} -f deploy/assistant.Dockerfile deploy/.build
+      - docker build --provenance=false --sbom=false -t {{.IMAGE_APISERVER}}:{{.IMAGE_TAG}} -f deploy/conversations-apiserver.Dockerfile deploy/.build
       - docker build --provenance=false --sbom=false -t {{.IMAGE_STREAMCO}}:{{.IMAGE_TAG}} -f deploy/streamco.Dockerfile e2e/streamco
       - docker build --provenance=false --sbom=false -t {{.IMAGE_SINK}}:{{.IMAGE_TAG}} -f deploy/sink.Dockerfile e2e/sink
 
   dev:load:
     desc: Load the dev images into the kind cluster
     cmds:
-      - kind load docker-image {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} {{.IMAGE_STREAMCO}}:{{.IMAGE_TAG}} {{.IMAGE_SINK}}:{{.IMAGE_TAG}} --name {{.TEST_INFRA_CLUSTER_NAME}}
+      - kind load docker-image {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} {{.IMAGE_APISERVER}}:{{.IMAGE_TAG}} {{.IMAGE_STREAMCO}}:{{.IMAGE_TAG}} {{.IMAGE_SINK}}:{{.IMAGE_TAG}} --name {{.TEST_INFRA_CLUSTER_NAME}}
 
   dev:deploy:
     desc: Deploy dependencies + the stack (staged, with waits). OVERLAY=dev|dev-catalog
@@ -204,6 +207,12 @@ tasks:
       - kubectl -n {{.NS}} wait --for=condition=Programmed gateway/patch-playground --timeout=300s
       - kubectl -n {{.NS}} rollout status deploy/assistant --timeout=300s
         || kubectl -n {{.NS}} wait --for=condition=Available deploy/assistant --timeout=120s
+      # Conversations aggregated apiserver + its APIService registration. Wait
+      # for the pod to roll out, then for the kube-aggregator to mark the
+      # APIService Available (it probes the backing Service's /healthz).
+      - kubectl -n {{.NS}} rollout status deploy/conversations-apiserver --timeout=300s
+        || kubectl -n {{.NS}} wait --for=condition=Available deploy/conversations-apiserver --timeout=120s
+      - kubectl wait --for=condition=Available apiservice/v1alpha1.assistant.miloapis.com --timeout=120s
       - 'echo "dev environment ready — chat with it:  task dev:chat   (one-shot: task dev:chat MSG=\"Diagnose pipeline p-1 for StreamCo\")"'
 
   dev:redeploy:
@@ -252,6 +261,23 @@ tasks:
           go run ./cmd/patch chat -i --project {{.PROJECT}} {{if .CTX}}--context-id {{.CTX}}{{end}}
         else
           go run ./cmd/patch chat --tui --project {{.PROJECT}} {{if .CTX}}--context-id {{.CTX}}{{end}}
+        fi
+
+  dev:chats:
+    desc: >-
+      List this project's conversations from the aggregated apiserver, then
+      resume one with `task dev:chat CTX=<context-id>`. Show one transcript with
+      ID=<context-id>. Reads the cluster directly via kubectl (the apiserver
+      read view) — no port-forward, uses KUBECONFIG not PATCH_URL/PATCH_TOKEN.
+    silent: true
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+    cmds:
+      - |
+        if [ -n "{{.ID}}" ]; then
+          go run ./cmd/patch conversations show {{.ID}} --project {{.PROJECT}}
+        else
+          go run ./cmd/patch conversations list --project {{.PROJECT}}
         fi
 
   dev:card:

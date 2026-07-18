@@ -4,8 +4,14 @@
 # no memory (negative control). The stub model's recall script makes this
 # deterministic without a real model key.
 #
-# Uses its own short-lived port-forward on a dedicated port so it never
-# depends on (or fights with) `task dev:forward`.
+# Must forward on :1986 specifically, not an arbitrary dedicated port: the
+# patch CLI's a2a client fetches the agent card from PATCH_URL, then POSTs to
+# whatever URL the card itself advertises (PUBLIC_BASE_URL, hardcoded to
+# http://localhost:1986 in config/base/assistant.yaml) — not the URL it was
+# fetched from. A forward on any other port only serves the initial card
+# fetch and the chat call then fails to reach an unforwarded :1986. Reuses an
+# existing `task dev:forward` if one is already up (same convention as the
+# conversations-apiserver suite's seeding step) and otherwise starts its own.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -19,15 +25,17 @@ spec:
             timeout: 240s
             content: |
               set -euo pipefail
-              PORT=18620
-              kubectl -n patch-playground port-forward svc/assistant ${PORT}:7820 >/dev/null 2>&1 &
-              PF=$!
-              trap 'kill ${PF} 2>/dev/null || true' EXIT
-              for i in $(seq 1 30); do
-                curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null && break
-                [ "$i" = 30 ] && { echo "assistant not reachable over port-forward" >&2; exit 1; }
-                sleep 1
-              done
+              PORT=1986
+              if ! curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
+                kubectl -n patch-playground port-forward svc/assistant ${PORT}:7820 >/dev/null 2>&1 &
+                PF=$!
+                trap 'kill ${PF} 2>/dev/null || true' EXIT
+                for i in $(seq 1 30); do
+                  curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null && break
+                  [ "$i" = 30 ] && { echo "assistant not reachable over port-forward" >&2; exit 1; }
+                  sleep 1
+                done
+              fi
               REPO="$(git rev-parse --show-toplevel)"
               cd "${REPO}"
               export PATCH_URL="http://127.0.0.1:${PORT}" PATCH_TOKEN=pg-demo-token
