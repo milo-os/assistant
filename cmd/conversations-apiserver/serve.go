@@ -26,6 +26,7 @@ import (
 	_ "k8s.io/component-base/logs/json/register"
 
 	assistantapiserver "github.com/milo-os/assistant/internal/apiserver"
+	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	generatedopenapi "github.com/milo-os/assistant/pkg/generated/openapi"
 )
@@ -92,7 +93,7 @@ func newServeCommand() *cobra.Command {
 	return cmd
 }
 
-func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config, *history.PostgresStore, error) {
+func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config, func(), error) {
 	if err := o.Recommended.SecureServing.MaybeDefaultWithSelfSignedCerts("localhost", nil, nil); err != nil {
 		return nil, nil, fmt.Errorf("create self-signed certificates: %w", err)
 	}
@@ -126,10 +127,22 @@ func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config,
 		return store.Ping(pingCtx)
 	}))
 
+	// Same database, a separate table (internal/gapreport) — the
+	// capabilitygapreports resource is a read view over it, same shape as
+	// conversations over internal/history.
+	gapStore, err := gapreport.NewPostgresStore(ctx, o.PostgresDSN, slog.Default())
+	if err != nil {
+		store.Close()
+		return nil, nil, fmt.Errorf("connect gap-report store: %w", err)
+	}
+
 	return &assistantapiserver.Config{
-		GenericConfig: genericConfig,
-		ExtraConfig:   assistantapiserver.ExtraConfig{Reader: store},
-	}, store, nil
+			GenericConfig: genericConfig,
+			ExtraConfig:   assistantapiserver.ExtraConfig{Reader: store, GapReports: gapStore},
+		}, func() {
+			store.Close()
+			gapStore.Close()
+		}, nil
 }
 
 func (o *serverOptions) run(ctx context.Context) error {
@@ -138,11 +151,11 @@ func (o *serverOptions) run(ctx context.Context) error {
 	}
 	defer logs.FlushLogs()
 
-	cfg, store, err := o.config(ctx)
+	cfg, cleanup, err := o.config(ctx)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer cleanup()
 
 	server, err := cfg.Complete().New()
 	if err != nil {

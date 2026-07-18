@@ -109,3 +109,61 @@ func convert_assistant_ConversationMessages_To_v1alpha1(in *assistant.Conversati
 	out.Items = toV1Messages(in.Items)
 	return nil
 }
+
+// ----------------------------------------------------------------------------
+// CapabilityGapReport
+// ----------------------------------------------------------------------------
+
+func convert_v1alpha1_CapabilityGapReport_To_assistant(in *CapabilityGapReport, out *assistant.CapabilityGapReport) error {
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Status = assistant.CapabilityGapReportStatus{
+		ServiceName:     in.Status.ServiceName,
+		ConsumerProject: in.Status.ConsumerProject,
+		ContextID:       in.Status.ContextID,
+		Capability:      in.Status.Capability,
+		Summary:         in.Status.Summary,
+	}
+	return nil
+}
+
+func convert_assistant_CapabilityGapReport_To_v1alpha1(in *assistant.CapabilityGapReport, out *CapabilityGapReport) error {
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Status = CapabilityGapReportStatus{
+		ServiceName:     in.Status.ServiceName,
+		ConsumerProject: in.Status.ConsumerProject,
+		ContextID:       in.Status.ContextID,
+		Capability:      in.Status.Capability,
+		Summary:         in.Status.Summary,
+	}
+	return nil
+}
+
+func convert_v1alpha1_CapabilityGapReportList_To_assistant(in *CapabilityGapReportList, out *assistant.CapabilityGapReportList) error {
+	out.TypeMeta = in.TypeMeta
+	out.ListMeta = in.ListMeta
+	if in.Items != nil {
+		out.Items = make([]assistant.CapabilityGapReport, len(in.Items))
+		for i := range in.Items {
+			if err := convert_v1alpha1_CapabilityGapReport_To_assistant(&in.Items[i], &out.Items[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func convert_assistant_CapabilityGapReportList_To_v1alpha1(in *assistant.CapabilityGapReportList, out *CapabilityGapReportList) error {
+	out.TypeMeta = in.TypeMeta
+	out.ListMeta = in.ListMeta
+	if in.Items != nil {
+		out.Items = make([]CapabilityGapReport, len(in.Items))
+		for i := range in.Items {
+			if err := convert_assistant_CapabilityGapReport_To_v1alpha1(&in.Items[i], &out.Items[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

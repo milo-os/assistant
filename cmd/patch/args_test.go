@@ -74,6 +74,26 @@ func TestParseArgs(t *testing.T) {
 			want: command{kind: cmdError, errMsg: `conversations: expected "list" or "show", got "delete"`},
 		},
 		{
+			name: "gaps list",
+			argv: []string{"gaps", "list", "--project", "streamco-platform"},
+			want: command{kind: cmdGapList, project: "streamco-platform"},
+		},
+		{
+			name: "gap alias list --json --kubeconfig",
+			argv: []string{"gap", "list", "--project", "streamco-platform", "--json", "--kubeconfig", "/kc"},
+			want: command{kind: cmdGapList, project: "streamco-platform", json: true, kubeconfig: "/kc"},
+		},
+		{
+			name: "gaps missing project",
+			argv: []string{"gaps", "list"},
+			want: command{kind: cmdError, errMsg: "gaps list: --project <name> is required"},
+		},
+		{
+			name: "gaps bad subcommand",
+			argv: []string{"gaps", "delete", "--project", "streamco-platform"},
+			want: command{kind: cmdError, errMsg: `gaps: expected "list", got "delete"`},
+		},
+		{
 			name: "task get",
 			argv: []string{"task", "get", "t-1"},
 			want: command{kind: cmdTaskGet, id: "t-1"},

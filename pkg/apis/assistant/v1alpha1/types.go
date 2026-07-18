@@ -71,3 +71,58 @@ type ConversationMessage struct {
 	Content   string      `json:"content"`
 	CreatedAt metav1.Time `json:"createdAt"`
 }
+
+// ----------------------------------------------------------------------------
+// CapabilityGapReport — a provider service's own record that it was missing a
+// tool/lookup/knowledge a user needed. See internal/gapreport.
+// ----------------------------------------------------------------------------
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName=gapreport
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Service",type=string,JSONPath=`.status.serviceName`
+// +kubebuilder:printcolumn:name="Capability",type=string,JSONPath=`.status.capability`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +genclient
+
+// CapabilityGapReport is one capability-gap report. name == the report id;
+// namespace == the PROVIDER project (spec.reportingProject on the capability
+// document that raised it) — never the consumer project the conversation ran
+// in, which is carried only as provenance in Status. Read-only (written by
+// the report_capability_gap tool, surfaced here for list/get).
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type CapabilityGapReport struct {
+	metav1.TypeMeta `json:",inline"`
+	// Name = report id, Namespace = provider project, CreationTimestamp = created_at.
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	// +optional
+	Status CapabilityGapReportStatus `json:"status,omitempty"`
+}
+
+// CapabilityGapReportStatus carries the report's content.
+type CapabilityGapReportStatus struct {
+	// ServiceName identifies the provider service the gap belongs to.
+	// +optional
+	ServiceName string `json:"serviceName,omitempty"`
+	// ConsumerProject is the project the conversation happened in — provenance only.
+	// +optional
+	ConsumerProject string `json:"consumerProject,omitempty"`
+	// ContextID is the conversation the gap arose in — provenance only.
+	// +optional
+	ContextID string `json:"contextID,omitempty"`
+	// Capability is a short description of what was missing.
+	// +optional
+	Capability string `json:"capability,omitempty"`
+	// Summary is what the user was trying to do.
+	// +optional
+	Summary string `json:"summary,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type CapabilityGapReportList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []CapabilityGapReport `json:"items"`
+}

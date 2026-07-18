@@ -13,7 +13,9 @@ import (
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/klog/v2"
 
+	"github.com/milo-os/assistant/internal/apiserver/registry/capabilitygapreport"
 	"github.com/milo-os/assistant/internal/apiserver/registry/conversation"
+	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/pkg/apis/assistant/install"
 	"github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
@@ -40,10 +42,11 @@ func init() {
 	)
 }
 
-// ExtraConfig carries the conversations-specific backend into New(): the
-// read-only view over the shared conversation store.
+// ExtraConfig carries the assistant-group backends into New(): the read-only
+// views over the shared conversation store and the shared gap-report store.
 type ExtraConfig struct {
-	Reader history.Reader
+	Reader     history.Reader
+	GapReports gapreport.Store
 }
 
 // Config is the conversations apiserver config: the generic recommended config
@@ -92,6 +95,7 @@ func (c completedConfig) New() (*ConversationServer, error) {
 	v1alpha1Storage := map[string]rest.Storage{
 		"conversations":          conversation.NewConversationREST(c.ExtraConfig.Reader),
 		"conversations/messages": conversation.NewMessagesREST(c.ExtraConfig.Reader),
+		"capabilitygapreports":   capabilitygapreport.NewCapabilityGapReportREST(c.ExtraConfig.GapReports),
 	}
 	apiGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = v1alpha1Storage
 

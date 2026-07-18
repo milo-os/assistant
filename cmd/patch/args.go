@@ -14,6 +14,7 @@
 //	patch chat -i --project <p> [--context-id <c>]
 //	patch conversations list --project <p> [--json]
 //	patch conversations show <context-id> --project <p> [--json]
+//	patch gaps list --project <p> [--json]
 //	patch task get <id> [--json]
 //	patch task cancel <id> [--json]
 //
@@ -32,6 +33,7 @@ const (
 	cmdChat
 	cmdConvList
 	cmdConvShow
+	cmdGapList
 	cmdTaskGet
 	cmdTaskCancel
 )
@@ -125,6 +127,26 @@ func parseArgs(argv []string) command {
 		}
 		common.kind = cmdConvShow
 		common.contextID = id
+		return common
+
+	case "gaps", "gap":
+		// A provider's own read view of capability-gap reports — the project
+		// here is the PROVIDER's project (spec.reportingProject), never the
+		// consumer project a conversation ran in. Same apiserver read path
+		// as conversations: kubectl + your k8s identity, no PATCH_TOKEN.
+		var sub string
+		if len(rest) > 0 {
+			sub = rest[0]
+		}
+		if sub != "list" {
+			return command{kind: cmdError, errMsg: `gaps: expected "list", got "` + sub + `"`}
+		}
+		if flags.project == "" {
+			return command{kind: cmdError, errMsg: "gaps list: --project <name> is required"}
+		}
+		common.kind = cmdGapList
+		common.project = flags.project
+		common.kubeconfig = flags.kubeconfig
 		return common
 
 	case "task":
@@ -264,11 +286,14 @@ Usage:
   patch chat --tui --project <name> [--context-id <c>] ["<message>"]
   patch conversations list --project <name> [--json]
   patch conversations show <context-id> --project <name> [--json]
+  patch gaps list --project <name> [--json]
   patch task get <id> [--json]
   patch task cancel <id> [--json]
 
 Options:
-  --project <name>    Milo project the task runs against (chat, conversations)
+  --project <name>    Milo project the task runs against (chat, conversations,
+                      gaps — for gaps this is the PROVIDER's own project, see
+                      below, not the project a conversation ran in)
   --context-id <c>    Continue an existing conversation (chat); the service
                       replays that conversation's history into the turn
   -i, --interactive   Multi-turn chat session; the conversation id is kept
@@ -302,6 +327,14 @@ Conversations:
   a read view under platform authz, separate from the chat transport. Pick a
   context id here, then resume it with 'patch chat --context-id <id>'.
 
+Gaps:
+  'gaps' lists capability-gap reports: records a provider service's own team
+  can review when the assistant told a user it lacked a tool/lookup/piece of
+  knowledge that service should have provided. --project here is the
+  PROVIDER's own project (spec.reportingProject on its capability document),
+  never the project the conversation that hit the gap ran in — a provider
+  only ever sees reports attributed to itself.
+
 Examples:
   PATCH_URL=http://localhost:7820 PATCH_TOKEN=dev-token \
     patch chat "Diagnose pipeline p-1 for StreamCo" --project demo-project
@@ -309,4 +342,5 @@ Examples:
   patch card --url http://localhost:7820
   patch conversations list --project demo-project
   patch conversations show 019f7293-3579-7d8e-8233-4da8bc900405 --project demo-project
+  patch gaps list --project streamco-platform
 `

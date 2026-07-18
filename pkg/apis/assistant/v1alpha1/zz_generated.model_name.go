@@ -29,3 +29,18 @@ func (in ConversationMessages) OpenAPIModelName() string {
 func (in ConversationStatus) OpenAPIModelName() string {
 	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.ConversationStatus"
 }
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in CapabilityGapReport) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReport"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in CapabilityGapReportList) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReportList"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in CapabilityGapReportStatus) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReportStatus"
+}

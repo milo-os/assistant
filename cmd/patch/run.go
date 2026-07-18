@@ -32,6 +32,10 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 		return runConversationsList(ctx, cmd, io)
 	case cmdConvShow:
 		return runConversationsShow(ctx, cmd, io)
+	case cmdGapList:
+		// Same apiserver read path as conversations — kubectl + k8s identity,
+		// no PATCH_URL/PATCH_TOKEN.
+		return runGapsList(ctx, cmd, io)
 	}
 
 	baseURL := cmd.url
