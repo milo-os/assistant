@@ -1,0 +1,87 @@
+# Opt-in observability wiring for the shared dev cluster's telemetry stack
+# (datum-cloud/test-infra's `task test-infra:install-observability` —
+# Victoria Metrics + Tempo + Grafana + an OTel Collector in the
+# `telemetry-system` namespace; see docs/dashboards-and-alerts.md). This is a
+# Component, not a plain resource list, so it can layer onto either the
+# `dev` or `dev-anthropic` overlay without duplicating them.
+#
+# Deliberately NOT referenced by config/base or by the plain `dev`/
+# `dev-anthropic` overlays: a bare `task dev:setup` (no observability stack
+# installed) must keep working unmodified. internal/tracing.Setup only turns
+# on real OTLP export when OTEL_EXPORTER_OTLP_ENDPOINT is set — with it unset
+# (the plain-overlay default) tracing is a genuine no-op (no dial, no export
+# errors), so adding this component is purely additive and safe to skip.
+#
+# What this adds:
+#   - OTEL_EXPORTER_OTLP_ENDPOINT on the assistant and conversations-apiserver
+#     Deployments, pointed at the collector's OTLP/gRPC port (4317). The
+#     tracing SDK (internal/tracing) reads this via the standard OTel env var,
+#     no code change needed.
+#   - A ServiceMonitor for the assistant's plaintext :7820/metrics endpoint,
+#     so vmagent (deployed with selectAllByDefault: true — confirmed live,
+#     no label restriction needed) scrapes it into Victoria Metrics.
+#   - alerts.yaml (a PrometheusRule — VM's operator auto-converts it to a
+#     VMRule, confirmed live) and grafanadashboard.yaml (a GrafanaDashboard CR
+#     wrapping grafana-dashboard.json via a generated ConfigMap, imported
+#     cross-namespace into the telemetry-system Grafana instance — confirmed
+#     live, renders without import errors).
+#
+# NOT included: a ServiceMonitor for conversations-apiserver. Its /metrics
+# endpoint (from the generic k8s.io/apiserver library) is served over HTTPS
+# with delegated SubjectAccessReview authorization
+# (config/base/conversations-apiserver/deployment.yaml only allows
+# /healthz,/readyz,/livez without auth) — scraping it would need a bearer
+# token bound to a ClusterRole granting `get` on the nonResourceURL
+# `/metrics`, wired to vmagent's ServiceAccount. That's a real (if small)
+# RBAC change to a shared operator's ServiceAccount, out of scope for this
+# pass; tracked as follow-up rather than half-wired here.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - servicemonitor-assistant.yaml
+  - grafanadashboard.yaml
+  - alerts.yaml
+configMapGenerator:
+  - name: assistant-grafana-dashboard
+    namespace: patch-playground
+    files:
+      - grafana-dashboard.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: agent-framework-playground
+patches:
+  - target:
+      kind: Deployment
+      name: assistant
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: assistant
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: assistant
+                env:
+                  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                    value: http://otel-collector-collector.telemetry-system.svc.cluster.local:4317
+  - target:
+      kind: Deployment
+      name: conversations-apiserver
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: conversations-apiserver
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: apiserver
+                env:
+                  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                    value: http://otel-collector-collector.telemetry-system.svc.cluster.local:4317

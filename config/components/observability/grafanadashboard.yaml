@@ -1,0 +1,32 @@
+# Wraps config/components/observability/grafana-dashboard.json (embedded via the
+# adjacent configMapGenerator, see kustomization.yaml) as a Grafana-operator
+# GrafanaDashboard CR, so it's auto-imported into the telemetry-system
+# Grafana instance instead of requiring a manual "Import Dashboard" click.
+#
+# Lives in patch-playground (alongside the app it dashboards), NOT
+# telemetry-system: the Grafana Operator supports cross-namespace dashboard
+# import (gated per-dashboard by allowCrossNamespaceImport, default false)
+# — it is NOT a global restriction from the Grafana instance's own
+# allowCrossNamespaceImport setting, which is a different field entirely
+# (that one only governs the victoria-metrics-k8s-stack chart's own
+# auto-generated dashboards in telemetry-system). Confirmed live: with
+# allowCrossNamespaceImport: true here and instanceSelector matching the
+# telemetry-system Grafana instance's `dashboards: grafana` label, this
+# CR's NoMatchingInstances condition clears and the dashboard renders.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: assistant-overview
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/name: assistant
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  allowCrossNamespaceImport: true
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana"
+  configMapRef:
+    name: assistant-grafana-dashboard
+    key: grafana-dashboard.json

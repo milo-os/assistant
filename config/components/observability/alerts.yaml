@@ -1,15 +1,25 @@
-# PrometheusRule for the assistant service. Requires prometheus-operator to be
-# installed and a Prometheus instance configured to watch this rule (via
-# ruleSelector/ruleNamespaceSelector matching the labels below) AND actually
-# scraping this service's /metrics endpoint (see internal/server/metrics.go).
+# PrometheusRule for the assistant service. Part of the opt-in observability
+# component (config/components/observability) — layered onto dev/dev-anthropic
+# via the dev-observability/dev-anthropic-observability overlays, NOT applied
+# by the plain dev overlay. Requires the shared test-infra cluster's telemetry
+# stack (`task test-infra:install-observability`): Victoria Metrics' operator
+# auto-converts this prometheus-operator CRD into its own VMRule and vmalert
+# evaluates it — no separate prometheus-operator/Prometheus install needed.
+# `release: prometheus` below is inert in this setup (vmalert's ruleSelector is
+# `selectAllByDefault: true` — confirmed live, no label match required) but is
+# left as-is for portability to a real prometheus-operator/Prometheus stack,
+# where it would need to match that Prometheus instance's ruleSelector.
 #
-# As of this writing, no such Prometheus/prometheus-operator deployment exists
-# anywhere in config/ — see docs/dashboards-and-alerts.md for the current
-# state and what's still needed to make these rules evaluate for real.
+# Confirmed live (see docs/dashboards-and-alerts.md): `kubectl get vmrule -A`
+# shows a converted `assistant-alerts` VMRule and vmalert picks it up. Rule
+# *evaluation* (the PromQL actually firing under real error/latency
+# conditions) was not separately exercised — only that the rules load and
+# vmalert has them in its active set.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: assistant-alerts
+  namespace: patch-playground
   labels:
     app.kubernetes.io/name: assistant
     app.kubernetes.io/part-of: milo-os

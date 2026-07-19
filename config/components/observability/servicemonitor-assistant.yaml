@@ -1,0 +1,23 @@
+# Tells vmagent (part of the telemetry-system Victoria Metrics stack, see
+# ../../../docs/dashboards-and-alerts.md) to scrape the assistant's plain
+# HTTP /metrics endpoint. Confirmed live: the stack's VMAgent has
+# `selectAllByDefault: true` with no serviceMonitorSelector label
+# restriction, so no special labels are required here for it to be picked
+# up — the victoria-metrics-operator auto-converts this standard
+# prometheus-operator ServiceMonitor CRD into its own VMServiceScrape.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: assistant
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/name: assistant
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  selector:
+    matchLabels:
+      app: assistant
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 20s
