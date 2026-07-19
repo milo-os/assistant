@@ -103,6 +103,8 @@ For what these look like on a dashboard, the exact alert thresholds, and how
 the consumption pipeline (Victoria Metrics, Tempo, Grafana, the OTel
 Collector's spanmetrics connector) is wired up and what was verified live,
 see [`dashboards-and-alerts.md`](./dashboards-and-alerts.md); that page is
-the source of truth for `config/components/observability/grafana-dashboard.json`
-and `config/components/observability/alerts.yaml` and is not duplicated
-here.
+the source of truth for
+`config/components/observability/grafana-dashboard-sre.json` and
+`grafana-dashboard-product.json` (the SRE/on-call and product/quality
+dashboards) and `config/components/observability/alerts.yaml`, and is not
+duplicated here.

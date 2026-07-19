@@ -27,10 +27,12 @@
 #     so vmagent (deployed with selectAllByDefault: true — confirmed live,
 #     no label restriction needed) scrapes it into Victoria Metrics.
 #   - alerts.yaml (a PrometheusRule — VM's operator auto-converts it to a
-#     VMRule, confirmed live) and grafanadashboard.yaml (a GrafanaDashboard CR
-#     wrapping grafana-dashboard.json via a generated ConfigMap, imported
-#     cross-namespace into the telemetry-system Grafana instance — confirmed
-#     live, renders without import errors).
+#     VMRule, confirmed live) and grafanadashboard.yaml (two GrafanaDashboard
+#     CRs — assistant-sre and assistant-product-quality — each wrapping its
+#     own JSON model via a generated ConfigMap, imported cross-namespace into
+#     the telemetry-system Grafana instance — confirmed live, both render
+#     without import errors). See docs/dashboards-and-alerts.md for why the
+#     dashboard is split in two.
 #
 # NOT included: a ServiceMonitor for assistant-apiserver. Its /metrics
 # endpoint (from the generic k8s.io/apiserver library) is served over HTTPS
@@ -48,10 +50,18 @@ resources:
   - grafanadashboard.yaml
   - alerts.yaml
 configMapGenerator:
-  - name: assistant-grafana-dashboard
+  - name: assistant-grafana-dashboard-sre
     namespace: patch-playground
     files:
-      - grafana-dashboard.json
+      - grafana-dashboard-sre.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: agent-framework-playground
+  - name: assistant-grafana-dashboard-product
+    namespace: patch-playground
+    files:
+      - grafana-dashboard-product.json
     options:
       disableNameSuffixHash: true
       labels:

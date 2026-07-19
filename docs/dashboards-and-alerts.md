@@ -1,15 +1,17 @@
 # Dashboards and alerts
 
 This service exposes Prometheus metrics at `GET /metrics`
-(`internal/server/metrics.go`). Two declarative artifacts consume them, both
-under `config/components/observability/` (moved there from
+(`internal/server/metrics.go`). Two kinds of declarative artifacts consume
+them, all under `config/components/observability/` (moved there from
 `config/observability/` when this component was wired up — see "Deployment
 status" below for why they live inside the component now):
 
-- `grafana-dashboard.json` — a Grafana dashboard model. Uses a `datasource`
-  template variable (Prometheus type) instead of a hardcoded UID, so it's
-  portable across Grafana instances. In this repo it's imported automatically
-  via `grafanadashboard.yaml` (a `GrafanaDashboard` custom resource, see
+- `grafana-dashboard-sre.json` and `grafana-dashboard-product.json` — two
+  Grafana dashboard models (split from a single 27-panel dashboard — see
+  "Why two dashboards" below). Both use a `datasource` template variable
+  (Prometheus type) instead of a hardcoded UID, so they're portable across
+  Grafana instances. In this repo they're imported automatically via
+  `grafanadashboard.yaml` (two `GrafanaDashboard` custom resources, see
   below) rather than a manual "Import Dashboard" click, but the raw JSON is
   still importable by hand into any other Grafana instance if you want it
   elsewhere.
@@ -17,52 +19,100 @@ status" below for why they live inside the component now):
   `monitoring.coreos.com/v1` CRD from prometheus-operator), containing the
   alerting rules described below.
 
-## What's in the dashboard
+## Why two dashboards
 
-Panels are grouped into rows:
+The original single dashboard mixed two audiences with different review
+cadences: on-call engineers who need "is the service up" during an incident,
+and product/quality reviewers who care about conversation and tooling health
+signals that never page anyone. One dashboard meant both audiences waded
+through panels that weren't relevant to them. It's now split:
 
-- **Service health** — HTTP request rate, 4xx/5xx error rate, in-flight
-  requests, p50/p95/p99 request latency, and readiness-probe failure rate.
-  Built from `assistant_http_requests_total`,
+- **`assistant-sre`** ("Assistant — SRE / On-Call", tags
+  `assistant`/`milo-os`/`sre`/`on-call`) — for on-call triage during an
+  incident, and pairs directly with `alerts.yaml`. Contains: **Service
+  health** (HTTP request rate, 4xx/5xx error rate, in-flight requests,
+  p50/p95/p99 request latency, readiness-probe failure rate — built from
+  `assistant_http_requests_total`, `assistant_http_request_duration_seconds`,
+  `assistant_http_requests_in_flight`, `assistant_readiness_failures_total`),
+  **Conversation turns — failure signal** (turn rate by state, and
+  failed+canceled rate as a percentage of all turns — pairs with the
+  `AssistantTurnFailureRateHigh` alert), and **Model calls — failure signal**
+  (model-call error rate — pairs with `AssistantModelCallErrorRateHigh`).
+  Turn/model *duration* percentiles were deliberately left off this
+  dashboard — they're useful context but not what you triage an incident
+  against; they moved to the product/quality dashboard instead.
+- **`assistant-product-quality`** ("Assistant — Product & Quality", tags
+  `assistant`/`milo-os`/`product`/`quality`) — signals that don't page
+  anyone but matter for conversation and tooling quality. Contains:
+  **Conversation turns — duration & quality** (turn duration percentiles,
+  and p95 by state), **Tool calls** (call rate by `tool`, an error-rate bar
+  panel by `tool`, and a success/error breakdown table — kept together here
+  in full, since tool-call health is a quality/reliability-of-integrations
+  signal rather than an uptime one), **Model calls — latency** (latency
+  percentiles), **History compaction** (compaction rate by outcome, and the
+  dedicated, visually distinct `failed_open` panel — see below), **Capability
+  gap reports** (report rate by outcome — a business signal), and
+  **Span-derived RED metrics** (rate/error/duration derived from trace spans
+  — exploratory/debugging-oriented, fits here better than on-call triage).
+
+Panel-by-panel detail:
+
+- **Service health** (`assistant-sre`) — HTTP request rate, 4xx/5xx error
+  rate, in-flight requests, p50/p95/p99 request latency, and readiness-probe
+  failure rate. Built from `assistant_http_requests_total`,
   `assistant_http_request_duration_seconds`,
   `assistant_http_requests_in_flight`, and
   `assistant_readiness_failures_total`.
-- **Conversation turns** — turn rate and duration percentiles by `state`
-  (`completed`/`failed`/`canceled`), plus failed+canceled rate as a
-  percentage of all turns. Built from
+- **Conversation turns** (split) — turn rate by state and failed+canceled
+  rate live on `assistant-sre`; duration percentiles and p95-by-state live on
+  `assistant-product-quality`. All built from
   `assistant_conversation_turn_duration_seconds`.
-- **Tool calls** — call rate by `tool`, an error-rate bar panel by `tool`
-  (easier to spot one bad tool than a tangled time series), and a table
-  breaking out success vs. error counts per tool. Built from
-  `assistant_tool_call_total`.
-- **Model calls** — latency percentiles and error rate. Built from
+- **Tool calls** (`assistant-product-quality`) — call rate by `tool`, an
+  error-rate bar panel by `tool` (easier to spot one bad tool than a tangled
+  time series), and a table breaking out success vs. error counts per tool.
+  Built from `assistant_tool_call_total`.
+- **Model calls** (split) — error rate lives on `assistant-sre`; latency
+  percentiles live on `assistant-product-quality`. Both built from
   `assistant_model_call_duration_seconds`.
-- **History compaction** — compaction rate by outcome, and a dedicated,
-  visually distinct panel for the `failed_open` rate. `failed_open` means
-  summarization errored and the turn fell back to plain truncation rather
-  than blocking (see `docs/conversation-summarization-design.md`), so it
-  never shows up as a turn failure or an HTTP error — this panel is the only
-  place it's visible. Built from `assistant_history_compaction_total`.
-- **Capability gap reports** — report rate by outcome. A business signal,
-  not just an ops one: a sustained spike means a provider's tooling has a
-  real, active gap users keep hitting (see
+- **History compaction** (`assistant-product-quality`) — compaction rate by
+  outcome, and a dedicated, visually distinct panel for the `failed_open`
+  rate. `failed_open` means summarization errored and the turn fell back to
+  plain truncation rather than blocking (see
+  `docs/conversation-summarization-design.md`), so it never shows up as a
+  turn failure or an HTTP error — this panel is the only place it's visible.
+  Built from `assistant_history_compaction_total`.
+- **Capability gap reports** (`assistant-product-quality`) — report rate by
+  outcome. A business signal, not just an ops one: a sustained spike means a
+  provider's tooling has a real, active gap users keep hitting (see
   `docs/capability-gap-reporting-design.md`). Built from
   `assistant_gap_report_total`.
-
-- **Span-derived RED metrics (OTel Collector spanmetrics connector)** — rate,
-  error-rate, and p50/p95/p99 duration panels built entirely from trace
-  spans, not app-side metrics. The shared telemetry stack's OTel Collector
-  runs a `spanmetrics` connector that derives these from every span this
-  service emits (see `docs/observability.md`'s Tracing section for the span
-  list), with zero extra app-side instrumentation. Confirmed live (see
-  "Deployment status" below) with the exact metric/label names:
-  `span_metrics_calls_total` and `span_metrics_duration_milliseconds_{bucket,count,sum}`,
-  labeled `service_name`, `span_name` (`assistant.http`, `conversation.turn`,
+- **Span-derived RED metrics (OTel Collector spanmetrics connector)**
+  (`assistant-product-quality`) — rate, error-rate, and p50/p95/p99 duration
+  panels built entirely from trace spans, not app-side metrics. The shared
+  telemetry stack's OTel Collector runs a `spanmetrics` connector that
+  derives these from every span this service emits (see
+  `docs/observability.md`'s Tracing section for the span list), with zero
+  extra app-side instrumentation. Confirmed live (see "Deployment status"
+  below) with the exact metric/label names: `span_metrics_calls_total` and
+  `span_metrics_duration_milliseconds_{bucket,count,sum}`, labeled
+  `service_name`, `span_name` (`assistant.http`, `conversation.turn`,
   `model.stream`, `tool.execute`, and outbound `HTTP POST` client spans),
   `span_kind`, and `status_code` (`STATUS_CODE_UNSET`/`STATUS_CODE_ERROR`).
   This is a second, independent confirmation of the same rate/error/duration
   signal the app-side metrics already provide — useful as a cross-check, and
   it comes for free once tracing reaches the collector.
+
+### Deferred: a per-provider dashboard
+
+A third tier — a per-provider dashboard scoped to just one provider's own
+tool-call and capability-gap-report data — was discussed and explicitly
+deferred, not built. It needs real tenant-scoped RBAC first: there is no
+`Role`/`ProtectedResource` config today for the `conversations` or
+`capabilitygapreports` resources, so there's no way to actually restrict a
+per-provider dashboard's underlying data to that provider's own tenant —
+building it now would either require fabricating scoping that doesn't
+enforce anything, or shipping a dashboard that leaks every other provider's
+data. Revisit once tenant-scoped RBAC exists for those resource types.
 
 ## What's in alerts.yaml
 
@@ -176,17 +226,18 @@ The component adds:
    that NetworkPolicy is a one-line follow-up, deliberately not made here to
    keep this change scoped to what was actually verified.
 3. `alerts.yaml` (moved here from the old `config/observability/`) and
-   `grafanadashboard.yaml` — a `GrafanaDashboard` CR wrapping
-   `grafana-dashboard.json` via a generated ConfigMap. It lives in
-   `patch-playground` (alongside the app), not `telemetry-system`, with
-   `spec.allowCrossNamespaceImport: true` — the Grafana Operator's
-   cross-namespace import is gated per-dashboard by that field, not by a
-   global restriction from the Grafana instance's own
+   `grafanadashboard.yaml` — two `GrafanaDashboard` CRs (`assistant-sre`,
+   `assistant-product-quality`), each wrapping its own JSON model
+   (`grafana-dashboard-sre.json`, `grafana-dashboard-product.json`) via its
+   own generated ConfigMap. Both live in `patch-playground` (alongside the
+   app), not `telemetry-system`, with `spec.allowCrossNamespaceImport: true`
+   — the Grafana Operator's cross-namespace import is gated per-dashboard by
+   that field, not by a global restriction from the Grafana instance's own
    `allowCrossNamespaceImport` (that one only governs the
    victoria-metrics-k8s-stack chart's *own* auto-generated dashboards, which
-   already live in `telemetry-system`). Confirmed live: the CR's status shows
+   already live in `telemetry-system`). Confirmed live: both CRs' status show
    `"Dashboard was successfully applied to 1 instances"`, and
-   `GET /api/search?query=assistant` against the Grafana API lists it.
+   `GET /api/search?query=assistant` against the Grafana API lists both.
 
 ### What was verified live, end to end
 
@@ -225,13 +276,30 @@ silent absence):
   real error/latency conditions (e.g. deliberately driving the 5xx rate above
   5% to watch `AssistantHighErrorRate` go active) — only that the rules
   parsed, loaded, and are in vmalert's active set.
-- **Dashboard rendering**: confirmed via the Grafana API (`/api/search`,
-  `/api/dashboards/uid/assistant-overview`) that all 27 panels — including
-  the new spanmetrics row — are present, and queried one of the new panels'
-  PromQL directly through Grafana's own datasource proxy
-  (`/api/datasources/proxy/uid/victoria-metrics-datasource/api/v1/query`),
-  which returned real nonzero values. Not opened in an actual browser to
-  eyeball pixel rendering — API-level confirmation only.
+- **Dashboard rendering (both dashboards)**: confirmed via the Grafana API
+  (`/api/search`, `/api/dashboards/uid/assistant-sre`,
+  `/api/dashboards/uid/assistant-product-quality`) that both CRs synced with
+  `"Dashboard was successfully applied to 1 instances"`, and that panel
+  counts match the split: `assistant-sre` has 11 panel objects (3 row headers
+  + 8 data panels: Service health in full, plus the turn/model
+  failure-focused panels), `assistant-product-quality` has 18 (6 row headers
+  + 12 data panels: turn/model duration, all of Tool calls, both History
+  compaction panels, Capability gap reports, and the spanmetrics row). Drove
+  a real chat turn (`task dev:chat MSG="Diagnose pipeline p-1 for
+  StreamCo"`) and then queried representative panel PromQL from each
+  dashboard directly through Grafana's own datasource proxy
+  (`/api/datasources/proxy/uid/victoria-metrics-datasource/api/v1/query`):
+  `assistant-sre`'s HTTP request rate panel returned real nonzero series
+  (`GET /readyz`, `GET /healthz`, etc.), and `assistant-product-quality`'s
+  turn-duration-p50 and spanmetrics call-rate panels returned real nonzero
+  values (e.g. p50 = 0.0375s, `assistant.http` span rate = 0.327/s)
+  immediately after that chat turn. The old single `assistant-overview`
+  dashboard CR and its ConfigMap were deleted from the live cluster (`kubectl
+  apply -k` doesn't prune resources removed from kustomize output, so this
+  was a manual `kubectl delete` after applying the split) — confirmed
+  `kubectl -n patch-playground get grafanadashboard` now lists only the two
+  new CRs. Not opened in an actual browser to eyeball pixel rendering —
+  API-level confirmation only.
 
 The live cluster was left with all of this deployed (the `telemetry-system`
 namespace, the `dev-observability`-overlay wiring in `patch-playground`) so

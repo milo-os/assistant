@@ -2,16 +2,18 @@
   "__inputs": [],
   "__requires": [],
   "id": null,
-  "uid": "assistant-overview",
-  "title": "Assistant \u2014 Service Overview",
-  "description": "Health, conversation-turn, tool-call, model-call, history-compaction, and capability-gap-report telemetry for the assistant service (see internal/server/metrics.go).",
+  "uid": "assistant-product-quality",
+  "title": "Assistant — Product & Quality",
+  "description": "Conversation and tooling health signals that don't page anyone but matter for product quality: turn duration percentiles, history-compaction rate (including the failed_open silent-degradation signal), tool-call success/error rate by tool, capability-gap-report rate, and span-derived RED metrics for the assistant service (see internal/server/metrics.go). For on-call/incident triage (HTTP rate/error/latency, readiness, turn/model failure rate), see the companion “Assistant — SRE / On-Call” dashboard.",
   "tags": [
     "assistant",
-    "milo-os"
+    "milo-os",
+    "product",
+    "quality"
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 1,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "30s",
@@ -29,23 +31,6 @@
         "current": {},
         "refresh": 1,
         "hide": 0
-      },
-      {
-        "name": "handler",
-        "type": "query",
-        "label": "Route",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${datasource}"
-        },
-        "query": "label_values(assistant_http_requests_total, handler)",
-        "refresh": 2,
-        "multi": true,
-        "includeAll": true,
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        }
       }
     ]
   },
@@ -64,9 +49,9 @@
   },
   "panels": [
     {
-      "id": 1,
+      "id": 10,
       "type": "row",
-      "title": "Service health",
+      "title": "Conversation turns — duration & quality",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -77,245 +62,15 @@
       "panels": []
     },
     {
-      "id": 2,
-      "type": "timeseries",
-      "title": "HTTP request rate",
-      "description": "Requests/sec by route, from assistant_http_requests_total.",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 1
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "expr": "sum by (handler) (rate(assistant_http_requests_total{handler=~\"$handler\"}[5m]))",
-          "legendFormat": "{{handler}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 3,
-      "type": "timeseries",
-      "title": "HTTP error rate (4xx / 5xx)",
-      "description": "Share of requests returning 4xx or 5xx, from assistant_http_requests_total, by route.",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 1
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "expr": "sum by (handler) (rate(assistant_http_requests_total{handler=~\"$handler\",code=~\"5..\"}[5m]))\n/\nsum by (handler) (rate(assistant_http_requests_total{handler=~\"$handler\"}[5m]))",
-          "legendFormat": "{{handler}} 5xx",
-          "refId": "A"
-        },
-        {
-          "expr": "sum by (handler) (rate(assistant_http_requests_total{handler=~\"$handler\",code=~\"4..\"}[5m]))\n/\nsum by (handler) (rate(assistant_http_requests_total{handler=~\"$handler\"}[5m]))",
-          "legendFormat": "{{handler}} 4xx",
-          "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 4,
-      "type": "timeseries",
-      "title": "In-flight requests",
-      "description": "assistant_http_requests_in_flight",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 1
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "expr": "assistant_http_requests_in_flight",
-          "legendFormat": "in-flight",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 5,
-      "type": "timeseries",
-      "title": "HTTP request latency (p50 / p95 / p99)",
-      "description": "histogram_quantile over assistant_http_request_duration_seconds by route.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 9
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.50, sum by (le, handler) (rate(assistant_http_request_duration_seconds_bucket{handler=~\"$handler\"}[5m])))",
-          "legendFormat": "p50 {{handler}}",
-          "refId": "A"
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum by (le, handler) (rate(assistant_http_request_duration_seconds_bucket{handler=~\"$handler\"}[5m])))",
-          "legendFormat": "p95 {{handler}}",
-          "refId": "B"
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (le, handler) (rate(assistant_http_request_duration_seconds_bucket{handler=~\"$handler\"}[5m])))",
-          "legendFormat": "p99 {{handler}}",
-          "refId": "C"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 5
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 6,
-      "type": "timeseries",
-      "title": "Readiness failures",
-      "description": "Rate of assistant_readiness_failures_total \u2014 a nonzero sustained rate means the readiness probe is reporting not-ready.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 9
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "expr": "rate(assistant_readiness_failures_total[5m])",
-          "legendFormat": "readiness failures/sec",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          },
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "orange"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 10,
-      "type": "row",
-      "title": "Conversation turns",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 17
-      },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "id": 11,
-      "type": "timeseries",
-      "title": "Turn rate by state",
-      "description": "rate(assistant_conversation_turn_duration_seconds_count[5m]) by state.",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 18
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "expr": "sum by (state) (rate(assistant_conversation_turn_duration_seconds_count[5m]))",
-          "legendFormat": "{{state}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 12,
       "type": "timeseries",
       "title": "Turn duration percentiles (p50 / p95 / p99)",
       "description": "histogram_quantile over assistant_conversation_turn_duration_seconds, all states combined.",
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 18
+        "w": 12,
+        "x": 0,
+        "y": 1
       },
       "datasource": {
         "type": "prometheus",
@@ -356,9 +111,9 @@
       "description": "histogram_quantile over assistant_conversation_turn_duration_seconds, split by state (completed/failed/canceled).",
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 18
+        "w": 12,
+        "x": 12,
+        "y": 1
       },
       "datasource": {
         "type": "prometheus",
@@ -383,44 +138,6 @@
       }
     },
     {
-      "id": 14,
-      "type": "timeseries",
-      "title": "Failed + canceled turn rate (% of total)",
-      "description": "Share of turns that end in failed or canceled state \u2014 a rising trend indicates degrading conversation quality even if HTTP-level errors look fine.",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 26
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(assistant_conversation_turn_duration_seconds_count{state=\"failed\"}[5m]))\n/\nsum(rate(assistant_conversation_turn_duration_seconds_count[5m]))",
-          "legendFormat": "failed %",
-          "refId": "A"
-        },
-        {
-          "expr": "sum(rate(assistant_conversation_turn_duration_seconds_count{state=\"canceled\"}[5m]))\n/\nsum(rate(assistant_conversation_turn_duration_seconds_count[5m]))",
-          "legendFormat": "canceled %",
-          "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 20,
       "type": "row",
       "title": "Tool calls",
@@ -428,7 +145,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 34
+        "y": 9
       },
       "collapsed": false,
       "panels": []
@@ -437,12 +154,12 @@
       "id": 21,
       "type": "timeseries",
       "title": "Tool call rate by tool",
-      "description": "rate(assistant_tool_call_total[5m]) by tool \u2014 memory, gap-report, provider MCP tools, skills.",
+      "description": "rate(assistant_tool_call_total[5m]) by tool — memory, gap-report, provider MCP tools, skills.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 10
       },
       "datasource": {
         "type": "prometheus",
@@ -470,12 +187,12 @@
       "id": 22,
       "type": "bargauge",
       "title": "Tool error rate by tool (current)",
-      "description": "error / (success+error) rate per tool over the last 5m \u2014 bar view makes it easy to spot which single tool is misbehaving.",
+      "description": "error / (success+error) rate per tool over the last 5m — bar view makes it easy to spot which single tool is misbehaving.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 10
       },
       "datasource": {
         "type": "prometheus",
@@ -528,7 +245,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 18
       },
       "datasource": {
         "type": "prometheus",
@@ -550,12 +267,12 @@
     {
       "id": 30,
       "type": "row",
-      "title": "Model calls",
+      "title": "Model calls — latency",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 51
+        "y": 26
       },
       "collapsed": false,
       "panels": []
@@ -567,9 +284,9 @@
       "description": "histogram_quantile over assistant_model_call_duration_seconds.",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
-        "y": 52
+        "y": 27
       },
       "datasource": {
         "type": "prometheus",
@@ -604,43 +321,6 @@
       }
     },
     {
-      "id": 32,
-      "type": "timeseries",
-      "title": "Model call error rate",
-      "description": "Share of model calls with outcome=error, from assistant_model_call_duration_seconds_count. A rising trend usually points upstream at the model provider.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 52
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(assistant_model_call_duration_seconds_count{outcome=\"error\"}[5m]))\n/\nsum(rate(assistant_model_call_duration_seconds_count[5m]))",
-          "legendFormat": "error %",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          },
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "red"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 40,
       "type": "row",
       "title": "History compaction",
@@ -648,7 +328,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 60
+        "y": 35
       },
       "collapsed": false,
       "panels": []
@@ -662,7 +342,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 61
+        "y": 36
       },
       "datasource": {
         "type": "prometheus",
@@ -689,13 +369,13 @@
     {
       "id": 42,
       "type": "timeseries",
-      "title": "Compaction failed-open rate \u2014 silent degradation signal",
-      "description": "rate(assistant_history_compaction_total{outcome=\"failed_open\"}[5m]). This does NOT fail the turn \u2014 it falls back to plain truncation \u2014 so nothing else on this dashboard will show a problem. A nonzero sustained rate here means summarization is silently degrading and conversations are losing context without an operator noticing. Treat any sustained nonzero value as worth investigating, see AssistantCompactionFailingOpen alert.",
+      "title": "Compaction failed-open rate — silent degradation signal",
+      "description": "rate(assistant_history_compaction_total{outcome=\"failed_open\"}[5m]). This does NOT fail the turn — it falls back to plain truncation — so nothing else on either dashboard will show a problem. A nonzero sustained rate here means summarization is silently degrading and conversations are losing context without an operator noticing. Treat any sustained nonzero value as worth investigating, see AssistantCompactionFailingOpen alert.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 61
+        "y": 36
       },
       "datasource": {
         "type": "prometheus",
@@ -745,7 +425,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 44
       },
       "collapsed": false,
       "panels": []
@@ -759,7 +439,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 70
+        "y": 45
       },
       "datasource": {
         "type": "prometheus",
@@ -791,7 +471,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 78
+        "y": 53
       },
       "collapsed": false
     },
@@ -799,12 +479,12 @@
       "id": 61,
       "type": "timeseries",
       "title": "Call rate by span (span_metrics_calls_total)",
-      "description": "sum by (span_name) (rate(span_metrics_calls_total{service_name=\"assistant\"}[5m])). Derived purely from trace spans by the OTel Collector's spanmetrics connector \u2014 zero extra app-side instrumentation. Confirmed live span names: assistant.http (SERVER), conversation.turn / model.stream / tool.execute (INTERNAL), \"HTTP POST\" (CLIENT, outbound MCP/tool calls).",
+      "description": "sum by (span_name) (rate(span_metrics_calls_total{service_name=\"assistant\"}[5m])). Derived purely from trace spans by the OTel Collector's spanmetrics connector — zero extra app-side instrumentation. Confirmed live span names: assistant.http (SERVER), conversation.turn / model.stream / tool.execute (INTERNAL), \"HTTP POST\" (CLIENT, outbound MCP/tool calls).",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 79
+        "y": 54
       },
       "datasource": {
         "type": "prometheus",
@@ -832,12 +512,12 @@
       "id": 62,
       "type": "timeseries",
       "title": "Error rate by span, status_code=STATUS_CODE_ERROR (span_metrics_calls_total)",
-      "description": "Spans whose OTel status was recorded as an error, by span name \u2014 e.g. a failed tool.execute span shows up here purely from the trace, independent of the app's own assistant_tool_call_total counter. A second, trace-derived confirmation of the same failure signal.",
+      "description": "Spans whose OTel status was recorded as an error, by span name — e.g. a failed tool.execute span shows up here purely from the trace, independent of the app's own assistant_tool_call_total counter. A second, trace-derived confirmation of the same failure signal.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 79
+        "y": 54
       },
       "datasource": {
         "type": "prometheus",
@@ -865,12 +545,12 @@
       "id": 63,
       "type": "timeseries",
       "title": "Span duration p50/p95/p99 by span_name (span_metrics_duration_milliseconds)",
-      "description": "histogram_quantile over span_metrics_duration_milliseconds_bucket, the spanmetrics connector's duration histogram derived from real span start/end timestamps \u2014 an independent latency signal alongside assistant_conversation_turn_duration_seconds / assistant_model_call_duration_seconds, sourced entirely from tracing rather than app-side histograms.",
+      "description": "histogram_quantile over span_metrics_duration_milliseconds_bucket, the spanmetrics connector's duration histogram derived from real span start/end timestamps — an independent latency signal alongside assistant_conversation_turn_duration_seconds / assistant_model_call_duration_seconds, sourced entirely from tracing rather than app-side histograms.",
       "gridPos": {
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 87
+        "y": 62
       },
       "datasource": {
         "type": "prometheus",

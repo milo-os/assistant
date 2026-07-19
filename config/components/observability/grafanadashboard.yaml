@@ -1,9 +1,17 @@
-# Wraps config/components/observability/grafana-dashboard.json (embedded via the
-# adjacent configMapGenerator, see kustomization.yaml) as a Grafana-operator
-# GrafanaDashboard CR, so it's auto-imported into the telemetry-system
+# Wraps the two dashboard JSON models in this directory
+# (grafana-dashboard-sre.json, grafana-dashboard-product.json — embedded via
+# the adjacent configMapGenerator, see kustomization.yaml) as Grafana-operator
+# GrafanaDashboard CRs, so they're auto-imported into the telemetry-system
 # Grafana instance instead of requiring a manual "Import Dashboard" click.
 #
-# Lives in patch-playground (alongside the app it dashboards), NOT
+# Split into two dashboards (previously one, see docs/dashboards-and-alerts.md
+# for the full rationale): SRE/on-call ("is the service up", pairs with
+# alerts.yaml) and product/quality (conversation and tooling health signals
+# that don't page anyone but matter for product quality). Different
+# audiences, different review cadence — one dashboard was accumulating panels
+# that didn't serve either audience well.
+#
+# Both live in patch-playground (alongside the app they dashboard), NOT
 # telemetry-system: the Grafana Operator supports cross-namespace dashboard
 # import (gated per-dashboard by allowCrossNamespaceImport, default false)
 # — it is NOT a global restriction from the Grafana instance's own
@@ -11,12 +19,12 @@
 # (that one only governs the victoria-metrics-k8s-stack chart's own
 # auto-generated dashboards in telemetry-system). Confirmed live: with
 # allowCrossNamespaceImport: true here and instanceSelector matching the
-# telemetry-system Grafana instance's `dashboards: grafana` label, this
-# CR's NoMatchingInstances condition clears and the dashboard renders.
+# telemetry-system Grafana instance's `dashboards: grafana` label, both CRs'
+# NoMatchingInstances conditions clear and both dashboards render.
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard
 metadata:
-  name: assistant-overview
+  name: assistant-sre
   namespace: patch-playground
   labels:
     app.kubernetes.io/name: assistant
@@ -28,5 +36,23 @@ spec:
     matchLabels:
       dashboards: "grafana"
   configMapRef:
-    name: assistant-grafana-dashboard
-    key: grafana-dashboard.json
+    name: assistant-grafana-dashboard-sre
+    key: grafana-dashboard-sre.json
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: assistant-product-quality
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/name: assistant
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  allowCrossNamespaceImport: true
+  resyncPeriod: 30s
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana"
+  configMapRef:
+    name: assistant-grafana-dashboard-product
+    key: grafana-dashboard-product.json
