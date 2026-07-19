@@ -962,10 +962,13 @@ func (m *chatModel) View() tea.View {
 		status = m.st.hint.Render("enter to send · pgup/pgdn scroll · / for commands (tab completes) · ctrl+c or /quit to leave")
 	}
 	// One blank line between each major region for an even vertical rhythm:
-	// header → blank → transcript → status → gap/suggestions → bordered input.
-	// The suggestion block grows downward (vertically, so ↑/↓ tracks it) up to
-	// maxSuggestionRows; the viewport shrinks by the same amount so total
-	// layout height stays constant instead of pushing the input off-screen.
+	// header → blank → transcript → gap/suggestions → bordered input → status.
+	// Suggestions sit directly above the box since they're about what you're
+	// typing; the status/hint line reads as a footer below the box instead of
+	// a caption above it. The suggestion block grows downward (vertically, so
+	// ↑/↓ tracks it) up to maxSuggestionRows; the viewport shrinks by the same
+	// amount so total layout height stays constant instead of pushing the
+	// input off-screen.
 	if h := m.viewportHeight(); h != m.vp.Height() {
 		m.vp.SetHeight(h)
 	}
@@ -974,9 +977,9 @@ func (m *chatModel) View() tea.View {
 		m.st.header.Render("patch") + m.st.subtle.Render("  ·  project "+m.project),
 		"", // gap below the header
 		m.vp.View(),
-		status,
 		gap,
 		m.st.inputBox.Render(m.ti.View()),
+		status,
 	}, "\n")
 
 	v := tea.NewView(m.st.box.Render(body))
