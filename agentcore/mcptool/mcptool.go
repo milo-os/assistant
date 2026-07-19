@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"strings"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -66,7 +68,15 @@ func Connect(ctx context.Context, opts Options) (*Session, error) {
 	}
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Transport: &acceptRoundTripper{next: http.DefaultTransport}}
+		// otelhttp.NewTransport injects the W3C traceparent/tracestate headers
+		// (via the global propagator) and starts a client span per round trip,
+		// so a provider's own MCP server — if it too is otelhttp/otel
+		// instrumented — links into the same trace as the inbound assistant
+		// request. It is a genuine no-op wrapper (no span recorded, no header
+		// injected beyond an always-sampled-out traceparent) when the global
+		// tracer provider is the no-op implementation, i.e. tracing is
+		// unconfigured — see internal/tracing.
+		httpClient = &http.Client{Transport: &acceptRoundTripper{next: otelhttp.NewTransport(http.DefaultTransport)}}
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: name, Version: version}, nil)

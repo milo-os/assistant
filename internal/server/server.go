@@ -17,6 +17,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	a2astore "github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/auth"
 	"github.com/milo-os/assistant/internal/config"
@@ -112,8 +114,15 @@ func New(deps Deps) http.Handler {
 	mux.Handle("GET /.well-known/agent.json", card) // legacy pre-1.0 well-known path
 	mux.Handle("POST /a2a", mw)
 
-	// Outer-to-inner: request-id/logging → metrics → routes.
-	return withRequestID(metrics.instrument(mux), logger)
+	// Outer-to-inner: tracing → request-id/logging → metrics → routes.
+	// otelhttp is outermost so it extracts an inbound W3C traceparent (or
+	// starts a new trace) before anything else runs, giving every downstream
+	// layer — including the request-id logger — a request already inside a
+	// server span. When [tracing.Setup] left the global tracer provider as
+	// the no-op implementation (the default with no OTLP endpoint
+	// configured), this wrapper still runs but costs a no-op span per
+	// request: no exporter, no network call, no behavioral change.
+	return otelhttp.NewHandler(withRequestID(metrics.instrument(mux), logger), "assistant.http")
 }
 
 // readyHandler answers GET /readyz. It runs the dependency check under a short

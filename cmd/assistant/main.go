@@ -23,6 +23,7 @@ import (
 	"github.com/milo-os/assistant/internal/logger"
 	"github.com/milo-os/assistant/internal/server"
 	"github.com/milo-os/assistant/internal/taskstore"
+	"github.com/milo-os/assistant/internal/tracing"
 )
 
 // shutdownGrace bounds the graceful-drain window: after a signal the server
@@ -51,6 +52,21 @@ func run() error {
 	// issuer fails fast rather than on the first request.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing: no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (see
+	// internal/tracing). Safe to call unconditionally — it never dials or
+	// blocks startup when unconfigured.
+	tracingShutdown, err := tracing.Setup(ctx, "assistant")
+	if err != nil {
+		return fmt.Errorf("failed to initialize tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			log.Warn("tracing.shutdown.failed", "error", err.Error())
+		}
+	}()
 
 	authenticator, err := auth.NewAuthenticator(ctx, cfg, log)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	openapinamer "k8s.io/apiserver/pkg/endpoints/openapi"
 	genericapiserver "k8s.io/apiserver/pkg/server"
@@ -28,6 +29,7 @@ import (
 	assistantapiserver "github.com/milo-os/assistant/internal/apiserver"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
+	"github.com/milo-os/assistant/internal/tracing"
 	generatedopenapi "github.com/milo-os/assistant/pkg/generated/openapi"
 )
 
@@ -101,6 +103,15 @@ func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config,
 	genericConfig := genericapiserver.NewRecommendedConfig(assistantapiserver.Codecs)
 	genericConfig.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString("1.36", "", "")
 
+	// Wrap the generic-apiserver's normal handler chain (auth, audit,
+	// panic-recovery, etc. — DefaultBuildHandlerChain) with an outer otelhttp
+	// span per request, same as cmd/assistant's plain net/http server. No-op
+	// (a single no-op span, no exporter, no dial) unless [tracing.Setup]
+	// installed a real tracer provider.
+	genericConfig.BuildHandlerChainFunc = func(apiHandler http.Handler, c *genericapiserver.Config) http.Handler {
+		return otelhttp.NewHandler(genericapiserver.DefaultBuildHandlerChain(apiHandler, c), "conversations-apiserver.http")
+	}
+
 	namer := openapinamer.NewDefinitionNamer(assistantapiserver.Scheme)
 	getDefs := func(ref openapicommon.ReferenceCallback) map[string]openapicommon.OpenAPIDefinition {
 		return generatedopenapi.GetOpenAPIDefinitions(ref)
@@ -150,6 +161,20 @@ func (o *serverOptions) run(ctx context.Context) error {
 		return fmt.Errorf("apply logging configuration: %w", err)
 	}
 	defer logs.FlushLogs()
+
+	// Tracing: no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (see
+	// internal/tracing). Safe to call unconditionally.
+	tracingShutdown, err := tracing.Setup(ctx, "conversations-apiserver")
+	if err != nil {
+		return fmt.Errorf("failed to initialize tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			klog.ErrorS(err, "tracing shutdown failed")
+		}
+	}()
 
 	cfg, cleanup, err := o.config(ctx)
 	if err != nil {

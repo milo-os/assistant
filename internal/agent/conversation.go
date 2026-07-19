@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/gapreport"
@@ -262,11 +264,18 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	// to FinishCanceled. The cancel is released when the run finalizes.
 	turnCtx, cancelTurn := turnContext(ctx, c.deps.TurnTimeout)
 
+	// The top-level span for this turn. Every model call and tool execution
+	// below nests under it because they all derive their context from
+	// turnCtx (agentcore.Run threads it through the whole loop, including
+	// into each tool's Execute). It carries no user content — see
+	// endTurnSpan and the tracer doc comment in tracing.go.
+	turnCtx, turnSpan := tracer.Start(turnCtx, "conversation.turn")
+
 	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
-		Model:           c.deps.Model,
+		Model:           tracedModel(c.deps.Model),
 		System:          BuildSystemPrompt(c.deps.Persona, composed.SystemPromptAddendum),
 		Messages:        messages,
-		Tools:           composed.Tools,
+		Tools:           tracedTools(composed.Tools),
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),
@@ -278,6 +287,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	return &Stream{
 		ctx:         ctx,
 		cancelTurn:  cancelTurn,
+		turnSpan:    turnSpan,
 		conv:        c,
 		params:      params,
 		inner:       inner,
@@ -355,7 +365,7 @@ func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []
 	toSummarize := turns[:batchLen]
 	keep := turns[batchLen:]
 
-	summary, err := summarize(ctx, c.deps.Model, toSummarize)
+	summary, err := summarize(ctx, tracedModel(c.deps.Model), toSummarize)
 	if err != nil {
 		c.logger.Warn("agent.history.summarize_failed",
 			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
@@ -445,6 +455,7 @@ func attributionHeaders(mode, projectName, contextID string) map[string]string {
 type Stream struct {
 	ctx         context.Context
 	cancelTurn  context.CancelFunc
+	turnSpan    trace.Span
 	conv        *Conversation
 	params      Params
 	inner       agentcore.StreamReader
@@ -537,6 +548,9 @@ func (s *Stream) finalize() {
 	// below runs on a cancel-immune context, so this cannot cut it short.
 	if s.cancelTurn != nil {
 		s.cancelTurn()
+	}
+	if s.turnSpan != nil {
+		endTurnSpan(s.turnSpan, s.state, s.errMsg)
 	}
 
 	_ = s.composed.Close()
