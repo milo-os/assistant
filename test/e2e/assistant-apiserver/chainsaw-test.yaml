@@ -13,7 +13,7 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: conversations-apiserver
+  name: assistant-apiserver
 spec:
   # The environment is persistent — never delete anything from it.
   skipDelete: true

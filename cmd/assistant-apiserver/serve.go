@@ -109,7 +109,7 @@ func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config,
 	// (a single no-op span, no exporter, no dial) unless [tracing.Setup]
 	// installed a real tracer provider.
 	genericConfig.BuildHandlerChainFunc = func(apiHandler http.Handler, c *genericapiserver.Config) http.Handler {
-		return otelhttp.NewHandler(genericapiserver.DefaultBuildHandlerChain(apiHandler, c), "conversations-apiserver.http")
+		return otelhttp.NewHandler(genericapiserver.DefaultBuildHandlerChain(apiHandler, c), "assistant-apiserver.http")
 	}
 
 	namer := openapinamer.NewDefinitionNamer(assistantapiserver.Scheme)
@@ -164,7 +164,7 @@ func (o *serverOptions) run(ctx context.Context) error {
 
 	// Tracing: no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (see
 	// internal/tracing). Safe to call unconditionally.
-	tracingShutdown, err := tracing.Setup(ctx, "conversations-apiserver")
+	tracingShutdown, err := tracing.Setup(ctx, "assistant-apiserver")
 	if err != nil {
 		return fmt.Errorf("failed to initialize tracing: %w", err)
 	}

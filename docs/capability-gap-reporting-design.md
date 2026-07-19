@@ -189,7 +189,7 @@ line noting reports won't survive restarts.
 ### 6. Read path: how StreamCo's team actually sees these (shipped)
 
 Follows the existing `conversations` read-view precedent
-(`docs/conversation-apiserver-design.md`): gap reports are exposed through
+(`docs/assistant-apiserver-design.md`): gap reports are exposed through
 the same aggregated apiserver pattern, scoped by the caller's k8s identity
 against `providerProject` — `kubectl get capabilitygapreports -n
 streamco-platform`, or `patch gaps list --project streamco-platform`,
@@ -270,6 +270,6 @@ lists).
   `internal/tenant.ProjectFromContext`.
 - `internal/apiserver/apiserver.go` — `ExtraConfig.GapReports`, storage
   registration.
-- `cmd/conversations-apiserver/serve.go` — wire the gap-report store.
+- `cmd/assistant-apiserver/serve.go` — wire the gap-report store.
 - `cmd/patch/args.go`, `cmd/patch/gaps.go` (new), `cmd/patch/run.go` —
   `patch gaps list --project <provider>`.

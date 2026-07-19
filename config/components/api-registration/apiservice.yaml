@@ -1,4 +1,4 @@
-# Registers the conversations aggregated apiserver with the kube-aggregator, so
+# Registers the assistant aggregated apiserver with the kube-aggregator, so
 # assistant.miloapis.com/v1alpha1 Conversations are served by our Deployment.
 # caBundle handling is environment-specific: the dev overlay patches
 # insecureSkipTLSVerify=true (the server self-signs, no cluster CA to trust); a
@@ -9,7 +9,7 @@ metadata:
   name: v1alpha1.assistant.miloapis.com
 spec:
   service:
-    name: conversations-apiserver
+    name: assistant-apiserver
     namespace: patch-playground
     port: 443
   group: assistant.miloapis.com

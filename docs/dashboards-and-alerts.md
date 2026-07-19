@@ -153,24 +153,24 @@ on: `config/overlays/dev-observability` and
 The component adds:
 
 1. `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector-collector.telemetry-system.svc.cluster.local:4317`
-   on the assistant and conversations-apiserver Deployments (grpc port 4317,
+   on the assistant and assistant-apiserver Deployments (grpc port 4317,
    matching `internal/tracing`'s `otlptracegrpc` exporter).
 2. `servicemonitor-assistant.yaml` — a `ServiceMonitor` for the assistant's
-   plaintext `:7820/metrics`. **Not** added for conversations-apiserver: its
+   plaintext `:7820/metrics`. **Not** added for assistant-apiserver: its
    `/metrics` (from the generic `k8s.io/apiserver` library) is served over
    HTTPS with delegated `SubjectAccessReview` authorization
    (`--authorization-always-allow-paths` only covers `/healthz,/readyz,/livez`
-   — see `config/base/conversations-apiserver/deployment.yaml`), so scraping
+   — see `config/base/assistant-apiserver/deployment.yaml`), so scraping
    it would need a bearer token bound to a ClusterRole granting `get` on the
    nonResourceURL `/metrics`, wired to `vmagent`'s ServiceAccount. That's a
    real, if small, RBAC change to a shared operator's ServiceAccount; left as
    a follow-up rather than half-wiring it. Separately, and independent of
-   metrics: conversations-apiserver's own `NetworkPolicy`
-   (`config/base/conversations-apiserver/networkpolicy.yaml`) has a fixed
+   metrics: assistant-apiserver's own `NetworkPolicy`
+   (`config/base/assistant-apiserver/networkpolicy.yaml`) has a fixed
    egress allow-list (DNS, the Postgres store, the kube-apiserver) that does
    **not** include `telemetry-system:4317` — so even though this component
    sets `OTEL_EXPORTER_OTLP_ENDPOINT` on that Deployment too, traces from
-   conversations-apiserver would currently be silently dropped at the
+   assistant-apiserver would currently be silently dropped at the
    network layer if that pod ever emitted any (it wasn't exercised in this
    pass — the assistant's chat path was the one driven end to end). Widening
    that NetworkPolicy is a one-line follow-up, deliberately not made here to

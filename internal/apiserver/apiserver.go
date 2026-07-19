@@ -83,7 +83,7 @@ func (cfg *Config) Complete() CompletedConfig {
 // New builds the generic server and installs the assistant API group with the
 // bespoke Conversation storage (list/get) and the messages subresource.
 func (c completedConfig) New() (*ConversationServer, error) {
-	genericServer, err := c.GenericConfig.New("conversations-apiserver", genericapiserver.NewEmptyDelegate())
+	genericServer, err := c.GenericConfig.New("assistant-apiserver", genericapiserver.NewEmptyDelegate())
 	if err != nil {
 		return nil, err
 	}

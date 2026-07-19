@@ -7,7 +7,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: conversations-apiserver-auth-reader
+  name: assistant-apiserver-auth-reader
   namespace: kube-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -15,5 +15,5 @@ roleRef:
   name: extension-apiserver-authentication-reader
 subjects:
   - kind: ServiceAccount
-    name: conversations-apiserver
+    name: assistant-apiserver
     namespace: patch-playground

@@ -15,5 +15,5 @@ resources:
   - rbac-cluster.yaml
 
 images:
-  - name: ghcr.io/milo-os/conversations-apiserver
+  - name: ghcr.io/milo-os/assistant-apiserver
     newTag: latest

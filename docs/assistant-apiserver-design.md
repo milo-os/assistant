@@ -46,11 +46,11 @@ double-storing, no etcd, no generic `genericregistry.Store`.
 ## Architecture / data flow
 
 ```
-milo user ──(k8s token)──> kube-aggregator ──/apis/assistant.miloapis.com/v1alpha1──> conversations-apiserver
+milo user ──(k8s token)──> kube-aggregator ──/apis/assistant.miloapis.com/v1alpha1──> assistant-apiserver
                                                                                           │ (delegated authn+authz)
                                                                                           │ tenancy: project from identity
                                                                                           ▼
-A2A assistant service ──writes conversations/messages──> Postgres <──reads (list/get/messages)── conversations-apiserver
+A2A assistant service ──writes conversations/messages──> Postgres <──reads (list/get/messages)── assistant-apiserver
 ```
 
 - **A2A service:** unchanged. Writes/reads history directly via `internal/history` on every chat turn.
@@ -72,7 +72,7 @@ Types already exist: `pkg/apis/assistant/{,v1alpha1,install}` (Phase 1). Interna
 ## Repo layout to build (mirror ipam, minus allocator/blob-store/etcd)
 
 ```
-cmd/conversations-apiserver/
+cmd/assistant-apiserver/
   main.go            cobra root (+ optional `migrate` no-op / ensure-tables)
   serve.go           RecommendedOptions, delegated authn/authz, storage map, install
 internal/apiserver/
@@ -146,7 +146,7 @@ Do **not** add ipam's `*_objects`/changelog blob tables.
 
 ## config/ — deployment + APIService registration (mirror ipam/config)
 
-`config/base`: Deployment (`conversations-apiserver`, ns e.g. `assistant-system`, serve `/conversations-apiserver serve` on `:8443`, TLS via cert-manager CSI driver, `control-plane-ca` configmap mounted at `/etc/kubernetes/pki/requestheader`, `CONVERSATION_STORE_URL`/DSN env), Service (`:443 → 8443`), ServiceAccount, `rbac-auth-reader` (RoleBinding in **kube-system** to `extension-apiserver-authentication-reader` — **mandatory** for delegated authn), `rbac-cluster` (ClusterRole: read `configmaps[extension-apiserver-authentication]`, flowschemas/prioritylevelconfigurations, **`create subjectaccessreviews`**; ClusterRoleBindings to it and to `system:auth-delegator`), NetworkPolicy, PDB.
+`config/base`: Deployment (`assistant-apiserver`, ns e.g. `assistant-system`, serve `/assistant-apiserver serve` on `:8443`, TLS via cert-manager CSI driver, `control-plane-ca` configmap mounted at `/etc/kubernetes/pki/requestheader`, `CONVERSATION_STORE_URL`/DSN env), Service (`:443 → 8443`), ServiceAccount, `rbac-auth-reader` (RoleBinding in **kube-system** to `extension-apiserver-authentication-reader` — **mandatory** for delegated authn), `rbac-cluster` (ClusterRole: read `configmaps[extension-apiserver-authentication]`, flowschemas/prioritylevelconfigurations, **`create subjectaccessreviews`**; ClusterRoleBindings to it and to `system:auth-delegator`), NetworkPolicy, PDB.
 
 `config/components/api-registration`: the `APIService`:
 ```yaml
@@ -154,7 +154,7 @@ apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata: {name: v1alpha1.assistant.miloapis.com}
 spec:
-  service: {name: conversations-apiserver, namespace: assistant-system, port: 443}
+  service: {name: assistant-apiserver, namespace: assistant-system, port: 443}
   group: assistant.miloapis.com
   version: v1alpha1
   groupPriorityMinimum: 1000
@@ -185,19 +185,19 @@ set `insecureSkipTLSVerify: true` and rely on in-cluster authn/authz (kind).
 ## Phasing (each phase must `go build ./...` clean before the next)
 
 - **Phase 1 — DONE** (`dd63ecd`): `pkg/apis/assistant` types + scheme; k8s.io/apiserver v0.36.0 deps; Go 1.26.
-- **Phase 2:** bespoke REST over `internal/history` (+ `GetConversation`), `internal/apiserver`, `cmd/conversations-apiserver/serve.go` with delegated authn/authz, `internal/tenant`. Add `pkg/generated/openapi`. Deliverable: the binary runs locally against the store; `curl`/kubectl through a local secure port lists/gets.
+- **Phase 2:** bespoke REST over `internal/history` (+ `GetConversation`), `internal/apiserver`, `cmd/assistant-apiserver/serve.go` with delegated authn/authz, `internal/tenant`. Add `pkg/generated/openapi`. Deliverable: the binary runs locally against the store; `curl`/kubectl through a local secure port lists/gets.
 - **Phase 3:** `config/` (deployment, service, RBAC, APIService, milo ProtectedResource/Roles) + dev overlay wiring into `task dev:setup`. Deliverable: `kubectl get conversations -n demo-project` works in the kind cluster (in-cluster authz).
 - **Phase 4 — DONE:** CLI (`patch conversations list`/`show`, kubectl-based) + `task dev:chats`. TUI picker deferred.
 - **Phase 5 — DONE:** tests. Unit — `internal/apiserver/registry/conversation/storage_test.go`
   (fake-Reader get/list/404/tenancy/messages, from Phase 2), plus new
   `internal/tenant/tenant_test.go` (ProjectFromContext: namespace-only dev path, Extra
   match/mismatch→Forbidden, non-Project parent ignored, missing/empty namespace→BadRequest,
-  multi-valued Extra) and `cmd/conversations-apiserver/serve_test.go` (the required-DSN
-  `validate()` guard). E2e — `test/e2e/conversations-apiserver/chainsaw-test.yaml`: asserts the
+  multi-valued Extra) and `cmd/assistant-apiserver/serve_test.go` (the required-DSN
+  `validate()` guard). E2e — `test/e2e/assistant-apiserver/chainsaw-test.yaml`: asserts the
   APIService is Available, seeds a marked conversation via the chat path, then proves plain
   `kubectl get conversations`/`get conversation <id>` + the raw `messages` subresource all work
   and are project-scoped (a project with no conversations lists `[]`, not an error; no
-  cross-project leak). Runs green via `task e2e -- test/e2e/conversations-apiserver`.
+  cross-project leak). Runs green via `task e2e -- test/e2e/assistant-apiserver`.
   Deviation: seeding posts to the agent card's advertised `PUBLIC_BASE_URL` (`:1986` in dev),
   reusing an existing `task dev:forward` or standing up its own, since the a2a client dials the
   card URL rather than the fetch URL.

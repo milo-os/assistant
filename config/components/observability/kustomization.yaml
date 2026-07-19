@@ -13,16 +13,16 @@
 # errors), so adding this component is purely additive and safe to skip.
 #
 # What this adds:
-#   - OTEL_EXPORTER_OTLP_ENDPOINT on the assistant and conversations-apiserver
+#   - OTEL_EXPORTER_OTLP_ENDPOINT on the assistant and assistant-apiserver
 #     Deployments, pointed at the collector's OTLP/gRPC port (4317). The
 #     tracing SDK (internal/tracing) reads this via the standard OTel env var,
 #     no code change needed.
-#   - An egress rule on conversations-apiserver's NetworkPolicy allowing TCP
+#   - An egress rule on assistant-apiserver's NetworkPolicy allowing TCP
 #     4317 to telemetry-system, so the OTLP endpoint above is actually
 #     reachable (config/base's NetworkPolicy predates this component and its
 #     allow-list doesn't include telemetry-system). assistant has no
 #     NetworkPolicy of its own, so it needs no equivalent patch. Confirmed
-#     live: conversations-apiserver.http spans now land in Tempo.
+#     live: assistant-apiserver.http spans now land in Tempo.
 #   - A ServiceMonitor for the assistant's plaintext :7820/metrics endpoint,
 #     so vmagent (deployed with selectAllByDefault: true — confirmed live,
 #     no label restriction needed) scrapes it into Victoria Metrics.
@@ -32,10 +32,10 @@
 #     cross-namespace into the telemetry-system Grafana instance — confirmed
 #     live, renders without import errors).
 #
-# NOT included: a ServiceMonitor for conversations-apiserver. Its /metrics
+# NOT included: a ServiceMonitor for assistant-apiserver. Its /metrics
 # endpoint (from the generic k8s.io/apiserver library) is served over HTTPS
 # with delegated SubjectAccessReview authorization
-# (config/base/conversations-apiserver/deployment.yaml only allows
+# (config/base/assistant-apiserver/deployment.yaml only allows
 # /healthz,/readyz,/livez without auth) — scraping it would need a bearer
 # token bound to a ClusterRole granting `get` on the nonResourceURL
 # `/metrics`, wired to vmagent's ServiceAccount. That's a real (if small)
@@ -76,12 +76,12 @@ patches:
                     value: http://otel-collector-collector.telemetry-system.svc.cluster.local:4317
   - target:
       kind: Deployment
-      name: conversations-apiserver
+      name: assistant-apiserver
     patch: |-
       apiVersion: apps/v1
       kind: Deployment
       metadata:
-        name: conversations-apiserver
+        name: assistant-apiserver
         namespace: patch-playground
       spec:
         template:
@@ -91,7 +91,7 @@ patches:
                 env:
                   - name: OTEL_EXPORTER_OTLP_ENDPOINT
                     value: http://otel-collector-collector.telemetry-system.svc.cluster.local:4317
-  # config/base/conversations-apiserver/networkpolicy.yaml's Egress allow-list
+  # config/base/assistant-apiserver/networkpolicy.yaml's Egress allow-list
   # (DNS, the CloudNativePG store, the kube-apiserver) predates this component
   # and doesn't include telemetry-system:4317 — without this, the
   # OTEL_EXPORTER_OTLP_ENDPOINT set above is set but unreachable: the process
@@ -103,7 +103,7 @@ patches:
   # exist) keep their tighter policy.
   - target:
       kind: NetworkPolicy
-      name: conversations-apiserver
+      name: assistant-apiserver
     patch: |-
       - op: add
         path: /spec/egress/-

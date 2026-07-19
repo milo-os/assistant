@@ -45,7 +45,7 @@ const tracesEndpointEnv = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 type Shutdown func(context.Context) error
 
 // Setup installs the global OpenTelemetry tracer provider for serviceName
-// ("assistant" or "conversations-apiserver") and returns a [Shutdown] func the
+// ("assistant" or "assistant-apiserver") and returns a [Shutdown] func the
 // caller must invoke on process exit.
 //
 // Configuration is entirely via the standard OTEL_EXPORTER_OTLP_ENDPOINT (or

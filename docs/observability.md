@@ -46,7 +46,7 @@ costs nothing until it's configured.
 
 Spans, one per binary/package that emits them:
 
-- `assistant.http` / `conversations-apiserver.http` — the outermost span on
+- `assistant.http` / `assistant-apiserver.http` — the outermost span on
   every inbound HTTP request (`otelhttp`, wired in each `server.New`),
   extracting an inbound W3C `traceparent` or starting a new trace.
 - `conversation.turn` — one per `Conversation.Run` call, closed by

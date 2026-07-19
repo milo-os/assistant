@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: conversations-apiserver
+  name: assistant-apiserver
   namespace: patch-playground
 spec:
   type: ClusterIP
@@ -11,4 +11,4 @@ spec:
       targetPort: 8443
       protocol: TCP
   selector:
-    app: conversations-apiserver
+    app: assistant-apiserver

@@ -1,4 +1,4 @@
-# The conversations aggregated API server: a read-only KRM view
+# The assistant aggregated API server: a read-only KRM view
 # (assistant.miloapis.com/v1alpha1 Conversations + messages subresource) over
 # the shared conversations/messages Postgres tables the A2A assistant writes on
 # the chat hot path. It reuses the SAME CloudNativePG store as the assistant —
@@ -20,22 +20,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: conversations-apiserver
+  name: assistant-apiserver
   namespace: patch-playground
   labels:
-    app: conversations-apiserver
+    app: assistant-apiserver
     app.kubernetes.io/part-of: agent-framework-playground
 spec:
   replicas: 1
   selector:
-    matchLabels: { app: conversations-apiserver }
+    matchLabels: { app: assistant-apiserver }
   template:
     metadata:
       labels:
-        app: conversations-apiserver
+        app: assistant-apiserver
         app.kubernetes.io/part-of: agent-framework-playground
     spec:
-      serviceAccountName: conversations-apiserver
+      serviceAccountName: assistant-apiserver
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -45,7 +45,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: apiserver
-          image: ghcr.io/milo-os/conversations-apiserver
+          image: ghcr.io/milo-os/assistant-apiserver
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -56,7 +56,7 @@ spec:
               drop:
                 - ALL
           command:
-            - /usr/local/bin/conversations-apiserver
+            - /usr/local/bin/assistant-apiserver
             - serve
           args:
             - --secure-port=8443

@@ -11,7 +11,7 @@
 # fetched from. A forward on any other port only serves the initial card
 # fetch and the chat call then fails to reach an unforwarded :1986. Reuses an
 # existing `task dev:forward` if one is already up (same convention as the
-# conversations-apiserver suite's seeding step) and otherwise starts its own.
+# assistant-apiserver suite's seeding step) and otherwise starts its own.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
