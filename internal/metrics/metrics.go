@@ -34,8 +34,8 @@ import (
 // Metrics holds the assistant's application-level collectors, following the
 // same CounterVec/HistogramVec construction and "assistant_" naming
 // convention as internal/server/metrics.go. Names and label sets are pinned
-// to what config/components/observability/grafana-dashboard.json and
-// config/components/observability/alerts.yaml already assume — do not
+// to what config/components/observability/grafana-dashboard-{sre,product}.json
+// and config/components/observability/alerts.yaml already assume — do not
 // rename either without updating those files.
 type Metrics struct {
 	// TurnDuration is assistant_conversation_turn_duration_seconds, labeled

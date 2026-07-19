@@ -45,8 +45,8 @@ func newTestServerWithMetrics(t *testing.T, app *appmetrics.Metrics) *httptest.S
 }
 
 // TestApplicationMetricsRegisteredAndExposed pins that the 5 metrics added
-// alongside config/components/observability/grafana-dashboard.json and
-// alerts.yaml
+// alongside config/components/observability/grafana-dashboard-{sre,product}.json
+// and alerts.yaml
 // (assistant_conversation_turn_duration_seconds, assistant_tool_call_total,
 // assistant_model_call_duration_seconds, assistant_history_compaction_total,
 // assistant_gap_report_total) are registered on this server's /metrics
