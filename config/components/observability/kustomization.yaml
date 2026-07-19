@@ -17,6 +17,12 @@
 #     Deployments, pointed at the collector's OTLP/gRPC port (4317). The
 #     tracing SDK (internal/tracing) reads this via the standard OTel env var,
 #     no code change needed.
+#   - An egress rule on conversations-apiserver's NetworkPolicy allowing TCP
+#     4317 to telemetry-system, so the OTLP endpoint above is actually
+#     reachable (config/base's NetworkPolicy predates this component and its
+#     allow-list doesn't include telemetry-system). assistant has no
+#     NetworkPolicy of its own, so it needs no equivalent patch. Confirmed
+#     live: conversations-apiserver.http spans now land in Tempo.
 #   - A ServiceMonitor for the assistant's plaintext :7820/metrics endpoint,
 #     so vmagent (deployed with selectAllByDefault: true — confirmed live,
 #     no label restriction needed) scrapes it into Victoria Metrics.
@@ -85,3 +91,27 @@ patches:
                 env:
                   - name: OTEL_EXPORTER_OTLP_ENDPOINT
                     value: http://otel-collector-collector.telemetry-system.svc.cluster.local:4317
+  # config/base/conversations-apiserver/networkpolicy.yaml's Egress allow-list
+  # (DNS, the CloudNativePG store, the kube-apiserver) predates this component
+  # and doesn't include telemetry-system:4317 — without this, the
+  # OTEL_EXPORTER_OTLP_ENDPOINT set above is set but unreachable: the process
+  # itself never crashes or refuses traffic, but every batch export fails with
+  # "dial tcp ...:4317: i/o timeout" (logged, but easy to miss among routine
+  # apiserver noise) and no spans ever reach the collector. Appended as a
+  # JSON6902 add onto /spec/egress/- rather than folded into the base file so
+  # the plain dev/dev-anthropic overlays (where telemetry-system doesn't
+  # exist) keep their tighter policy.
+  - target:
+      kind: NetworkPolicy
+      name: conversations-apiserver
+    patch: |-
+      - op: add
+        path: /spec/egress/-
+        value:
+          to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: telemetry-system
+          ports:
+            - protocol: TCP
+              port: 4317
