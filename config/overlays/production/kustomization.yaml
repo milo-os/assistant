@@ -72,18 +72,14 @@ patches:
             value: "http://REPLACE_WITH_AI_GATEWAY_HOST/v1"
           - name: GATEWAY_MODEL
             value: "REPLACE_WITH_PRODUCTION_MODEL"
-          # ── AuthN: OIDC (real tokens), not dev ──
+          # ── AuthN: TokenReview against the Milo control plane, not dev ──
+          # Resolves each bearer token to an identity via a TokenReview using the
+          # pod's own service-account token + in-cluster API endpoint (derived
+          # from KUBERNETES_SERVICE_HOST/PORT). Override via AUTHN_TOKENREVIEW_*
+          # only for an external control plane. (OIDC — AUTH_MODE=oidc — remains a
+          # supported alternative; see docs/configuration.md.)
           - name: AUTH_MODE
-            value: "oidc"
-          - name: OIDC_ISSUER
-            valueFrom:
-              secretKeyRef: { name: assistant-oidc, key: issuer }
-          - name: OIDC_AUDIENCE
-            valueFrom:
-              secretKeyRef: { name: assistant-oidc, key: audience }
-          - name: OIDC_PROJECTS_CLAIM
-            valueFrom:
-              secretKeyRef: { name: assistant-oidc, key: projectsClaim }
+            value: "tokenreview"
           # ── AuthZ: SubjectAccessReview against the Milo control plane ──
           # SAR endpoint + credentials derive from the in-cluster service
           # account by default; override via AUTHZ_SAR_* only for an external

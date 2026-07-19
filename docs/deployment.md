@@ -8,7 +8,7 @@ Patch runs on Kubernetes as a stateless service backed by a PostgreSQL
 |---|---|
 | `config/overlays/dev` | Local kind environment (fixture capabilities, stub model). `task dev:setup`. |
 | `config/overlays/dev-catalog` | Local kind, capabilities from the service catalog. `task dev:deploy OVERLAY=dev-catalog`. |
-| `config/overlays/production` | Production posture (OIDC + SAR, TLS, HA store, backups). Reviewed-render, GitOps-applied. |
+| `config/overlays/production` | Production posture (TokenReview + SAR, TLS, HA store, backups). Reviewed-render, GitOps-applied. |
 
 The local environment is covered in [development.md](development.md).
 
@@ -27,8 +27,10 @@ the posture-vs-dev table, SAR RBAC, and follow-ups) lives next to the overlay:
 
 What the production overlay establishes, at a glance:
 
-- **AuthN/Z**: OIDC bearer tokens; SubjectAccessReview against the Milo control
-  plane (fail-closed). No dev tokens.
+- **AuthN/Z**: TokenReview against the Milo control plane resolves each bearer
+  token to an identity (OIDC still supported); SubjectAccessReview against the
+  same control plane authorizes per-project access (both fail-closed). No dev
+  tokens.
 - **Data**: a 3-instance CloudNativePG cluster with continuous backup / PITR,
   backing both conversation history and the durable task store.
 - **Availability**: 3 replicas, HPA 3–12, PodDisruptionBudget, rolling updates
@@ -38,8 +40,8 @@ What the production overlay establishes, at a glance:
   `/a2a` and `/.well-known` exposed publicly (`/metrics` and probes stay
   internal).
 - **Config safety**: the service refuses to boot on an unsafe posture (dev auth
-  with a public HTTPS URL, dev tokens in OIDC mode, a plaintext gateway to an
-  external host).
+  with a public HTTPS URL, dev tokens left set in a non-dev auth mode, a
+  plaintext gateway to an external host).
 
 ## Operations
 

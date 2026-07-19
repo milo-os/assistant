@@ -10,11 +10,14 @@ Environment variables, model backends, and the authentication/authorization seam
 | `HOST` | `0.0.0.0` | HTTP listener host |
 | `PUBLIC_BASE_URL` | `http://localhost:${PORT}` | Base URL for the card interface `url` (→ `<base>/a2a`) and CloudEvents `source` |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
-| `AUTH_MODE` | `dev` | `dev` \| `oidc` |
+| `AUTH_MODE` | `dev` | `dev` \| `oidc` \| `tokenreview` (production default) |
 | `AUTH_DEV_TOKENS` | — | Required in dev mode (format in the Auth section below) |
 | `OIDC_ISSUER` | — | Required in oidc mode |
 | `OIDC_AUDIENCE` | — | Required in oidc mode |
 | `OIDC_PROJECTS_CLAIM` | `projects` | JWT claim carrying granted projects |
+| `AUTHN_TOKENREVIEW_API_URL` | in-cluster (derived) | Control-plane base URL for the TokenReview call; unset in tokenreview mode ⇒ derived from `KUBERNETES_SERVICE_HOST/PORT` |
+| `AUTHN_TOKENREVIEW_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Assistant's own SA token for the TokenReview call |
+| `AUTHN_TOKENREVIEW_CA_CERT_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | Apiserver CA bundle for the TokenReview call |
 | `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file (fixture source); mutually exclusive with `CAPABILITY_PROVIDER_URL` |
 | `CAPABILITY_PROVIDER_URL` | — | Base URL of the capability-provider HTTP API (HTTP source); mutually exclusive with `CAPABILITY_DOCS_FIXTURE`. Both unset ⇒ no provider capabilities |
 | `CONVERSATION_STORE_URL` | — | `postgres://` URL for durable conversation history. Unset ⇒ in-memory (process lifetime). Set but unreachable ⇒ boot fails (no silent fallback to amnesia) |
@@ -121,4 +124,18 @@ default `projects`; array or space/comma-delimited string). A token with
 no such claim grants no projects. Invalid signature / audience / issuer /
 expiry → **401**. Unit-tested with a locally generated key (no live IdP
 needed).
+
+### `AUTH_MODE=tokenreview` (control-plane TokenReview) — production default
+
+Resolves the bearer token to an identity by POSTing a TokenReview to the
+Kubernetes/Milo control plane (`/apis/authentication.k8s.io/v1/tokenreviews`),
+authenticating the call with the assistant's own service-account token + CA
+(`AUTHN_TOKENREVIEW_TOKEN_PATH` / `AUTHN_TOKENREVIEW_CA_CERT_PATH`; the endpoint
+is `AUTHN_TOKENREVIEW_API_URL`, derived in-cluster when unset). The principal
+carries **only the subject** (the reviewed username) — it carries **no project
+grants**; per-project access is decided separately by the SubjectAccessReview
+**authorizer** (`AUTHZ_MODE=sar`). Fail-closed: any transport error, timeout,
+non-authenticated status, or empty username → **401**. Successful resolutions
+are cached briefly (short TTL); rejections are never cached. This is the
+production posture; `oidc` remains a supported alternative.
 

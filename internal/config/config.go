@@ -26,6 +26,10 @@ const (
 	AuthModeDev AuthMode = "dev"
 	// AuthModeOIDC verifies bearer JWTs against an OIDC issuer's JWKS.
 	AuthModeOIDC AuthMode = "oidc"
+	// AuthModeTokenReview resolves a bearer token to an identity by issuing a
+	// TokenReview against the Kubernetes/Milo control plane
+	// (auth.NewTokenReviewAuthenticator). Requires a reachable API endpoint.
+	AuthModeTokenReview AuthMode = "tokenreview"
 )
 
 // AuthzMode selects the request authorizer (who may act on a project).
@@ -40,8 +44,9 @@ const (
 	AuthzModeSAR AuthzMode = "sar"
 )
 
-// Standard in-cluster service-account mount paths, used to derive the SAR
-// endpoint and credentials when AUTHZ_MODE=sar and no explicit endpoint is set.
+// Standard in-cluster service-account mount paths, used as the default token/CA
+// source for the control-plane SubjectAccessReview (AUTHZ_MODE=sar) and
+// TokenReview (AUTH_MODE=tokenreview) calls when no explicit path is set.
 const (
 	defaultSARTokenPath  = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultSARCACertPath = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
@@ -97,6 +102,17 @@ type AuthConfig struct {
 	// AUTHZ_SAR_CA_CERT_PATH). Default to the standard in-cluster mount paths.
 	SARTokenPath  string
 	SARCACertPath string
+
+	// TokenReviewAPIURL is the control-plane API base URL the TokenReview is
+	// POSTed to (env AUTHN_TOKENREVIEW_API_URL). When unset in tokenreview mode
+	// it is derived from the in-cluster KUBERNETES_SERVICE_HOST/PORT.
+	TokenReviewAPIURL string
+	// TokenReviewTokenPath/TokenReviewCACertPath point at the assistant's own
+	// service-account token and CA bundle for the TokenReview call (envs
+	// AUTHN_TOKENREVIEW_TOKEN_PATH / AUTHN_TOKENREVIEW_CA_CERT_PATH). Default to
+	// the standard in-cluster mount paths.
+	TokenReviewTokenPath  string
+	TokenReviewCACertPath string
 }
 
 // ModelConfig holds the model-backend settings.
@@ -225,7 +241,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	logLevel := oneOf(env("LOG_LEVEL"), []string{"debug", "info", "warn", "error"}, "info")
 
 	// ── Auth ──────────────────────────────────────────────────
-	authMode := AuthMode(oneOf(env("AUTH_MODE"), []string{"dev", "oidc"}, "dev"))
+	authMode := AuthMode(oneOf(env("AUTH_MODE"), []string{"dev", "oidc", "tokenreview"}, "dev"))
 	if authMode == AuthModeDev && env("AUTH_DEV_TOKENS") == "" {
 		errs = append(errs, FieldError{"AUTH_DEV_TOKENS",
 			`AUTH_MODE=dev requires at least one token (format "token:subject:projA,projB;...")`})
@@ -241,6 +257,31 @@ func Load(getenv func(string) string) (*Config, error) {
 	projectsClaim := env("OIDC_PROJECTS_CLAIM")
 	if projectsClaim == "" {
 		projectsClaim = defaultProjectsClaim
+	}
+
+	// TokenReview authn coordinates mirror the AUTHZ_SAR_* pattern: derive the
+	// in-cluster apiserver endpoint when unset so a pod need only set
+	// AUTH_MODE=tokenreview.
+	tokenReviewAPIURL := strings.TrimRight(env("AUTHN_TOKENREVIEW_API_URL"), "/")
+	if authMode == AuthModeTokenReview && tokenReviewAPIURL == "" {
+		if host := env("KUBERNETES_SERVICE_HOST"); host != "" {
+			port := env("KUBERNETES_SERVICE_PORT")
+			if port == "" {
+				port = "443"
+			}
+			tokenReviewAPIURL = "https://" + net.JoinHostPort(host, port)
+		} else {
+			errs = append(errs, FieldError{"AUTHN_TOKENREVIEW_API_URL",
+				"AUTH_MODE=tokenreview requires AUTHN_TOKENREVIEW_API_URL (no in-cluster KUBERNETES_SERVICE_HOST to derive it from)"})
+		}
+	}
+	tokenReviewTokenPath := env("AUTHN_TOKENREVIEW_TOKEN_PATH")
+	if tokenReviewTokenPath == "" {
+		tokenReviewTokenPath = defaultSARTokenPath
+	}
+	tokenReviewCACertPath := env("AUTHN_TOKENREVIEW_CA_CERT_PATH")
+	if tokenReviewCACertPath == "" {
+		tokenReviewCACertPath = defaultSARCACertPath
 	}
 
 	// ── Authorization mode ────────────────────────────────────
@@ -352,6 +393,10 @@ func Load(getenv func(string) string) (*Config, error) {
 			SARVerb:           env("AUTHZ_SAR_VERB"),
 			SARTokenPath:      sarTokenPath,
 			SARCACertPath:     sarCACertPath,
+
+			TokenReviewAPIURL:     tokenReviewAPIURL,
+			TokenReviewTokenPath:  tokenReviewTokenPath,
+			TokenReviewCACertPath: tokenReviewCACertPath,
 		},
 		CapabilityDocsFixture:          capabilityDocsFixture,
 		CapabilityProviderURL:          capabilityProviderURL,
@@ -395,12 +440,12 @@ func productionInvariants(authMode AuthMode, authzMode AuthzMode, publicBaseURL,
 			"AUTH_MODE=dev with an https:// PUBLIC_BASE_URL is an unsafe production posture (static dev tokens on an internet-facing endpoint); use AUTH_MODE=oidc"})
 	}
 
-	// 2. Leftover dev tokens in a non-dev auth mode. In oidc mode AUTH_DEV_TOKENS
-	//    is ignored — its presence signals a stale/committed dev credential that
-	//    must not ship.
-	if authMode == AuthModeOIDC && strings.TrimSpace(devTokens) != "" {
+	// 2. Leftover dev tokens in a non-dev auth mode. In oidc/tokenreview modes
+	//    AUTH_DEV_TOKENS is ignored — its presence signals a stale/committed dev
+	//    credential that must not ship.
+	if authMode != AuthModeDev && strings.TrimSpace(devTokens) != "" {
 		errs = append(errs, FieldError{"AUTH_DEV_TOKENS",
-			"AUTH_DEV_TOKENS must not be set when AUTH_MODE=oidc — remove the dev token before production"})
+			fmt.Sprintf("AUTH_DEV_TOKENS must not be set when AUTH_MODE=%s — remove the dev token before production", authMode)})
 	}
 
 	// 3. Plaintext model gateway to an external host. Gateway mode carries the
