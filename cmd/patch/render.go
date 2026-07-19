@@ -13,6 +13,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -85,6 +86,42 @@ func renderChat(events iter.Seq2[a2a.Event, error], jsonOut bool, io Io) (int, e
 		return 0, nil
 	}
 	return 1, nil
+}
+
+// renderCompactResult prints the outcome of `patch compact` (POST
+// /v1/compact via [requestCompact]) and returns the process exit code: 0 on
+// success or "nothing to compact" (neither is a user-facing failure), 1 on a
+// real error. Unlike renderChat there is no event stream — one request, one
+// outcome — so this mirrors renderTask's simple pretty/--json split instead.
+func renderCompactResult(err error, jsonOut bool, io Io) int {
+	compacted := err == nil
+	nothingToDo := errors.Is(err, ErrNothingToCompact)
+
+	if jsonOut {
+		body := map[string]any{"compacted": compacted}
+		if nothingToDo {
+			body["reason"] = "nothing to compact"
+		} else if err != nil {
+			body["error"] = err.Error()
+		}
+		if b, mErr := json.Marshal(body); mErr == nil {
+			io.Out(string(b) + "\n")
+		}
+	} else {
+		switch {
+		case compacted:
+			io.Out("history compacted\n")
+		case nothingToDo:
+			io.Out("nothing to compact\n")
+		default:
+			io.Err("patch: " + err.Error() + "\n")
+		}
+	}
+
+	if err != nil && !nothingToDo {
+		return 1
+	}
+	return 0
 }
 
 // renderCard prints an agent card, either pretty or as raw JSON.

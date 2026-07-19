@@ -40,12 +40,21 @@ func (fakeRunner) Run(_ context.Context, req assistanta2a.RunRequest, sink assis
 }
 
 const (
-	goodToken = "good"
+	goodToken  = "good"
 	wrongToken = "wrong"
 	project    = "demo-project"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return newTestServerWithCompactor(t, nil)
+}
+
+// newTestServerWithCompactor is [newTestServer] plus an injectable
+// [assistanta2a.Compactor], for the POST /v1/compact tests — every other
+// caller passes nil (matching production before a Runner implementing
+// Compactor exists) and gets identical behavior to newTestServer.
+func newTestServerWithCompactor(t *testing.T, compactor assistanta2a.Compactor) *httptest.Server {
 	t.Helper()
 	cfg, err := config.Load(config.MapGetenv(map[string]string{
 		"AUTH_MODE":       "dev",
@@ -63,6 +72,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 		Authenticator: mustAuthenticator(t, cfg, log),
 		Authorizer:    auth.NewAuthorizer(cfg, log),
 		Runner:        fakeRunner{},
+		Compactor:     compactor,
 	})
 	srv := httptest.NewServer(app)
 	t.Cleanup(srv.Close)

@@ -51,12 +51,7 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// ── AuthN ─────────────────────────────────────────────────
-	token := auth.ExtractBearerToken(r.Header.Get("Authorization"))
-	if token == "" {
-		writeAuthError(w, http.StatusUnauthorized, "Missing bearer token")
-		return
-	}
-	principal, err := m.authenticator.Authenticate(ctx, token)
+	principal, err := authenticateBearer(ctx, m.authenticator, r)
 	if err != nil {
 		m.writeAuthErr(w, err, "Authentication failed")
 		return
@@ -88,6 +83,19 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m.next.ServeHTTP(w, r)
+}
+
+// authenticateBearer resolves the bearer token on r to a [auth.Principal], or
+// an [*auth.Error] (401) on a missing/invalid token. It is the exact authn
+// step authMiddleware applies in front of POST /a2a, pulled out so other
+// routes needing the identical bearer-token scheme (POST /v1/compact) don't
+// duplicate it.
+func authenticateBearer(ctx context.Context, authenticator auth.Authenticator, r *http.Request) (auth.Principal, error) {
+	token := auth.ExtractBearerToken(r.Header.Get("Authorization"))
+	if token == "" {
+		return auth.Principal{}, auth.Unauthenticated("Missing bearer token")
+	}
+	return authenticator.Authenticate(ctx, token)
 }
 
 // authorize resolves the target project from the JSON-RPC request and checks it
@@ -184,12 +192,19 @@ func taskIDFromParams(raw json.RawMessage) string {
 
 // writeAuthErr maps an [*auth.Error] to its HTTP status, or falls back to 401.
 func (m *authMiddleware) writeAuthErr(w http.ResponseWriter, err error, fallbackMsg string) {
+	writeAuthErrWith(w, m.logger, err, fallbackMsg)
+}
+
+// writeAuthErrWith is [authMiddleware.writeAuthErr] without needing an
+// authMiddleware receiver, for other handlers (POST /v1/compact) sharing the
+// same authn/authz error mapping.
+func writeAuthErrWith(w http.ResponseWriter, logger *slog.Logger, err error, fallbackMsg string) {
 	var authErr *auth.Error
 	if errors.As(err, &authErr) {
 		writeAuthError(w, authErr.Status, authErr.Message)
 		return
 	}
-	m.logger.Error("a2a.auth.error", "error", err.Error())
+	logger.Error("http.auth.error", "error", err.Error())
 	writeAuthError(w, http.StatusUnauthorized, fallbackMsg)
 }
 

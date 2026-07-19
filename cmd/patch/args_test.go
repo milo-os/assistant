@@ -44,6 +44,26 @@ func TestParseArgs(t *testing.T) {
 			want: command{kind: cmdError, errMsg: "chat: --project <name> is required"},
 		},
 		{
+			name: "compact",
+			argv: []string{"compact", "--project", "demo", "--context-id", "ctx-1"},
+			want: command{kind: cmdCompact, project: "demo", contextID: "ctx-1"},
+		},
+		{
+			name: "compact --json",
+			argv: []string{"compact", "--project", "demo", "--context-id", "ctx-1", "--json"},
+			want: command{kind: cmdCompact, project: "demo", contextID: "ctx-1", json: true},
+		},
+		{
+			name: "compact missing project",
+			argv: []string{"compact", "--context-id", "ctx-1"},
+			want: command{kind: cmdError, errMsg: "compact: --project <name> is required"},
+		},
+		{
+			name: "compact missing context-id",
+			argv: []string{"compact", "--project", "demo"},
+			want: command{kind: cmdError, errMsg: "compact: --context-id <c> is required"},
+		},
+		{
 			name: "conversations list",
 			argv: []string{"conversations", "list", "--project", "demo"},
 			want: command{kind: cmdConvList, project: "demo"},

@@ -67,7 +67,7 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 		}
 		defer client.Destroy()
 		if cmd.tui {
-			return runChatTUI(ctx, client, cmd.project, cmd.contextID, cmd.message, cmd.kubeconfig)
+			return runChatTUI(ctx, client, cmd.project, cmd.contextID, cmd.message, cmd.kubeconfig, baseURL, token)
 		}
 		if cmd.interactive {
 			return runRepl(ctx, client, cmd.project, cmd.contextID, cmd.message, io)
@@ -82,6 +82,10 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 			io.Err("context: " + contextID + "  (continue with --context-id)\n")
 		}
 		return code
+
+	case cmdCompact:
+		err := requestCompact(ctx, baseURL, token, cmd.project, cmd.contextID)
+		return renderCompactResult(err, cmd.json, io)
 
 	case cmdTaskGet:
 		client, err := newClient(ctx, baseURL, token)

@@ -324,6 +324,66 @@ func TestPreviewPaneShowsLoadingThenContent(t *testing.T) {
 	}
 }
 
+// TestCompactWithNoConversationIsNoop pins that /compact before any turn has
+// happened (no contextID yet — there is nothing on the server to compact)
+// reports that inline without touching m.working or spawning the network
+// goroutine (m.prog is nil in this test model, so that goroutine would panic
+// on send — this path must return before it's launched).
+func TestCompactWithNoConversationIsNoop(t *testing.T) {
+	m := newTestModel()
+	typeText(t, m, "/compact")
+	m.onKey(key(tea.KeyEnter, ""))
+	if m.working {
+		t.Fatal("/compact with no conversation should not enter the working state")
+	}
+	if len(m.turns) != 1 || !strings.Contains(m.turns[0], "nothing to compact") {
+		t.Fatalf("turns = %v, want a single 'nothing to compact' line", m.turns)
+	}
+}
+
+// TestCompactDoneMsg_Success/_NothingToCompact/_Error drive
+// chatModel.Update(compactDoneMsg{...}) directly — the same way the picker
+// tests drive pickerListMsg — rather than going through the real /compact
+// goroutine, so these stay pure state-transition tests.
+func TestCompactDoneMsg_Success(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(compactDoneMsg{err: nil})
+	if m.working {
+		t.Fatal("a completed /compact should clear the working state")
+	}
+	if len(m.turns) != 1 || !strings.Contains(m.turns[0], "history compacted") {
+		t.Fatalf("turns = %v, want a 'history compacted' line", m.turns)
+	}
+	if len(m.raw) != 1 || m.raw[0].role != "system" {
+		t.Fatalf("raw = %+v, want one system-role entry", m.raw)
+	}
+}
+
+func TestCompactDoneMsg_NothingToCompact(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(compactDoneMsg{err: ErrNothingToCompact})
+	if m.working {
+		t.Fatal("compactDoneMsg should clear the working state even on ErrNothingToCompact")
+	}
+	if len(m.turns) != 1 || !strings.Contains(m.turns[0], "nothing to compact") {
+		t.Fatalf("turns = %v, want a 'nothing to compact' line", m.turns)
+	}
+}
+
+func TestCompactDoneMsg_Error(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(compactDoneMsg{err: errors.New("boom")})
+	if m.working {
+		t.Fatal("compactDoneMsg should clear the working state even on a real error")
+	}
+	if len(m.turns) != 1 || !strings.Contains(m.turns[0], "boom") {
+		t.Fatalf("turns = %v, want the error text surfaced", m.turns)
+	}
+}
+
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if !strings.Contains(s, sub) {

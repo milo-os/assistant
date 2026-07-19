@@ -12,6 +12,7 @@
 //	patch card [--json]
 //	patch chat "<message>" --project <p> [--context-id <c>] [--json]
 //	patch chat -i --project <p> [--context-id <c>]
+//	patch compact --project <p> --context-id <c> [--json]
 //	patch conversations list --project <p> [--json]
 //	patch conversations show <context-id> --project <p> [--json]
 //	patch gaps list --project <p> [--json]
@@ -31,6 +32,7 @@ const (
 	cmdError
 	cmdCard
 	cmdChat
+	cmdCompact
 	cmdConvList
 	cmdConvShow
 	cmdGapList
@@ -100,6 +102,18 @@ func parseArgs(argv []string) command {
 		common.interactive = flags.interactive
 		common.tui = flags.tui
 		common.kubeconfig = flags.kubeconfig
+		return common
+
+	case "compact":
+		if flags.project == "" {
+			return command{kind: cmdError, errMsg: "compact: --project <name> is required"}
+		}
+		if flags.contextID == "" {
+			return command{kind: cmdError, errMsg: "compact: --context-id <c> is required"}
+		}
+		common.kind = cmdCompact
+		common.project = flags.project
+		common.contextID = flags.contextID
 		return common
 
 	case "conversations", "conversation", "conv":
@@ -284,6 +298,7 @@ Usage:
   patch chat "<message>" --project <name> [--context-id <c>] [--json]
   patch chat -i --project <name> [--context-id <c>]
   patch chat --tui --project <name> [--context-id <c>] ["<message>"]
+  patch compact --project <name> --context-id <c> [--json]
   patch conversations list --project <name> [--json]
   patch conversations show <context-id> --project <name> [--json]
   patch gaps list --project <name> [--json]
@@ -304,7 +319,9 @@ Options:
                       commands. Slash commands: /resume (browse/resume a past
                       conversation, with a live preview of each one's
                       transcript as you move the cursor), /clear (start a
-                      fresh one), /export (save the transcript to a file),
+                      fresh one), /compact (force history compaction now,
+                      instead of waiting for the automatic threshold),
+                      /export (save the transcript to a file),
                       /status (show project/conversation/turn count), /help
                       (list commands), /quit or /exit (leave; Ctrl-C also
                       leaves)
@@ -320,6 +337,15 @@ Environment:
   PATCH_URL          Service base URL, e.g. http://localhost:7820
   PATCH_TOKEN        Bearer token for the service
   KUBECONFIG         Kubeconfig used by 'conversations' (the apiserver read view)
+
+Compact:
+  'compact' forces the assistant to summarize an existing conversation's older
+  history right now, instead of waiting for the automatic threshold trigger.
+  Same PATCH_URL/PATCH_TOKEN as 'chat' (it calls the assistant service, not
+  the apiserver). --context-id must name an existing conversation; if there
+  is nothing to compact (empty history, or already reduced to one summary)
+  it reports that rather than treating it as a failure. The chat --tui has
+  the same thing as /compact.
 
 Conversations:
   'conversations' browses the durable chat history exposed by the

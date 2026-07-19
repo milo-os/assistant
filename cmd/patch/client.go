@@ -8,8 +8,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
@@ -42,6 +47,63 @@ func buildMessage(text, project, contextID string) *a2a.Message {
 	msg.SetMeta("projectName", project)
 	msg.ContextID = contextID
 	return msg
+}
+
+// ErrNothingToCompact is returned by [requestCompact] when the server ran the
+// request successfully but found nothing to compact (its compacted:false
+// response — see internal/server/compact.go). Distinguished from a transport
+// or server-side failure so callers (patch compact, the chat TUI's /compact)
+// can show a friendlier message instead of treating it as an error.
+var ErrNothingToCompact = errors.New("nothing to compact")
+
+// requestCompact calls POST /v1/compact — the manual, user-triggered history
+// compaction endpoint outside the A2A JSON-RPC surface (there is no message
+// to answer, just a store mutation) — for one project/conversation. It reuses
+// this CLI's usual bearer-token auth ([bearerTransport]) rather than a
+// separate scheme, matching the server's own reuse of POST /a2a's auth for
+// this route.
+func requestCompact(ctx context.Context, baseURL, token, project, contextID string) error {
+	body, err := json.Marshal(map[string]string{"contextId": contextID, "projectName": project})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(baseURL, "/") + "/v1/compact"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Transport: bearerTransport{token: token, base: http.DefaultTransport}}
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(res.Body).Decode(&errBody)
+		msg := errBody.Error
+		if msg == "" {
+			msg = res.Status
+		}
+		return fmt.Errorf("compact: %s", msg)
+	}
+
+	var out struct {
+		Compacted bool   `json:"compacted"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return fmt.Errorf("compact: decode response: %w", err)
+	}
+	if !out.Compacted {
+		return ErrNothingToCompact
+	}
+	return nil
 }
 
 // bearerTransport is an http.RoundTripper that injects "Authorization: Bearer

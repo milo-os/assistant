@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/auth"
 	"github.com/milo-os/assistant/internal/config"
 	"github.com/milo-os/assistant/internal/logger"
@@ -105,12 +106,22 @@ func run() error {
 	defer runnerCleanup()
 	defer taskStoreCleanup()
 
+	// runner also implements assistanta2a.Compactor (conversationRunner.Compact,
+	// see runner.go) over the exact same agent.Conversation instance Run turns
+	// against, so this is just exposing existing wiring, not building a second
+	// one. The assertion always succeeds today (newAgentRunner's only return
+	// type implements it) but is left as an assertion rather than a direct
+	// field so a future AgentRunner implementation without compaction support
+	// degrades to "compaction unavailable" instead of failing to build.
+	compactor, _ := runner.(assistanta2a.Compactor)
+
 	deps := server.Deps{
 		Config:        cfg,
 		Logger:        log,
 		Authenticator: authenticator,
 		Authorizer:    authorizer,
 		Runner:        runner,
+		Compactor:     compactor,
 		ReadyCheck:    readyCheck(cfg, durableTasks, log),
 		Metrics:       metrics,
 	}

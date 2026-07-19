@@ -1,6 +1,9 @@
 package a2a
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // RunState is the terminal outcome of an agent run.
 type RunState string
@@ -49,4 +52,30 @@ type RunSink interface {
 // import this one; cmd/assistant adapts the concrete implementation to it.
 type AgentRunner interface {
 	Run(ctx context.Context, req RunRequest, sink RunSink) RunResult
+}
+
+// CompactRequest identifies one manual, user-triggered history compaction
+// (the "/compact" command), as opposed to a [RunRequest] turn.
+type CompactRequest struct {
+	ProjectName string
+	// ContextID is the A2A contextId == conversation id whose history is
+	// being compacted.
+	ContextID string
+}
+
+// ErrNothingToCompact is returned by [Compactor.Compact] when the target
+// conversation has no history to fold — empty, or already reduced to a
+// single summary turn by a prior compaction. It is a sentinel at this layer
+// (distinct from, but mapped from, internal/agent's own ErrNothingToCompact)
+// so this package and internal/server never need to import internal/agent
+// just to recognize the case — the concrete AgentRunner implementation
+// (cmd/assistant) does that mapping.
+var ErrNothingToCompact = errors.New("a2a: nothing to compact")
+
+// Compactor is implemented by an [AgentRunner] that also supports manual
+// history compaction. It is a separate, optional interface — not folded into
+// AgentRunner — because not every runner needs to support it (fakes used in
+// tests of the run path have no reason to).
+type Compactor interface {
+	Compact(ctx context.Context, req CompactRequest) error
 }

@@ -38,6 +38,12 @@ type Deps struct {
 	Authorizer    auth.Authorizer
 	Runner        assistanta2a.AgentRunner
 
+	// Compactor drives POST /v1/compact (the manual "/compact" command). Nil
+	// answers 503 on that route rather than failing to build the server — a
+	// Runner that doesn't implement [assistanta2a.Compactor] simply doesn't
+	// offer manual compaction.
+	Compactor assistanta2a.Compactor
+
 	// TaskStore backs the A2A task lifecycle. When nil the server falls back to
 	// the a2a-go in-memory store (dev/tests): tasks are lost on restart. Boot
 	// injects the durable Postgres store (internal/taskstore) when a conversation
@@ -122,6 +128,9 @@ func New(deps Deps) http.Handler {
 	mux.Handle("GET /.well-known/agent-card.json", card)
 	mux.Handle("GET /.well-known/agent.json", card) // legacy pre-1.0 well-known path
 	mux.Handle("POST /a2a", mw)
+	// Manual compaction ("/compact"): same bearer-token authn/project authz as
+	// POST /a2a, same underlying agent.Conversation — see compact.go.
+	mux.Handle("POST /v1/compact", compactHandler(deps.Compactor, deps.Authenticator, deps.Authorizer, logger))
 
 	// Outer-to-inner: tracing → request-id/logging → metrics → routes.
 	// otelhttp is outermost so it extracts an inbound W3C traceparent (or

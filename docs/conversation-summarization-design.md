@@ -156,6 +156,49 @@ always an acceptable fallback, silently worsening it is not.
   entirely, e.g. for load-testing or if a customer wants zero synthetic
   model calls injected into their history.
 
+### 6. Manual compaction (`/compact`)
+
+Everything above is the *automatic* path: `maybeCompact` fires only once
+`CompactionThresholdRatio` is crossed, and always fails open (#4) — a bad fit
+for a user who explicitly wants to compact right now, e.g. right before a
+long session to reclaim budget, or to confirm compaction works at all. That
+needed a second, user-triggered entry point with the opposite failure
+posture:
+
+- `internal/agent/conversation.go` splits the actual summarize-then-persist
+  work out of `maybeCompact` into an unexported `compactNow(ctx, params,
+  turns)`, shared by both callers. `maybeCompact` keeps its threshold check
+  and fail-open behavior around it; a new exported `Conversation.Compact(ctx,
+  params) error` calls `compactNow` unconditionally and **never fails open**
+  — the whole point of a manual command is that the user sees whether it
+  actually worked. It returns the exported `ErrNothingToCompact` when there's
+  no stored history, or the stored history is already a single summary turn
+  (nothing left to fold), and a real error for any summarize/store failure or
+  a summarization that didn't actually shrink the estimated token count.
+- **Transport: a plain REST endpoint, not the A2A `/a2a` JSON-RPC surface.**
+  `/a2a` is a message-turn protocol (`SendMessage`/`SendStreamingMessage`
+  expect a task and an answer); compaction produces no answer, just a store
+  mutation. `POST /v1/compact` (`internal/server/compact.go`) takes
+  `{"contextId", "projectName"}` and reuses `/a2a`'s exact bearer-token authn
+  and per-project authz (`authenticateBearer`, `Authorizer.AuthorizeProject`
+  in `internal/server/middleware.go`) rather than inventing a second auth
+  scheme, and drives the same `*agent.Conversation` the A2A executor runs
+  turns against — via a new `assistanta2a.Compactor` interface
+  (`internal/a2a/runner.go`) that `cmd/assistant`'s `conversationRunner`
+  (already the `AgentRunner` wrapping that `*agent.Conversation`) also
+  implements, so `cmd/assistant/main.go` just type-asserts the existing
+  runner into `server.Deps.Compactor` instead of building a second
+  orchestration instance.
+- **Clients:** `cmd/patch`'s `patch compact --project <p> --context-id <c>`
+  subcommand, and the chat `--tui`'s `/compact` slash command (same pattern
+  as `/clear`/`/export`: reset the input, flip to the working/spinner state,
+  run the request in a goroutine, report success/"nothing to
+  compact"/failure as a transcript line). Both go through a shared
+  `requestCompact` HTTP client helper (`cmd/patch/client.go`) using the same
+  `bearerTransport`/`PATCH_URL`/`PATCH_TOKEN` plumbing every other `patch`
+  command already uses — `/v1/compact` needed a plain `http.Client` call
+  since it isn't reachable through the a2a-go client used for `/a2a`.
+
 ## Non-goals
 
 - **Cross-conversation summarization.** Scope stays inside one `contextId`,
@@ -172,10 +215,12 @@ always an acceptable fallback, silently worsening it is not.
   "explicit, model-decided, ask-before-overwrite" contract meaningless.
   Nothing here writes to memory; the model can still call `memory_remember`
   on its own if something in a long conversation is worth keeping forever.
-- **User-visible "N turns were summarized" indicator in the live `--tui`
-  transcript**, beyond `/export`/`conversations show` rendering the summary
-  turn distinctly per #2. A dedicated UI affordance can follow once the
-  underlying mechanism is live and its behavior is understood in practice.
+- **A live progress indicator (e.g. "summarizing turn 3 of 15…") while a
+  compaction is in flight**, beyond the plain working/spinner state
+  `--tui`/`patch compact` already show for any in-flight request. The manual
+  `/compact` command (see "Manual compaction" below) does have a
+  user-visible trigger and result now — what's still out of scope is a
+  step-by-step progress readout for a single (short) summarize call.
 
 ## Resolved design questions
 
@@ -240,3 +285,32 @@ for where each lands:
 - `cmd/patch/gaps.go`-adjacent read-path files (`cmd/patch/chat.go` /
   `render.go`, `internal/apiserver/registry/conversation`) — render a summary
   turn distinctly wherever messages are displayed.
+- `internal/agent/conversation.go` — `compactNow` extracted from
+  `maybeCompact`, exported `Conversation.Compact`, `ErrNothingToCompact`
+  (manual compaction, #6).
+- `internal/agent/compact_test.go` — `Conversation.Compact` coverage: empty
+  history, single-summary-turn, normal compaction, summarize failure.
+- `internal/a2a/runner.go` — `CompactRequest`, `Compactor` interface,
+  `ErrNothingToCompact` sentinel.
+- `cmd/assistant/runner.go` — `conversationRunner.Compact` (adapts
+  `agent.Conversation.Compact` to `assistanta2a.Compactor`).
+- `cmd/assistant/main.go` — type-asserts the existing runner into
+  `server.Deps.Compactor`.
+- `internal/server/compact.go` — `POST /v1/compact` handler.
+- `internal/server/middleware.go` — `authenticateBearer`/`writeAuthErrWith`
+  extracted for reuse by `compact.go`.
+- `internal/server/server.go` — `Deps.Compactor`, route registration.
+- `internal/server/compact_test.go` — endpoint coverage: auth rejection,
+  missing fields, success, `ErrNothingToCompact`, store/runner failure, nil
+  compactor.
+- `cmd/patch/args.go` — `patch compact` subcommand parsing + usage text.
+- `cmd/patch/client.go` — `requestCompact`, `ErrNothingToCompact`.
+- `cmd/patch/render.go` — `renderCompactResult`.
+- `cmd/patch/run.go` — `cmdCompact` dispatch; `runChatTUI` gains
+  `baseURL`/`token` params for `/compact`.
+- `cmd/patch/chat_tui.go` — `/compact` slash command, `compactDoneMsg`,
+  `chatModel.compact`, `commandNames`/`commandDescriptions`/`helpText`
+  entries.
+- `cmd/patch/args_test.go`, `cmd/patch/compact_test.go`,
+  `cmd/patch/chat_tui_test.go` — CLI flag parsing, `requestCompact`/`Run`
+  dispatch, and TUI state-transition coverage for `/compact`.

@@ -56,6 +56,10 @@ type (
 	}
 	// streamErrMsg is a transport/stream error surfaced by the a2a client.
 	streamErrMsg struct{ err error }
+	// compactDoneMsg ends a /compact request (POST /v1/compact, outside the
+	// a2a client): err is nil on success, [ErrNothingToCompact] when the
+	// server had nothing to fold, or any other error on a real failure.
+	compactDoneMsg struct{ err error }
 	// pickerListMsg delivers the picker's conversation listing (or an error).
 	pickerListMsg struct {
 		items []assistantv1alpha1.Conversation
@@ -190,6 +194,8 @@ type chatModel struct {
 	client     *a2aclient.Client
 	project    string
 	kubeconfig string // for the /resume picker's kubectl calls; "" uses normal resolution
+	baseURL    string // for /compact's POST /v1/compact call (outside the a2a client)
+	token      string
 
 	vp       viewport.Model
 	ti       textinput.Model
@@ -223,7 +229,7 @@ type chatModel struct {
 	width        int // full terminal width; content width subtracts padding
 }
 
-func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextID, firstMessage, kubeconfig string) int {
+func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextID, firstMessage, kubeconfig, baseURL, token string) int {
 	st := newStyles(false) // provisional (light) until the background is learned
 
 	sp := spin.New(spin.WithSpinner(spin.Dot), spin.WithStyle(st.patch))
@@ -238,6 +244,8 @@ func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextI
 		client:       client,
 		project:      project,
 		kubeconfig:   kubeconfig,
+		baseURL:      baseURL,
+		token:        token,
 		contextID:    contextID,
 		vp:           viewport.New(),
 		ti:           ti,
@@ -334,6 +342,22 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.raw = append(m.raw, transcriptTurn{role: "system", content: "error: " + errText})
 		m.answer.Reset()
 		m.working = false
+		m.rebuildViewport()
+		return m, nil
+
+	case compactDoneMsg:
+		m.working = false
+		switch {
+		case msg.err == nil:
+			m.turns = append(m.turns, m.st.subtle.Render("history compacted"))
+			m.raw = append(m.raw, transcriptTurn{role: "system", content: "history compacted"})
+		case errors.Is(msg.err, ErrNothingToCompact):
+			m.turns = append(m.turns, m.st.subtle.Render("nothing to compact"))
+			m.raw = append(m.raw, transcriptTurn{role: "system", content: "nothing to compact"})
+		default:
+			m.turns = append(m.turns, m.st.err.Render("⚠ compact failed: "+msg.err.Error()))
+			m.raw = append(m.raw, transcriptTurn{role: "system", content: "compact failed: " + msg.err.Error()})
+		}
 		m.rebuildViewport()
 		return m, nil
 
@@ -442,6 +466,17 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.answer.Reset()
 			m.rebuildViewport()
 			return m, nil
+		case "/compact":
+			m.ti.Reset()
+			if m.contextID == "" {
+				m.turns = append(m.turns, m.st.subtle.Render("nothing to compact — no conversation yet"))
+				m.rebuildViewport()
+				return m, nil
+			}
+			m.working = true
+			m.rebuildViewport()
+			go m.compact()
+			return m, m.sp.Tick
 		case "/help":
 			m.ti.Reset()
 			m.overlay = "help"
@@ -760,6 +795,7 @@ func previewLine(s string, maxRunes int) string {
 var helpText = []struct{ cmd, desc string }{
 	{"/resume", "browse and resume a past conversation (with a live preview)"},
 	{"/clear", "start a fresh conversation, clearing this transcript"},
+	{"/compact", "compact this conversation's history now"},
 	{"/export", "save this transcript to a file"},
 	{"/status", "show the current project, conversation, and turn count"},
 	{"/help", "show this list"},
@@ -769,19 +805,20 @@ var helpText = []struct{ cmd, desc string }{
 // commandNames is every literal slash command the input recognizes, for
 // autocomplete matching — helpText groups /quit and /exit into one display
 // row, but they're two distinct completable commands here.
-var commandNames = []string{"/resume", "/clear", "/export", "/status", "/help", "/quit", "/exit"}
+var commandNames = []string{"/resume", "/clear", "/compact", "/export", "/status", "/help", "/quit", "/exit"}
 
 // commandDescriptions is what the suggestion list shows next to each command
 // (see suggestionBar); unlike helpText it keys /quit and /exit separately
 // since they're independently completable here.
 var commandDescriptions = map[string]string{
-	"/resume": "browse and resume a past conversation (with a live preview)",
-	"/clear":  "start a fresh conversation, clearing this transcript",
-	"/export": "save this transcript to a file",
-	"/status": "show the current project, conversation, and turn count",
-	"/help":   "show the command list",
-	"/quit":   "leave",
-	"/exit":   "leave",
+	"/resume":  "browse and resume a past conversation (with a live preview)",
+	"/clear":   "start a fresh conversation, clearing this transcript",
+	"/compact": "compact this conversation's history now",
+	"/export":  "save this transcript to a file",
+	"/status":  "show the current project, conversation, and turn count",
+	"/help":    "show the command list",
+	"/quit":    "leave",
+	"/exit":    "leave",
 }
 
 // isExactCommand reports whether text is already a fully-typed command, so
@@ -1038,6 +1075,15 @@ func (m *chatModel) stream(text, contextID string) {
 		}
 	}
 	m.prog.Send(streamDoneMsg{contextID: seen})
+}
+
+// compact runs one manual "/compact" request against POST /v1/compact — a
+// plain REST call, not the a2a client, since there is no message to answer —
+// and reports the outcome back via p.Send, the same producer-in-a-goroutine
+// pattern [chatModel.stream] uses.
+func (m *chatModel) compact() {
+	err := requestCompact(m.ctx, m.baseURL, m.token, m.project, m.contextID)
+	m.prog.Send(compactDoneMsg{err: err})
 }
 
 // contentWidth is the usable inner width: terminal width minus the outer box's

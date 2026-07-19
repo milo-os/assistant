@@ -354,24 +354,35 @@ func (c *Conversation) loadHistory(ctx context.Context, params Params) []history
 	return history.Truncate(turns, budget)
 }
 
-// maybeCompact synchronously summarizes the oldest SummaryBatchTurns turns
-// into one digest and persists [summary]+keep via History.Compact, once the
-// stored turns' estimated token cost crosses CompactionThresholdRatio of
-// budget. Below the threshold, or on any failure (summarize errors, or
-// Compact errors), it returns turns unchanged — compaction never blocks or
-// fails the turn; the caller falls open to plain Truncate exactly as before
-// this feature existed (docs/conversation-summarization-design.md #4).
-//
-// Because the batch is always turns[:batchLen] starting at index 0, a summary
-// turn already at the head of turns (a conversation compacted before) is
-// folded into the new digest alongside the newly-aging raw turns — anchored
-// iterative summarization, not a one-shot summary that never updates again.
+// maybeCompact triggers compactNow once the stored turns' estimated token
+// cost crosses CompactionThresholdRatio of budget; below the threshold it
+// returns turns unchanged. This is the automatic path — see [Conversation.Compact]
+// for the manual, threshold-free entry point used by the /compact command.
 func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []history.Turn, budget int) []history.Turn {
 	if len(turns) == 0 || budget <= 0 {
 		return turns
 	}
 	threshold := int(float64(budget) * CompactionThresholdRatio)
 	if history.EstimateTokens(turns) <= threshold {
+		return turns
+	}
+	return c.compactNow(ctx, params, turns)
+}
+
+// compactNow synchronously summarizes the oldest SummaryBatchTurns turns into
+// one digest and persists [summary]+keep via History.Compact, unconditionally
+// (no threshold check — callers gate that themselves). On any failure
+// (summarize errors, or Compact errors), it returns turns unchanged —
+// compaction never blocks or fails the turn; the caller falls open to plain
+// Truncate exactly as before this feature existed
+// (docs/conversation-summarization-design.md #4).
+//
+// Because the batch is always turns[:batchLen] starting at index 0, a summary
+// turn already at the head of turns (a conversation compacted before) is
+// folded into the new digest alongside the newly-aging raw turns — anchored
+// iterative summarization, not a one-shot summary that never updates again.
+func (c *Conversation) compactNow(ctx context.Context, params Params, turns []history.Turn) []history.Turn {
+	if len(turns) == 0 {
 		return turns
 	}
 
@@ -401,6 +412,42 @@ func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []
 	compacted = append(compacted, summary)
 	compacted = append(compacted, keep...)
 	return compacted
+}
+
+// ErrNothingToCompact is returned by [Conversation.Compact] when the
+// conversation has no stored history to summarize (new conversation, or
+// already a single summary turn with nothing else to fold in).
+var ErrNothingToCompact = errors.New("agent: no conversation history to compact")
+
+// Compact is the manual, user-triggered entry point for history compaction
+// (the /compact command) — it summarizes unconditionally, skipping
+// CompactionThresholdRatio's automatic-trigger check, so a user can collapse
+// history at any point rather than waiting for it to near the budget. It
+// requires History to be configured and at least one stored turn; unlike the
+// automatic path it reports failure to the caller instead of silently falling
+// open, since a user who explicitly asked to compact should know if it
+// didn't happen.
+func (c *Conversation) Compact(ctx context.Context, params Params) error {
+	if c.deps.History == nil || params.ContextID == "" {
+		return ErrNothingToCompact
+	}
+	turns, err := c.deps.History.Turns(ctx, params.ProjectName, params.ContextID)
+	if err != nil {
+		return fmt.Errorf("agent: compact: load history: %w", err)
+	}
+	if len(turns) == 0 {
+		return ErrNothingToCompact
+	}
+	if len(turns) == 1 && history.IsSummaryTurn(turns[0]) {
+		return ErrNothingToCompact
+	}
+
+	before := history.EstimateTokens(turns)
+	after := c.compactNow(ctx, params, turns)
+	if history.EstimateTokens(after) >= before {
+		return fmt.Errorf("agent: compact: summarization failed, history left unchanged")
+	}
+	return nil
 }
 
 // summarize issues one plain, non-tool model completion over turns and

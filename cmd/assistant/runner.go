@@ -185,3 +185,19 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 		Error: res.Error,
 	}
 }
+
+// Compact implements [assistanta2a.Compactor] over the same [agent.Conversation]
+// this runner drives Run turns against, so manual "/compact" and the
+// automatic threshold-triggered path in internal/agent operate on identical
+// wiring. agent.ErrNothingToCompact is translated to the a2a-layer sentinel so
+// internal/server can recognize the case without importing internal/agent.
+func (r conversationRunner) Compact(ctx context.Context, req assistanta2a.CompactRequest) error {
+	err := r.conv.Compact(ctx, agent.Params{
+		ProjectName: req.ProjectName,
+		ContextID:   req.ContextID,
+	})
+	if errors.Is(err, agent.ErrNothingToCompact) {
+		return assistanta2a.ErrNothingToCompact
+	}
+	return err
+}
