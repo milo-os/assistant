@@ -191,14 +191,25 @@ ship structured logs to it) — traces and metrics were the focus.
 ### What this repo adds on top (new in this change)
 
 All of it lives in `config/components/observability/`, a kustomize
-Component — **opt-in only**. The plain `dev`/`dev-anthropic` overlays are
-untouched (verify with `kubectl kustomize config/overlays/dev | grep OTEL` —
-nothing), so `task dev:setup` with no observability stack installed keeps
-working exactly as before: `internal/tracing.Setup` installs a genuine no-op
-tracer when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset (no dial, no export
-errors), so there's nothing to break. Two new overlays layer the component
-on: `config/overlays/dev-observability` and
-`config/overlays/dev-anthropic-observability`.
+Component — **opt-in at the config level**. `config/base` and the plain
+`dev`/`dev-anthropic`/`dev-catalog`/`dev-persona`/`redteam-persona` overlays
+are untouched (verify with `kubectl kustomize config/overlays/dev | grep OTEL`
+— nothing): `internal/tracing.Setup` installs a genuine no-op tracer when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is unset (no dial, no export errors), so nothing
+in the base config depends on the stack existing. Two overlays layer the
+component on top of the plain ones: `config/overlays/dev-observability` and
+`config/overlays/dev-anthropic-observability` (`dev-catalog`/`dev-persona`/
+`redteam-persona` have no observability variant yet).
+
+`task dev:setup` *does* default to the observability path as a
+deployment-time convenience — it runs `test-infra:install-observability` and,
+for `OVERLAY=dev`/`dev-anthropic` (the default is `dev`), deploys the
+matching `-observability` overlay automatically, so a plain `task dev:setup`
+now comes up with tracing/metrics/dashboards wired and live. This is purely
+`Taskfile.yaml`'s own default choice, not a base-config change — pass
+`OVERLAY=dev-catalog` (or any overlay without an `-observability` variant) to
+get the plain, telemetry-free path, and `task dev:deploy OVERLAY=dev` still
+deploys the plain overlay directly if you bypass `dev:setup`.
 
 The component adds:
 

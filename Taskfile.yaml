@@ -8,7 +8,7 @@
 # Requires TASK_X_REMOTE_TASKFILES=1 (set in .env; task reads it via dotenv).
 #
 # Quickstart:
-#   task dev:setup      # cluster + images + full stack (fixture capabilities)
+#   task dev:setup      # cluster + images + full stack + telemetry (fixture capabilities)
 #   task dev:forward    # port-forward the assistant to localhost:1986
 #   task e2e            # chainsaw environment tests
 #   task dev:redeploy   # fast loop: rebuild image, roll the assistant
@@ -68,8 +68,22 @@ tasks:
 
   # ── Cluster dev environment ─────────────────────────────────
   dev:setup:
-    desc: Bring up the full dev environment (kind cluster + operators + stack).
-      OVERLAY=dev|dev-catalog|dev-anthropic
+    desc: Bring up the full dev environment (kind cluster + operators + stack +
+      telemetry). OVERLAY=dev|dev-catalog|dev-anthropic|dev-persona|redteam-persona
+      — for dev/dev-anthropic the -observability overlay variant is applied
+      automatically; the others have no observability variant (yet) and deploy
+      plain.
+    vars:
+      OVERLAY: '{{.OVERLAY | default "dev"}}'
+      # Only dev and dev-anthropic have an -observability overlay
+      # (config/overlays/dev-observability, dev-anthropic-observability); the
+      # rest (dev-catalog, dev-persona, redteam-persona) deploy plain.
+      DEPLOY_OVERLAY:
+        sh: |
+          case "{{.OVERLAY}}" in
+            dev|dev-anthropic) echo "{{.OVERLAY}}-observability" ;;
+            *) echo "{{.OVERLAY}}" ;;
+          esac
     cmds:
       # On a cold VM every shared-operator image pulls at once, so the remote
       # cluster-up's per-wait timeout (default 300s) can lapse before the images
@@ -78,11 +92,17 @@ tasks:
       - task: test-infra:cluster-up
         vars:
           WAIT_TIMEOUT: '900s'
+      # Telemetry stack (Victoria Metrics + Tempo + Grafana + OTel Collector)
+      # is a deployment-time default for the dev environment, not a base
+      # config default: config/base and the plain overlays stay untouched (see
+      # config/components/observability/kustomization.yaml) — only dev:setup's
+      # own default wiring is opinionated about installing it.
+      - task: test-infra:install-observability
       - task: dev:build
       - task: dev:load
       - task: dev:deploy
         vars:
-          OVERLAY: '{{.OVERLAY | default "dev"}}'
+          OVERLAY: '{{.DEPLOY_OVERLAY}}'
 
   dev:build:
     desc: Build the dev images (assistant compiled on the HOST — an in-image
