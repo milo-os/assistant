@@ -18,6 +18,7 @@ import (
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
 	"github.com/milo-os/assistant/internal/usage"
 )
 
@@ -152,6 +153,16 @@ type Deps struct {
 	RetryMaxDelay  time.Duration
 	// Logger receives orchestration logs. Nil discards them.
 	Logger *slog.Logger
+	// Metrics records assistant_conversation_turn_duration_seconds,
+	// assistant_tool_call_total, assistant_model_call_duration_seconds,
+	// assistant_history_compaction_total, and (via capability.ComposeOptions)
+	// assistant_gap_report_total — see internal/metrics. Unlike Memory or
+	// GapReports this is never optional: [New] backs a nil value with a
+	// fresh, unshared instance (mirroring the Logger fallback just above) so
+	// metrics always record. Production boot shares one instance between
+	// this and server.Deps.Metrics so both land on the same /metrics
+	// endpoint.
+	Metrics *appmetrics.Metrics
 }
 
 // Conversation runs conversational tasks against a fixed set of dependencies.
@@ -166,6 +177,9 @@ func New(deps Deps) *Conversation {
 	logger := deps.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
+	}
+	if deps.Metrics == nil {
+		deps.Metrics = appmetrics.New()
 	}
 	return &Conversation{deps: deps, logger: logger}
 }
@@ -239,6 +253,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		Memory:               c.deps.Memory,
 		ExpectedProject:      params.ProjectName,
 		GapReports:           c.deps.GapReports,
+		Metrics:              c.deps.Metrics,
 		ContextID:            params.ContextID,
 		OnToolInvocation: func(inv capability.ProviderToolInvocation) {
 			mu.Lock()
@@ -270,12 +285,13 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	// into each tool's Execute). It carries no user content — see
 	// endTurnSpan and the tracer doc comment in tracing.go.
 	turnCtx, turnSpan := tracer.Start(turnCtx, "conversation.turn")
+	turnStart := time.Now()
 
 	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
-		Model:           tracedModel(c.deps.Model),
+		Model:           tracedModel(c.deps.Model, c.deps.Metrics),
 		System:          BuildSystemPrompt(c.deps.Persona, composed.SystemPromptAddendum),
 		Messages:        messages,
-		Tools:           tracedTools(composed.Tools),
+		Tools:           tracedTools(composed.Tools, c.deps.Metrics),
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),
@@ -288,6 +304,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		ctx:         ctx,
 		cancelTurn:  cancelTurn,
 		turnSpan:    turnSpan,
+		turnStart:   turnStart,
 		conv:        c,
 		params:      params,
 		inner:       inner,
@@ -365,17 +382,20 @@ func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []
 	toSummarize := turns[:batchLen]
 	keep := turns[batchLen:]
 
-	summary, err := summarize(ctx, tracedModel(c.deps.Model), toSummarize)
+	summary, err := summarize(ctx, tracedModel(c.deps.Model, c.deps.Metrics), toSummarize)
 	if err != nil {
 		c.logger.Warn("agent.history.summarize_failed",
 			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
+		c.deps.Metrics.RecordCompaction("failed_open")
 		return turns
 	}
 	if err := c.deps.History.Compact(ctx, params.ProjectName, params.ContextID, summary, keep); err != nil {
 		c.logger.Warn("agent.history.compact_failed",
 			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
+		c.deps.Metrics.RecordCompaction("failed_open")
 		return turns
 	}
+	c.deps.Metrics.RecordCompaction("success")
 
 	compacted := make([]history.Turn, 0, 1+len(keep))
 	compacted = append(compacted, summary)
@@ -456,6 +476,7 @@ type Stream struct {
 	ctx         context.Context
 	cancelTurn  context.CancelFunc
 	turnSpan    trace.Span
+	turnStart   time.Time
 	conv        *Conversation
 	params      Params
 	inner       agentcore.StreamReader
@@ -549,9 +570,14 @@ func (s *Stream) finalize() {
 	if s.cancelTurn != nil {
 		s.cancelTurn()
 	}
+	duration := time.Since(s.turnStart)
 	if s.turnSpan != nil {
 		endTurnSpan(s.turnSpan, s.state, s.errMsg)
 	}
+	s.conv.deps.Metrics.RecordTurn(string(s.state), duration)
+	s.conv.logger.Info("agent.turn.completed",
+		"outcome", string(s.state), "durationMs", duration.Milliseconds(),
+		"projectName", s.params.ProjectName, "contextId", s.params.ContextID)
 
 	_ = s.composed.Close()
 

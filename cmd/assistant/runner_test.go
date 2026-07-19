@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/milo-os/assistant/internal/config"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
 )
 
 func loadTestConfig(t *testing.T, extra map[string]string) *config.Config {
@@ -24,7 +25,7 @@ func loadTestConfig(t *testing.T, extra map[string]string) *config.Config {
 
 func TestNewAgentRunner_PersonaPromptFileMissing(t *testing.T) {
 	cfg := loadTestConfig(t, map[string]string{"PERSONA_PROMPT_FILE": filepath.Join(t.TempDir(), "missing.md")})
-	_, _, err := newAgentRunner(context.Background(), cfg, slog.New(slog.DiscardHandler))
+	_, _, err := newAgentRunner(context.Background(), cfg, slog.New(slog.DiscardHandler), appmetrics.New())
 	if err == nil {
 		t.Fatal("want error for missing persona prompt file, got nil")
 	}
@@ -36,7 +37,7 @@ func TestNewAgentRunner_PersonaPromptFileRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := loadTestConfig(t, map[string]string{"PERSONA_PROMPT_FILE": path})
-	_, cleanup, err := newAgentRunner(context.Background(), cfg, slog.New(slog.DiscardHandler))
+	_, cleanup, err := newAgentRunner(context.Background(), cfg, slog.New(slog.DiscardHandler), appmetrics.New())
 	if err != nil {
 		t.Fatalf("newAgentRunner: %v", err)
 	}

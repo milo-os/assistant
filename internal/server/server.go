@@ -22,6 +22,7 @@ import (
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/auth"
 	"github.com/milo-os/assistant/internal/config"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
 )
 
 // readinessTimeout bounds the dependency check behind GET /readyz so a hung
@@ -47,6 +48,14 @@ type Deps struct {
 	// ready (dev, no external dependencies). It must be cheap and bounded — the
 	// probe wraps it with a short deadline.
 	ReadyCheck func(context.Context) error
+
+	// Metrics is the shared application-level metrics handle (conversation
+	// turns, tool calls, model calls, history compaction, capability-gap
+	// reports) — normally the exact instance also injected into
+	// agent.Deps.Metrics, so this endpoint exposes the same series the agent
+	// layer records into. Nil builds a fresh, unshared instance rather than
+	// leaving those series absent from /metrics.
+	Metrics *appmetrics.Metrics
 }
 
 // New builds the assistant's HTTP handler from deps. The A2A JSON-RPC endpoint
@@ -59,7 +68,7 @@ func New(deps Deps) http.Handler {
 		logger = slog.New(slog.DiscardHandler)
 	}
 
-	metrics := newMetrics()
+	metrics := newMetrics(deps.Metrics)
 
 	// Task store: durable when injected, else the in-memory store. A constant
 	// store user satisfies the in-memory store's Create (per-user task filtering

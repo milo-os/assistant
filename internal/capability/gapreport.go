@@ -8,6 +8,7 @@ import (
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/gapreport"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
 )
 
 // GapReportToolBaseName is the un-namespaced model-facing tool name for
@@ -44,6 +45,10 @@ type reportCapabilityGapTool struct {
 	// conversation the gap was hit, not where the report is written to.
 	consumerProject string
 	contextID       string
+	// metrics records assistant_gap_report_total. Nil (e.g. in tests that
+	// don't set ComposeOptions.Metrics) is a safe no-op — see
+	// [appmetrics.Metrics]'s nil-receiver methods.
+	metrics *appmetrics.Metrics
 }
 
 func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
@@ -85,7 +90,19 @@ func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
 	}
 }
 
-func (t *reportCapabilityGapTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+func (t *reportCapabilityGapTool) Execute(ctx context.Context, input json.RawMessage) (result string, err error) {
+	// Every return path below — malformed input, a store bound violation, or
+	// a genuine store failure, as well as a clean success — is one recorded
+	// outcome of assistant_gap_report_total; the defer covers them uniformly
+	// rather than duplicating a RecordGapReport call at each return.
+	defer func() {
+		outcome := "success"
+		if err != nil {
+			outcome = "error"
+		}
+		t.metrics.RecordGapReport(outcome)
+	}()
+
 	var args struct {
 		Capability string `json:"capability"`
 		Summary    string `json:"summary"`

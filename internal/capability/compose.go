@@ -13,6 +13,7 @@ import (
 	"github.com/milo-os/assistant/agentcore/mcptool"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/memory"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
 )
 
 // Tool composition defaults (Tier 2).
@@ -123,6 +124,11 @@ type ComposeOptions struct {
 	// tools but no reportingProject simply gets no gap-report tool. Nil
 	// disables the feature entirely.
 	GapReports gapreport.Store
+	// Metrics, when non-nil, records assistant_gap_report_total for every
+	// report_capability_gap tool call this composition creates (see
+	// internal/metrics). Nil disables recording only — GapReports still
+	// governs whether the tool is composed at all.
+	Metrics *appmetrics.Metrics
 	// resolver is the DNS seam for the SSRF guard. Nil uses net.DefaultResolver.
 	resolver ipResolver
 }
@@ -247,6 +253,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 				providerProject: doc.Spec.ReportingProject,
 				consumerProject: opts.ExpectedProject,
 				contextID:       opts.ContextID,
+				metrics:         opts.Metrics,
 			}
 		}
 	}

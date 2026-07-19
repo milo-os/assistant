@@ -15,15 +15,18 @@ import (
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
 	"github.com/milo-os/assistant/internal/usage"
 )
 
 // newAgentRunner builds the [assistanta2a.AgentRunner] the A2A executor drives:
 // it resolves the model from config, wires the capability source, conversation
 // store, and usage emitter, constructs the agent orchestrator, and adapts it
-// to the A2A seam. The returned cleanup releases the conversation store's
-// resources (call it on shutdown; it is never nil).
-func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (assistanta2a.AgentRunner, func(), error) {
+// to the A2A seam. metrics is shared with server.Deps.Metrics by the caller so
+// conversation/tool/model/compaction/gap-report telemetry lands on the same
+// /metrics endpoint as the HTTP metrics. The returned cleanup releases the
+// conversation store's resources (call it on shutdown; it is never nil).
+func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metrics *appmetrics.Metrics) (assistanta2a.AgentRunner, func(), error) {
 	model, err := agent.ResolveModel(cfg.Model, log)
 	if err != nil {
 		return nil, nil, err
@@ -139,6 +142,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 		GapReports:                     gaps,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
 		Logger:                         log,
+		Metrics:                        metrics,
 	})
 	return conversationRunner{conv: conv}, cleanup, nil
 }

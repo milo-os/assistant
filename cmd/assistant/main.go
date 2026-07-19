@@ -21,6 +21,7 @@ import (
 	"github.com/milo-os/assistant/internal/auth"
 	"github.com/milo-os/assistant/internal/config"
 	"github.com/milo-os/assistant/internal/logger"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
 	"github.com/milo-os/assistant/internal/server"
 	"github.com/milo-os/assistant/internal/taskstore"
 	"github.com/milo-os/assistant/internal/tracing"
@@ -91,7 +92,13 @@ func run() error {
 		taskStoreCleanup = durableTasks.Close
 	}
 
-	runner, runnerCleanup, err := newAgentRunner(ctx, cfg, log)
+	// One shared Metrics instance for the whole process: injected into the
+	// agent runner below (conversation/tool/model/compaction/gap-report
+	// telemetry) and into server.Deps (HTTP telemetry) so both land on the
+	// same /metrics registry — see internal/metrics's package doc.
+	metrics := appmetrics.New()
+
+	runner, runnerCleanup, err := newAgentRunner(ctx, cfg, log, metrics)
 	if err != nil {
 		return fmt.Errorf("failed to initialize agent runner: %w", err)
 	}
@@ -105,6 +112,7 @@ func run() error {
 		Authorizer:    authorizer,
 		Runner:        runner,
 		ReadyCheck:    readyCheck(cfg, durableTasks, log),
+		Metrics:       metrics,
 	}
 	if durableTasks != nil {
 		deps.TaskStore = durableTasks

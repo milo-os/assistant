@@ -12,6 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
 )
 
 // isExpectedStoreErr reports whether err is a normal task-store control-flow
@@ -35,11 +37,22 @@ type metrics struct {
 	inFlight     prometheus.Gauge
 	storeErrors  *prometheus.CounterVec // task-store errors by op
 	readyFailure prometheus.Counter     // readiness probe failures
+	app          *appmetrics.Metrics    // conversation/tool/model/compaction/gap-report metrics
 }
 
 // newMetrics builds a metrics set on a fresh registry, pre-registering the Go
-// runtime and process collectors for baseline pod telemetry.
-func newMetrics() *metrics {
+// runtime and process collectors for baseline pod telemetry, plus app's
+// application-level collectors (conversation turns, tool calls, model calls,
+// history compaction, capability-gap reports) so they land on the same
+// /metrics exposition as the HTTP metrics below. app is normally the same
+// *appmetrics.Metrics instance injected into agent.Deps.Metrics (see
+// [Deps.Metrics]) so both sides observe identical state; a nil app builds a
+// fresh, unshared one rather than leaving those series absent (metrics
+// always record — see internal/metrics's package doc).
+func newMetrics(app *appmetrics.Metrics) *metrics {
+	if app == nil {
+		app = appmetrics.New()
+	}
 	reg := prometheus.NewRegistry()
 	m := &metrics{
 		registry: reg,
@@ -64,12 +77,16 @@ func newMetrics() *metrics {
 			Name: "assistant_readiness_failures_total",
 			Help: "Readiness-probe checks that reported not-ready.",
 		}),
+		app: app,
 	}
 	reg.MustRegister(
 		m.requests, m.duration, m.inFlight, m.storeErrors, m.readyFailure,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
+	for _, c := range app.Collectors() {
+		reg.MustRegister(c)
+	}
 	return m
 }
 
