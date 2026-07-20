@@ -26,7 +26,11 @@ vars:
   # v0.7.0 ships Envoy Gateway v1.8.2. The Envoy AI Gateway v1.0.x requires
   # EG >= v1.8.1 — at the older EG 1.4.3 the AI Gateway never wires model
   # routing (→ 404), so this floor is load-bearing for gateway-mode chat.
-  TEST_INFRA_REPO_REF: 'v0.7.0'
+  # v0.7.1 additionally fixes a cold install-observability failure: Loki's
+  # chunksCache/resultsCache memcached sidecars request ~9.6Gi and stay
+  # Pending on a single-node kind cluster; an OpenTelemetryCollector CR
+  # install race; and cert-manager's cainjector OOMKilling at 64Mi.
+  TEST_INFRA_REPO_REF: 'v0.7.1'
   KUBECONFIG_PATH: '{{.ROOT_DIR}}/.test-infra/kubeconfig'
   NS: patch-playground
   EG_NS: envoy-gateway-system
