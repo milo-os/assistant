@@ -1,0 +1,19 @@
+# MANDATORY for delegated authentication: lets the aggregated apiserver read
+# the `extension-apiserver-authentication` configmap in kube-system (the
+# requestheader client CA + front-proxy config). Without it the server cannot
+# authenticate the aggregator's front-proxy and every request 401s.
+# Lives in kube-system; the kustomization pins it there after the namespace
+# transformer and keeps the subject pointing at the SA in patch-playground.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: assistant-apiserver-auth-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: assistant-apiserver
+    namespace: patch-playground

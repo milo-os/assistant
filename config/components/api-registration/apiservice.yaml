@@ -1,0 +1,19 @@
+# Registers the assistant aggregated apiserver with the kube-aggregator, so
+# assistant.miloapis.com/v1alpha1 Conversations are served by our Deployment.
+# caBundle handling is environment-specific: the dev overlay patches
+# insecureSkipTLSVerify=true (the server self-signs, no cluster CA to trust); a
+# production overlay would inject a cert-manager caBundle instead.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.assistant.miloapis.com
+spec:
+  service:
+    name: assistant-apiserver
+    namespace: patch-playground
+    port: 443
+  group: assistant.miloapis.com
+  version: v1alpha1
+  insecureSkipTLSVerify: false
+  groupPriorityMinimum: 1000
+  versionPriority: 15
