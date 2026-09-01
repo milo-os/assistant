@@ -7,14 +7,24 @@
       "namespace": "demo-project"
     },
     "spec": {
-      "serviceRef": { "name": "streaming-streamco-example" },
+      "serviceRef": {
+        "name": "streaming-streamco-example"
+      },
       "serviceName": "streaming.streamco.example",
-      "serviceAgentRef": { "name": "streamco-streaming-agent" },
+      "serviceAgentRef": {
+        "name": "streamco-streaming-agent"
+      },
       "configurationVersion": "v1-playground",
       "reportingProject": "streamco-platform",
       "knowledge": {
         "concepts": [
-          { "gvk": { "group": "streaming.streamco.example", "kind": "Stream" }, "summary": "A live media stream" }
+          {
+            "gvk": {
+              "group": "streaming.streamco.example",
+              "kind": "Stream"
+            },
+            "summary": "A live media stream"
+          }
         ]
       },
       "tools": {
@@ -41,12 +51,140 @@
         }
       ],
       "authority": {
-        "reads": [{ "gvk": { "group": "streaming.streamco.example", "kind": "*" } }],
+        "reads": [
+          {
+            "gvk": {
+              "group": "streaming.streamco.example",
+              "kind": "*"
+            }
+          }
+        ],
         "maxTaskDurationSeconds": 60
       }
     },
     "status": {
-      "conditions": [{ "type": "Ready", "status": "True", "reason": "AllAgentGatesOpen" }]
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "AllAgentGatesOpen"
+        }
+      ]
+    }
+  },
+  {
+    "apiVersion": "services.miloapis.com/v1alpha1",
+    "kind": "AgentBinding",
+    "metadata": {
+      "name": "compute-playground-binding",
+      "namespace": "demo-project"
+    },
+    "spec": {
+      "serviceRef": {
+        "name": "compute-datumapis-com"
+      },
+      "serviceName": "compute.datumapis.com",
+      "serviceAgentRef": {
+        "name": "compute-diagnostics-agent"
+      },
+      "configurationVersion": "v1-playground",
+      "reportingProject": "datum-compute-platform",
+      "knowledge": {
+        "sources": [
+          {
+            "type": "LLMDocs",
+            "url": "http://compute.patch-playground.svc.cluster.local:7830/llms-full.txt"
+          }
+        ],
+        "concepts": [
+          {
+            "gvk": {
+              "group": "compute.datumapis.com",
+              "kind": "Workload"
+            },
+            "summary": "A customer's declared compute intent: an instance template plus one or more placements. Availability aggregates upward from its deployments."
+          },
+          {
+            "gvk": {
+              "group": "compute.datumapis.com",
+              "kind": "WorkloadDeployment"
+            },
+            "summary": "One Workload projected onto one cell/location. Where location, city code, and referenced-data resolution are settled."
+          },
+          {
+            "gvk": {
+              "group": "compute.datumapis.com",
+              "kind": "Instance"
+            },
+            "summary": "A single running unit within a deployment. Carries the most specific conditions: Ready, Available, Programmed, QuotaGranted, ReferencedDataReady."
+          }
+        ]
+      },
+      "tools": {
+        "mcpServers": [
+          {
+            "name": "compute",
+            "endpoint": "http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local:80/mcp-compute",
+            "toolSelector": {
+              "include": [
+                "compute-backend__workloads_list",
+                "compute-backend__workloads_get",
+                "compute-backend__instances_list",
+                "compute-backend__workload_diagnose",
+                "compute-backend__reason_explain"
+              ]
+            },
+            "mutating": []
+          }
+        ]
+      },
+      "skills": [
+        {
+          "name": "workload-not-available",
+          "description": "Triage a compute Workload that is not available, from symptom to root cause and owner",
+          "source": "http://compute.patch-playground.svc.cluster.local:7830/runbooks/workload-not-available.md"
+        },
+        {
+          "name": "quota-triage",
+          "description": "Distinguish QuotaExceeded, QuotaNoBudget, PendingEvaluation and quota backend faults, and act on each",
+          "source": "http://compute.patch-playground.svc.cluster.local:7830/runbooks/quota-triage.md"
+        },
+        {
+          "name": "instance-not-ready",
+          "description": "Diagnose ImageUnavailable, InstanceCrashing, ConfigurationError and stuck Provisioning on compute Instances",
+          "source": "http://compute.patch-playground.svc.cluster.local:7830/runbooks/instance-not-ready.md"
+        },
+        {
+          "name": "referenced-data-triage",
+          "description": "Resolve ReferencedDataReady failures: missing, unauthorized, or oversized ConfigMaps and Secrets",
+          "source": "http://compute.patch-playground.svc.cluster.local:7830/runbooks/referenced-data-triage.md"
+        },
+        {
+          "name": "placement-triage",
+          "description": "Handle NoMatchingLocation, AmbiguousServingLocation and CityCodeMismatch \u2014 all platform faults",
+          "source": "http://compute.patch-playground.svc.cluster.local:7830/runbooks/placement-triage.md"
+        }
+      ],
+      "authority": {
+        "reads": [
+          {
+            "gvk": {
+              "group": "compute.datumapis.com",
+              "kind": "*"
+            }
+          }
+        ],
+        "maxTaskDurationSeconds": 60
+      }
+    },
+    "status": {
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "AllAgentGatesOpen"
+        }
+      ]
     }
   }
 ]

@@ -1,0 +1,48 @@
+# Fronts the compute provider's MCP endpoint and enforces the reviewed tool
+# allow-list AT THE GATEWAY. toolSelector.include lists exactly the five
+# read-only diagnostic tools; the provider also exposes `workload_delete`, which
+# is absent from this list and so is neither listed nor callable through the
+# gateway — while remaining reachable on a direct-to-provider connection (the
+# same enforcement control StreamCo's streams_delete provides).
+#
+# A separate MCPRoute from StreamCo's on its own path, so each provider's
+# allow-list stays independently reviewable. Tools arrive at the assistant
+# namespaced by backend name: `compute-backend__<tool>`.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: compute-backend
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  endpoints:
+    - fqdn:
+        hostname: compute.patch-playground.svc.cluster.local
+        port: 7830
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: MCPRoute
+metadata:
+  name: patch-mcp-compute
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  parentRefs:
+    - name: patch-playground
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  path: "/mcp-compute"
+  backendRefs:
+    - name: compute-backend
+      kind: Backend
+      group: gateway.envoyproxy.io
+      path: "/mcp"
+      toolSelector:
+        include:
+          - workloads_list
+          - workloads_get
+          - instances_list
+          - workload_diagnose
+          - reason_explain

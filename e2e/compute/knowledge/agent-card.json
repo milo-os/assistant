@@ -1,0 +1,18 @@
+{
+  "protocolVersion": "1.0",
+  "name": "Datum Compute",
+  "description": "Diagnostics for Datum Compute Workloads, WorkloadDeployments, and Instances: root-cause analysis over the compute condition tree.",
+  "version": "0.1.0",
+  "preferredTransport": "JSONRPC",
+  "capabilities": { "streaming": false, "pushNotifications": false },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "workload-diagnosis",
+      "name": "Workload diagnosis",
+      "description": "Explain why a compute Workload is not available and who has to act.",
+      "tags": ["compute", "diagnostics", "kubernetes"]
+    }
+  ]
+}

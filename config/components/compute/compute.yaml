@@ -1,0 +1,62 @@
+# Datum Compute demo MCP provider, in-cluster (image built from e2e/compute and
+# kind-loaded by `task dev:build` / `task dev:load`). The gateway's MCPRoute
+# fronts it; the assistant reaches its tools ONLY through the gateway, where the
+# reviewed allow-list is enforced. Runs on 7830 (its default). Node reaches
+# @modelcontextprotocol/sdk + zod from the image's baked node_modules.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compute
+  namespace: patch-playground
+  labels:
+    app: compute
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: compute }
+  template:
+    metadata:
+      labels:
+        app: compute
+        app.kubernetes.io/part-of: agent-framework-playground
+    spec:
+      containers:
+        - name: compute
+          image: ghcr.io/milo-os/assistant-compute
+          imagePullPolicy: IfNotPresent
+          command: ["node", "src/server.ts"]
+          ports:
+            - containerPort: 7830
+          env:
+            - name: COMPUTE_HOST
+              value: "0.0.0.0"
+            - name: COMPUTE_PORT
+              value: "7830"
+          readinessProbe:
+            httpGet: { path: /healthz, port: 7830 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 7830 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 192Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compute
+  namespace: patch-playground
+  labels:
+    app: compute
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  selector: { app: compute }
+  ports:
+    - name: http
+      port: 7830
+      targetPort: 7830
+  type: ClusterIP
