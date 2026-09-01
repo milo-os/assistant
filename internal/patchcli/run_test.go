@@ -1,4 +1,4 @@
-package main
+package patchcli
 
 import (
 	"context"
@@ -247,7 +247,7 @@ func TestRun_MissingURL(t *testing.T) {
 func firstTaskID(t *testing.T, base string) string {
 	t.Helper()
 	ctx := context.Background()
-	client, err := newClient(ctx, base, "good")
+	client, err := newClient(ctx, base, StaticToken("good"))
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}

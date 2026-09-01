@@ -271,5 +271,5 @@ lists).
 - `internal/apiserver/apiserver.go` — `ExtraConfig.GapReports`, storage
   registration.
 - `cmd/assistant-apiserver/serve.go` — wire the gap-report store.
-- `cmd/patch/args.go`, `cmd/patch/gaps.go` (new), `cmd/patch/run.go` —
+- `internal/patchcli/args.go`, `internal/patchcli/gaps.go` (new), `internal/patchcli/run.go` —
   `patch gaps list --project <provider>`.

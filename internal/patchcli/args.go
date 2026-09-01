@@ -1,6 +1,15 @@
-// Package main implements `patch` — a thin A2A client for the Datum Cloud
-// assistant service, proving the "the service is just one client away"
-// architecture with a second consumer built on the official a2a-go client.
+// Package patchcli is the Datum Cloud assistant (A2A) client shared by the two
+// binaries that ship it: `patch` (cmd/patch, the standalone CLI the e2e harness
+// drives) and `datumctl patch` (cmd/milo-patch, the datumctl plugin). It is
+// a thin client over the official a2a-go client, proving the "the service is
+// just one client away" architecture with a second consumer.
+//
+// The two entrypoints differ only in how they resolve the service URL and the
+// bearer token — the standalone CLI reads PATCH_URL/PATCH_TOKEN, the plugin
+// takes the project from datumctl's injected environment and the token from
+// datumctl's credentials helper. Everything past that seam is this package:
+// [Run] is the standalone CLI's argv-driven entry, [Invocation.Execute] the
+// resolved-input entry a cobra-based plugin builds by hand.
 //
 // This file is the pure argument parser: it turns argv into a command value
 // with NO side effects, so it is unit-testable without touching the network
@@ -20,30 +29,22 @@
 //	patch task cancel <id> [--json]
 //
 // Global flags (any command): --url <u>, --token <t>, --help/-h.
-package main
+package patchcli
 
 import "strings"
 
-// cmdKind is the discriminator for a parsed command.
-type cmdKind int
-
+// kindHelp and kindError are parse-only outcomes — argv asked for help, or was
+// malformed. They sit below the executable [Kind] values (which start at 1) so
+// they can never be mistaken for a command to run.
 const (
-	cmdHelp cmdKind = iota
-	cmdError
-	cmdCard
-	cmdChat
-	cmdCompact
-	cmdConvList
-	cmdConvShow
-	cmdGapList
-	cmdTaskGet
-	cmdTaskCancel
+	kindHelp Kind = -1 - iota
+	kindError
 )
 
 // command is the result of parsing argv: a discriminated union flattened into
 // a struct. Only the fields relevant to kind are populated.
 type command struct {
-	kind cmdKind
+	kind Kind
 
 	// common options
 	json  bool
@@ -71,10 +72,10 @@ type command struct {
 func parseArgs(argv []string) command {
 	flags, ferr := extractFlags(argv)
 	if ferr != "" {
-		return command{kind: cmdError, errMsg: ferr}
+		return command{kind: kindError, errMsg: ferr}
 	}
 	if flags.help || len(flags.positionals) == 0 {
-		return command{kind: cmdHelp}
+		return command{kind: kindHelp}
 	}
 
 	common := command{json: flags.json, url: flags.url, token: flags.token}
@@ -83,17 +84,17 @@ func parseArgs(argv []string) command {
 
 	switch name {
 	case "card":
-		common.kind = cmdCard
+		common.kind = KindCard
 		return common
 
 	case "chat":
 		if !flags.interactive && !flags.tui && (len(rest) == 0 || rest[0] == "") {
-			return command{kind: cmdError, errMsg: "chat: missing message argument (or use --interactive / --tui)"}
+			return command{kind: kindError, errMsg: "chat: missing message argument (or use --interactive / --tui)"}
 		}
 		if flags.project == "" {
-			return command{kind: cmdError, errMsg: "chat: --project <name> is required"}
+			return command{kind: kindError, errMsg: "chat: --project <name> is required"}
 		}
-		common.kind = cmdChat
+		common.kind = KindChat
 		if len(rest) > 0 {
 			common.message = rest[0]
 		}
@@ -106,12 +107,12 @@ func parseArgs(argv []string) command {
 
 	case "compact":
 		if flags.project == "" {
-			return command{kind: cmdError, errMsg: "compact: --project <name> is required"}
+			return command{kind: kindError, errMsg: "compact: --project <name> is required"}
 		}
 		if flags.contextID == "" {
-			return command{kind: cmdError, errMsg: "compact: --context-id <c> is required"}
+			return command{kind: kindError, errMsg: "compact: --context-id <c> is required"}
 		}
-		common.kind = cmdCompact
+		common.kind = KindCompact
 		common.project = flags.project
 		common.contextID = flags.contextID
 		return common
@@ -125,21 +126,21 @@ func parseArgs(argv []string) command {
 			id = rest[1]
 		}
 		if sub != "list" && sub != "show" {
-			return command{kind: cmdError, errMsg: `conversations: expected "list" or "show", got "` + sub + `"`}
+			return command{kind: kindError, errMsg: `conversations: expected "list" or "show", got "` + sub + `"`}
 		}
 		if flags.project == "" {
-			return command{kind: cmdError, errMsg: "conversations " + sub + ": --project <name> is required"}
+			return command{kind: kindError, errMsg: "conversations " + sub + ": --project <name> is required"}
 		}
 		common.project = flags.project
 		common.kubeconfig = flags.kubeconfig
 		if sub == "list" {
-			common.kind = cmdConvList
+			common.kind = KindConvList
 			return common
 		}
 		if id == "" {
-			return command{kind: cmdError, errMsg: "conversations show: missing <context-id> argument"}
+			return command{kind: kindError, errMsg: "conversations show: missing <context-id> argument"}
 		}
-		common.kind = cmdConvShow
+		common.kind = KindConvShow
 		common.contextID = id
 		return common
 
@@ -153,12 +154,12 @@ func parseArgs(argv []string) command {
 			sub = rest[0]
 		}
 		if sub != "list" {
-			return command{kind: cmdError, errMsg: `gaps: expected "list", got "` + sub + `"`}
+			return command{kind: kindError, errMsg: `gaps: expected "list", got "` + sub + `"`}
 		}
 		if flags.project == "" {
-			return command{kind: cmdError, errMsg: "gaps list: --project <name> is required"}
+			return command{kind: kindError, errMsg: "gaps list: --project <name> is required"}
 		}
-		common.kind = cmdGapList
+		common.kind = KindGapList
 		common.project = flags.project
 		common.kubeconfig = flags.kubeconfig
 		return common
@@ -172,21 +173,21 @@ func parseArgs(argv []string) command {
 			id = rest[1]
 		}
 		if sub != "get" && sub != "cancel" {
-			return command{kind: cmdError, errMsg: `task: expected "get" or "cancel", got "` + sub + `"`}
+			return command{kind: kindError, errMsg: `task: expected "get" or "cancel", got "` + sub + `"`}
 		}
 		if id == "" {
-			return command{kind: cmdError, errMsg: "task " + sub + ": missing <id> argument"}
+			return command{kind: kindError, errMsg: "task " + sub + ": missing <id> argument"}
 		}
 		if sub == "get" {
-			common.kind = cmdTaskGet
+			common.kind = KindTaskGet
 		} else {
-			common.kind = cmdTaskCancel
+			common.kind = KindTaskCancel
 		}
 		common.id = id
 		return common
 
 	default:
-		return command{kind: cmdError, errMsg: `unknown command: "` + name + `"`}
+		return command{kind: kindError, errMsg: `unknown command: "` + name + `"`}
 	}
 }
 

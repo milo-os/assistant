@@ -194,7 +194,7 @@ posture:
   as `/clear`/`/export`: reset the input, flip to the working/spinner state,
   run the request in a goroutine, report success/"nothing to
   compact"/failure as a transcript line). Both go through a shared
-  `requestCompact` HTTP client helper (`cmd/patch/client.go`) using the same
+  `requestCompact` HTTP client helper (`internal/patchcli/client.go`) using the same
   `bearerTransport`/`PATCH_URL`/`PATCH_TOKEN` plumbing every other `patch`
   command already uses — `/v1/compact` needed a plain `http.Client` call
   since it isn't reachable through the a2a-go client used for `/a2a`.
@@ -282,7 +282,7 @@ for where each lands:
 - `internal/agent/*_test.go` — extended coverage: compaction fires only at
   the ~80% threshold (not before), respects the fixed batch size, fails open
   on a model error, compounds a second compaction correctly.
-- `cmd/patch/gaps.go`-adjacent read-path files (`cmd/patch/chat.go` /
+- `internal/patchcli/gaps.go`-adjacent read-path files (`internal/patchcli/chat.go` /
   `render.go`, `internal/apiserver/registry/conversation`) — render a summary
   turn distinctly wherever messages are displayed.
 - `internal/agent/conversation.go` — `compactNow` extracted from
@@ -303,14 +303,14 @@ for where each lands:
 - `internal/server/compact_test.go` — endpoint coverage: auth rejection,
   missing fields, success, `ErrNothingToCompact`, store/runner failure, nil
   compactor.
-- `cmd/patch/args.go` — `patch compact` subcommand parsing + usage text.
-- `cmd/patch/client.go` — `requestCompact`, `ErrNothingToCompact`.
-- `cmd/patch/render.go` — `renderCompactResult`.
-- `cmd/patch/run.go` — `cmdCompact` dispatch; `runChatTUI` gains
+- `internal/patchcli/args.go` — `patch compact` subcommand parsing + usage text.
+- `internal/patchcli/client.go` — `requestCompact`, `ErrNothingToCompact`.
+- `internal/patchcli/render.go` — `renderCompactResult`.
+- `internal/patchcli/run.go` — `KindCompact` dispatch; `runChatTUI` gains
   `baseURL`/`token` params for `/compact`.
-- `cmd/patch/chat_tui.go` — `/compact` slash command, `compactDoneMsg`,
+- `internal/patchcli/chat_tui.go` — `/compact` slash command, `compactDoneMsg`,
   `chatModel.compact`, `commandNames`/`commandDescriptions`/`helpText`
   entries.
-- `cmd/patch/args_test.go`, `cmd/patch/compact_test.go`,
-  `cmd/patch/chat_tui_test.go` — CLI flag parsing, `requestCompact`/`Run`
+- `internal/patchcli/args_test.go`, `internal/patchcli/compact_test.go`,
+  `internal/patchcli/chat_tui_test.go` — CLI flag parsing, `requestCompact`/`Run`
   dispatch, and TUI state-transition coverage for `/compact`.
