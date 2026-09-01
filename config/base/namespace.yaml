@@ -1,0 +1,9 @@
+# Every resource in this tree — plus the cluster-scoped GatewayClass in
+# components/gateway — carries app.kubernetes.io/part-of=agent-framework-playground
+# so the environment's full footprint is label-enumerable.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
