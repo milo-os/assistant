@@ -1,0 +1,16 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: patch-playground
+  namespace: patch-playground
+status:
+  (conditions[?type == 'Programmed']):
+    - status: 'True'
+---
+# The pinned managed-Envoy Service every static URL in the config tree
+# references (EnvoyProxy spec.provider.kubernetes.envoyService.name).
+apiVersion: v1
+kind: Service
+metadata:
+  name: patch-ai-gateway
+  namespace: envoy-gateway-system

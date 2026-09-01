@@ -1,0 +1,10 @@
+{
+  "name": "assistant-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "QA e2e harness deps. gateway-checks.mjs (allow-list proof) needs the MCP SDK; ESM ignores NODE_PATH, so it resolves via this package's node_modules.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.15.0"
+  }
+}

@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: patch-ai-gateway
+  labels:
+    app.kubernetes.io/part-of: agent-framework-e2e

@@ -1,0 +1,79 @@
+# Chat smoke: a real two-turn conversation through the full in-cluster path
+# (patch CLI -> assistant -> AI gateway -> stub LLM), proving chat works AND
+# conversation memory replays — turn 2 quotes turn 1, and a fresh context has
+# no memory (negative control). The stub model's recall script makes this
+# deterministic without a real model key.
+#
+# Must forward on :1986 specifically, not an arbitrary dedicated port: the
+# patch CLI's a2a client fetches the agent card from PATCH_URL, then POSTs to
+# whatever URL the card itself advertises (PUBLIC_BASE_URL, hardcoded to
+# http://localhost:1986 in config/base/assistant.yaml) — not the URL it was
+# fetched from. A forward on any other port only serves the initial card
+# fetch and the chat call then fails to reach an unforwarded :1986. Reuses an
+# existing `task dev:forward` if one is already up (same convention as the
+# assistant-apiserver suite's seeding step) and otherwise starts its own.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: chat-smoke
+spec:
+  skipDelete: true
+  steps:
+    - name: two-turn-recall
+      try:
+        - script:
+            timeout: 240s
+            content: |
+              set -euo pipefail
+              PORT=1986
+              if ! curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
+                kubectl -n patch-playground port-forward svc/assistant ${PORT}:7820 >/dev/null 2>&1 &
+                PF=$!
+                trap 'kill ${PF} 2>/dev/null || true' EXIT
+                for i in $(seq 1 30); do
+                  curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null && break
+                  [ "$i" = 30 ] && { echo "assistant not reachable over port-forward" >&2; exit 1; }
+                  sleep 1
+                done
+              fi
+              REPO="$(git rev-parse --show-toplevel)"
+              cd "${REPO}"
+              export PATCH_URL="http://127.0.0.1:${PORT}"
+              # No static token: the assistant resolves callers via TokenReview.
+              PATCH_TOKEN="$(kubectl -n patch-playground create token patch-dev --duration=10m)"
+              export PATCH_TOKEN
+
+              FACT="my favorite pipeline is p-chainsaw"
+              CTX=$(go run ./cmd/patch chat "${FACT}" --project demo-project 2>&1 >/dev/null \
+                | sed -n 's/^context: \([^ ]*\).*/\1/p')
+              [ -n "${CTX}" ] || { echo "no contextId from turn 1" >&2; exit 1; }
+
+              ANSWER=$(go run ./cmd/patch chat "what did I say?" --project demo-project --context-id "${CTX}" 2>/dev/null)
+              echo "recall answer: ${ANSWER}"
+              echo "${ANSWER}" | grep -qF "\"${FACT}\"" \
+                || { echo "FAIL: turn 2 did not recall turn 1" >&2; exit 1; }
+
+              FRESH=$(go run ./cmd/patch chat "what did I say?" --project demo-project 2>/dev/null)
+              echo "fresh-context answer: ${FRESH}"
+              echo "${FRESH}" | grep -q "first thing" \
+                || { echo "FAIL: fresh context unexpectedly had memory" >&2; exit 1; }
+              echo "PASS: two-turn recall + negative control"
+
+              # Skills (fixture mode only: the catalog projection does not
+              # carry skills yet, so skip when the assistant runs in
+              # capability-provider mode).
+              MODE=$(kubectl -n patch-playground get deploy assistant \
+                -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CAPABILITY_DOCS_FIXTURE")].value}')
+              if [ -z "${MODE}" ]; then
+                echo "SKIP: skill check (assistant is in catalog mode, fixture-only feature)"
+              else
+                SKILL=$(go run ./cmd/patch chat "Use the streaming-streamco-example__lag-triage skill" --project demo-project 2>/dev/null)
+                echo "skill answer: ${SKILL}"
+                echo "${SKILL}" | grep -q "Following its procedure" \
+                  || { echo "FAIL: skill was not loaded/followed" >&2; exit 1; }
+                echo "${SKILL}" | grep -q "Pipeline consumer lag" \
+                  || { echo "FAIL: skill body content missing from the answer" >&2; exit 1; }
+                echo "${SKILL}" | grep -qE "unknown skill|temporarily unavailable" \
+                  && { echo "FAIL: load_skill errored" >&2; exit 1; }
+                echo "PASS: skill load round-trip"
+              fi

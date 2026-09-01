@@ -1,0 +1,469 @@
+// A2A e2e assertion driver (QA-owned) — zero external deps, plain Node >= 22.
+//
+// Exercises the RUNNING assistant service over HTTP with a dev bearer token
+// and proves contract items 2-5 (CONTRACT-ASSISTANT.md "Definition of done /
+// QA"). run-e2e.sh boots the service + StreamCo + sink and invokes this.
+//
+// Design notes:
+//  - The JSON-RPC endpoint is DISCOVERED from the agent card's `url` field
+//    (A2A v1.0), so this driver does not hard-code the /a2a path.
+//  - SSE and A2A event field names are the engineer's implementation choice
+//    (contract: "best-effort naming per spec; document deviation in README").
+//    Assertions are therefore tolerant: they scan structured fields first and
+//    fall back to substring checks, and every raw event is written to
+//    out/stream-events.jsonl so mismatches are debuggable, not silent.
+//  - Exit 0 iff every REQUIRED check passed. Evidence is written under OUT_DIR.
+
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+// ── Config (env, with contract defaults) ────────────────────────────────────
+const ASSISTANT_URL = (process.env.ASSISTANT_URL ?? 'http://127.0.0.1:7820').replace(/\/$/, '');
+const SINK_URL = (process.env.SINK_URL ?? 'http://127.0.0.1:7811').replace(/\/$/, '');
+const PROJECT = process.env.PROJECT ?? 'demo-project';
+const GOOD_TOKEN = process.env.GOOD_TOKEN ?? 'e2e-good-token';
+const WRONGPROJ_TOKEN = process.env.WRONGPROJ_TOKEN ?? 'e2e-wrongproject-token';
+const OUT_DIR = process.env.OUT_DIR ?? join(process.cwd(), 'out');
+// Where run-e2e.sh tee'd StreamCo stdout (MCP call log) for item-5 proof.
+const STREAMCO_LOG = process.env.STREAMCO_LOG ?? '';
+const STREAM_TIMEOUT_MS = Number(process.env.STREAM_TIMEOUT_MS ?? 30_000);
+// The user prompt for item 4/5.
+const PROMPT = process.env.PROMPT ?? 'Diagnose pipeline p-1 for StreamCo';
+// Canned findings markers the final answer / artifact should surface.
+const FINDING_MARKERS = ['CONSUMER_LAG', 'vod-transcode', 'p-1', 'runbooks/lag.md'];
+
+mkdirSync(OUT_DIR, { recursive: true });
+
+// ── Result tracking ─────────────────────────────────────────────────────────
+const results = [];
+function record(item, name, ok, detail, required = true) {
+  results.push({ item, name, ok: !!ok, required, detail: String(detail).slice(0, 400) });
+  const tag = ok ? 'PASS' : required ? 'FAIL' : 'WARN';
+  const line = `${tag}  [item ${item}] ${name} — ${detail}`;
+  (ok ? console.log : console.error)(line);
+}
+function readText(res) {
+  return res.text().catch(() => '');
+}
+
+// ── JSON-RPC helper ─────────────────────────────────────────────────────────
+let rpcId = 0;
+async function rpc(endpoint, method, params, { token, accept } = {}) {
+  const headers = { 'content-type': 'application/json' };
+  if (accept) headers['accept'] = accept;
+  if (token) headers['authorization'] = `Bearer ${token}`;
+  const body = JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method, params });
+  return fetch(endpoint, { method: 'POST', headers, body });
+}
+
+function userMessage(text, { projectName = PROJECT, contextId } = {}) {
+  // A2A v1.0 (a2a-go) message shape: role is the ROLE_* enum ("ROLE_USER",
+  // not "user"), content parts are {text} (no `kind` discriminator), and the
+  // Message has no top-level `kind`. projectName rides message.metadata.
+  // A contextId continues that conversation (history replay server-side).
+  const message = {
+    role: 'ROLE_USER',
+    messageId: randomUUID(),
+    parts: [{ text }],
+    metadata: { projectName },
+  };
+  if (contextId) message.contextId = contextId;
+  return { message };
+}
+
+// Recursively harvest every string under a `text`/`content` key (tolerant to
+// exact artifact/message nesting).
+function harvestText(node, acc = []) {
+  if (node == null) return acc;
+  if (Array.isArray(node)) {
+    for (const el of node) harvestText(el, acc);
+    return acc;
+  }
+  if (typeof node === 'object') {
+    for (const [k, v] of Object.entries(node)) {
+      if ((k === 'text' || k === 'content') && typeof v === 'string') acc.push(v);
+      else harvestText(v, acc);
+    }
+  }
+  return acc;
+}
+function harvestByKey(node, key, acc = new Set()) {
+  if (node == null) return acc;
+  if (Array.isArray(node)) {
+    for (const el of node) harvestByKey(el, key, acc);
+    return acc;
+  }
+  if (typeof node === 'object') {
+    for (const [k, v] of Object.entries(node)) {
+      if (k === key && (typeof v === 'string' || typeof v === 'number')) acc.add(String(v));
+      else harvestByKey(v, key, acc);
+    }
+  }
+  return acc;
+}
+
+// ── SSE reader: POST message/stream, yield parsed JSON-RPC event objects ─────
+async function readStream(endpoint, params, { token }) {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'text/event-stream',
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'SendStreamingMessage', params }),
+  });
+  const events = [];
+  const meta = { status: res.status, contentType: res.headers.get('content-type') ?? '' };
+  if (!res.ok || !res.body) return { meta, events, rawStatus: res.status, errorBody: await readText(res) };
+
+  const decoder = new TextDecoder();
+  let buf = '';
+  const deadline = Date.now() + STREAM_TIMEOUT_MS;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), STREAM_TIMEOUT_MS);
+  try {
+    for await (const chunk of res.body) {
+      buf += decoder.decode(chunk, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const rawEvent = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const dataLines = rawEvent
+          .split('\n')
+          .filter((l) => l.startsWith('data:'))
+          .map((l) => l.slice(5).trim());
+        if (dataLines.length === 0) continue;
+        const payload = dataLines.join('\n');
+        try {
+          events.push(JSON.parse(payload));
+        } catch {
+          events.push({ _unparsed: payload });
+        }
+      }
+      // Stop once we observe a terminal marker to avoid hanging on a
+      // server that keeps the connection open. A2A v1.0 (a2a-go v2): there is
+      // NO `final` flag — the stream closes on a terminal TASK_STATE_* enum.
+      const rawSoFar = JSON.stringify(events);
+      if (/"state"\s*:\s*"TASK_STATE_(COMPLETED|CANCELED|FAILED|REJECTED)"/.test(rawSoFar)) {
+        break;
+      }
+      if (Date.now() > deadline) break;
+    }
+  } catch (err) {
+    meta.readError = err instanceof Error ? err.message : String(err);
+  } finally {
+    clearTimeout(timer);
+  }
+  return { meta, events };
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+async function main() {
+  // Fresh sink slate so item-5 assertions only see this run's events.
+  await fetch(`${SINK_URL}/events`, { method: 'DELETE' }).catch(() => {});
+
+  // ---- Item 2: agent card ---------------------------------------------------
+  let a2aEndpoint = `${ASSISTANT_URL}/a2a`;
+  const cardRes = await fetch(`${ASSISTANT_URL}/.well-known/agent-card.json`);
+  const cardBody = await readText(cardRes);
+  let card = {};
+  try {
+    card = JSON.parse(cardBody);
+  } catch {
+    /* leave {} */
+  }
+  writeFileSync(join(OUT_DIR, 'agent-card.json'), cardBody);
+  record('2', 'GET agent card returns 200 JSON', cardRes.ok && typeof card === 'object', `status=${cardRes.status}`);
+  record('2', 'card.name = "Patch"', card.name === 'Patch', `name=${card.name}`);
+  // A2A v1.0 (a2a-go AgentCard): the top-level protocolVersion/url/
+  // preferredTransport are GONE — transport+protocol+url now live in
+  // supportedInterfaces[]. Prefer the JSONRPC interface; keep a legacy
+  // top-level fallback so a v0.3 card would still be diagnosable.
+  const ifaces = Array.isArray(card.supportedInterfaces) ? card.supportedInterfaces : [];
+  const jsonrpcIface = ifaces.find((i) => String(i?.protocolBinding).toUpperCase() === 'JSONRPC') ?? ifaces[0];
+  const cardProtoVersion = jsonrpcIface?.protocolVersion ?? card.protocolVersion;
+  const cardUrl = jsonrpcIface?.url ?? card.url;
+  record('2', 'card advertises A2A v1.0 (supportedInterfaces[].protocolVersion = "1.0")', String(cardProtoVersion) === '1.0', `protocolVersion=${cardProtoVersion} interfaces=${ifaces.length}`);
+  record('2', 'card advertises a JSONRPC interface binding', String(jsonrpcIface?.protocolBinding).toUpperCase() === 'JSONRPC', `protocolBinding=${jsonrpcIface?.protocolBinding}`);
+  record('2', 'card.capabilities.streaming = true', card.capabilities?.streaming === true, `streaming=${card.capabilities?.streaming}`);
+  const provName = card.provider?.organization ?? card.provider?.name ?? card.provider;
+  record('2', 'card.provider is Datum', String(provName).toLowerCase().includes('datum'), `provider=${JSON.stringify(card.provider)}`, false);
+  // securitySchemes: A2A v1.0 (a2a-go) discriminates the scheme — bearer lives
+  // under securitySchemes.<name>.httpAuthSecurityScheme.scheme. Tolerate the
+  // flat v0.3 shape too. Scheme value is compared case-insensitively.
+  const schemes = card.securitySchemes ?? card.security ?? {};
+  const schemeVals = Array.isArray(schemes) ? schemes : Object.values(schemes ?? {});
+  const hasBearer = schemeVals.some((s) => {
+    const inner = s?.httpAuthSecurityScheme ?? s;
+    return String(inner?.scheme).toLowerCase() === 'bearer';
+  });
+  record('2', 'card advertises HTTP bearer security scheme', hasBearer, JSON.stringify(schemes).slice(0, 200));
+  const skills = Array.isArray(card.skills) ? card.skills : [];
+  const hasProjectSkill = skills.some((s) => /project-assistant/i.test(`${s?.id} ${s?.name}`));
+  record('2', 'card.skills includes project-assistant', hasProjectSkill, `skills=${skills.map((s) => s?.id).join(', ')}`);
+  if (typeof cardUrl === 'string' && /^https?:\/\//.test(cardUrl)) {
+    a2aEndpoint = cardUrl;
+    record('2', 'card JSONRPC interface url drives the a2a calls', /\/a2a$/.test(cardUrl), cardUrl, false);
+  } else {
+    record('2', 'card interface url present (falling back to /a2a)', false, `url=${cardUrl}`, false);
+  }
+
+  // ---- Item 3: auth matrix --------------------------------------------------
+  const noAuth = await rpc(a2aEndpoint, 'SendMessage', userMessage(PROMPT), {});
+  record('3', 'no token -> 401', noAuth.status === 401, `status=${noAuth.status}`);
+  await readText(noAuth);
+
+  const wrongProj = await rpc(a2aEndpoint, 'SendMessage', userMessage(PROMPT, { projectName: PROJECT }), {
+    token: WRONGPROJ_TOKEN,
+  });
+  record('3', 'valid token, unauthorized project -> 403', wrongProj.status === 403, `status=${wrongProj.status}`);
+  await readText(wrongProj);
+
+  const goodAuth = await rpc(a2aEndpoint, 'SendMessage', userMessage(PROMPT), { token: GOOD_TOKEN });
+  const goodAuthBody = await readText(goodAuth);
+  record('3', 'good token, granted project -> 200', goodAuth.status === 200, `status=${goodAuth.status}`);
+  writeFileSync(join(OUT_DIR, 'message-send.json'), goodAuthBody);
+
+  // ---- Item 4: message/stream lifecycle -------------------------------------
+  const { meta, events } = await readStream(a2aEndpoint, userMessage(PROMPT), { token: GOOD_TOKEN });
+  writeFileSync(join(OUT_DIR, 'stream-meta.json'), JSON.stringify(meta, null, 2));
+  const jsonl = events.map((e) => JSON.stringify(e)).join('\n');
+  writeFileSync(join(OUT_DIR, 'stream-events.jsonl'), jsonl + (jsonl ? '\n' : ''));
+  record('4', 'message/stream responds text/event-stream', /event-stream/.test(meta.contentType), `contentType=${meta.contentType} status=${meta.status}`);
+  record('4', 'stream produced >=1 event', events.length > 0, `events=${events.length}`);
+  const rawAll = JSON.stringify(events);
+  // A2A v1.0 wire (a2a-go v2): task lifecycle states are TASK_STATE_* enums,
+  // stream events are a StreamResponse oneOf envelope (task / statusUpdate /
+  // artifactUpdate / message), and the v0.3-shaped `kind` discriminator and
+  // `final` flag are GONE (deliberate breaking change vs the TS wire).
+  record('4', 'stream shows a working (non-terminal) state (TASK_STATE_WORKING)', /"state"\s*:\s*"TASK_STATE_WORKING"/.test(rawAll), 'looked for state=TASK_STATE_WORKING');
+  record('4', 'stream reaches terminal state (TASK_STATE_COMPLETED)', /"state"\s*:\s*"TASK_STATE_COMPLETED"/.test(rawAll), 'looked for state=TASK_STATE_COMPLETED');
+  // The v1.0 break, asserted positively: the oneOf envelope key is present and
+  // the removed v0.3 fields are absent — the server closes on terminal state.
+  const hasOneOf = /"(statusUpdate|artifactUpdate|task|message)"\s*:/.test(rawAll);
+  const noKind = !/"kind"\s*:/.test(rawAll);
+  const noFinal = !/"final"\s*:/.test(rawAll);
+  record('4', 'stream is A2A v1.0-shaped (oneOf StreamResponse, no kind/final)', hasOneOf && noKind && noFinal, `oneOf=${hasOneOf} noKind=${noKind} noFinal=${noFinal}`);
+  const streamText = harvestText(events).join('\n');
+  const markerHits = FINDING_MARKERS.filter((m) => streamText.includes(m));
+  record('4', 'artifact/message text surfaces canned findings', markerHits.length > 0, `matched markers: [${markerHits.join(', ')}]`);
+
+  // Extract a taskId + contextId for tasks/get + tasks/cancel.
+  const taskIds = [...harvestByKey(events, 'taskId'), ...harvestByKey(events, 'id')];
+  const contextIds = [...harvestByKey(events, 'contextId')];
+  const taskId = [...harvestByKey(events, 'taskId')][0] ?? taskIds[0];
+  record('4', 'a taskId is observable in the stream', !!taskId, `taskId=${taskId} contextId=${contextIds[0]}`);
+
+  if (taskId) {
+    const getRes = await rpc(a2aEndpoint, 'GetTask', { id: taskId }, { token: GOOD_TOKEN });
+    const getBody = await readText(getRes);
+    writeFileSync(join(OUT_DIR, 'tasks-get.json'), getBody);
+    let getJson = {};
+    try {
+      getJson = JSON.parse(getBody);
+    } catch {
+      /* */
+    }
+    const gotSameTask = JSON.stringify(getJson).includes(taskId);
+    const completedState = /"state"\s*:\s*"TASK_STATE_COMPLETED"/.test(getBody);
+    record('4', 'tasks/get retrieves the task record', getRes.status === 200 && gotSameTask, `status=${getRes.status} sameId=${gotSameTask} completed=${completedState}`);
+  } else {
+    record('4', 'tasks/get retrieves the task record', false, 'no taskId observed to query');
+  }
+
+  // tasks/cancel on a FRESH task. Start a new stream but cancel as soon as we
+  // learn its taskId (best effort — either canceled or a sane not-cancelable
+  // JSON-RPC error is acceptable; a 5xx/crash is not).
+  {
+    const fresh = await readStream(a2aEndpoint, userMessage(PROMPT), { token: GOOD_TOKEN });
+    const freshTaskId = [...harvestByKey(fresh.events, 'taskId')][0] ?? [...harvestByKey(fresh.events, 'id')][0];
+    if (freshTaskId) {
+      const cancelRes = await rpc(a2aEndpoint, 'CancelTask', { id: freshTaskId }, { token: GOOD_TOKEN });
+      const cancelBody = await readText(cancelRes);
+      writeFileSync(join(OUT_DIR, 'tasks-cancel.json'), cancelBody);
+      let cancelJson = {};
+      try {
+        cancelJson = JSON.parse(cancelBody);
+      } catch {
+        /* */
+      }
+      const sane =
+        cancelRes.status < 500 &&
+        (/"state"\s*:\s*"TASK_STATE_CANCELED"/.test(cancelBody) || cancelJson.error != null || cancelRes.status === 200);
+      record('4', 'tasks/cancel behaves sanely (canceled or documented error, no 5xx)', sane, `status=${cancelRes.status} body=${cancelBody.slice(0, 160)}`);
+    } else {
+      record('4', 'tasks/cancel behaves sanely', false, 'could not obtain a fresh taskId to cancel');
+    }
+  }
+
+  // ---- Item 5: prove the chat path (MCP + usage) ----------------------------
+  // MCP proof from StreamCo's own request log (real Streamable-HTTP round-trip).
+  if (STREAMCO_LOG) {
+    let logText = '';
+    try {
+      logText = await import('node:fs').then((fs) => fs.readFileSync(STREAMCO_LOG, 'utf8'));
+    } catch {
+      /* */
+    }
+    const mcpCalled = /tools\/call pipeline_diagnose id=p-1/.test(logText);
+    record('5', 'provider tool call went over real MCP (StreamCo log shows pipeline_diagnose id=p-1)', mcpCalled, mcpCalled ? 'streamco.log matched' : 'no matching StreamCo log line');
+  } else {
+    record('5', 'provider tool call went over real MCP', false, 'STREAMCO_LOG not provided to driver', false);
+  }
+
+  // Usage proof from the sink — EXACT per-turn counts (billing double-count
+  // regression pin). The accumulated sink is noisy (item 3/4 turns plus a raced
+  // cancel), so isolate one turn: clear the sink, run ONE diagnose turn to
+  // completion, and assert the turn's KNOWN fixed set. The mock diagnose turn
+  // meters exactly 84 input + 46 output (2 steps x 42/23), one messages meter,
+  // and one tool-invocation — 4 events total. Asserting EXACT counts (not the
+  // old >=1) is what catches a finalize double-emit that would bill each turn
+  // twice (every count would double, total would be 8).
+  await fetch(`${SINK_URL}/events`, { method: 'DELETE' }).catch(() => {});
+  const isolated = await readStream(a2aEndpoint, userMessage(PROMPT), { token: GOOD_TOKEN });
+  const isolatedCompleted = /"state"\s*:\s*"TASK_STATE_COMPLETED"/.test(JSON.stringify(isolated.events));
+  record('5', 'isolated diagnose turn reaches TASK_STATE_COMPLETED', isolatedCompleted, `events=${isolated.events.length}`);
+
+  // Usage is emitted server-side around terminal state; poll (bounded) until the
+  // turn's tool-invocation lands so the exact-count assertions are not raced.
+  let sinkEvents = [];
+  for (let i = 0; i < 20; i++) {
+    sinkEvents = await fetch(`${SINK_URL}/events`).then((r) => r.json()).catch(() => []);
+    if (sinkEvents.some((e) => e?.type === 'assistant.miloapis.com/conversation/tool-invocations')) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  writeFileSync(join(OUT_DIR, 'sink-events.json'), JSON.stringify(sinkEvents, null, 2));
+
+  const mine = sinkEvents.filter((e) => e?.subject === `projects/${PROJECT}`);
+  const ofType = (t) => mine.filter((e) => e?.type === t);
+  const inputTok = ofType('assistant.miloapis.com/conversation/input-tokens');
+  const outputTok = ofType('assistant.miloapis.com/conversation/output-tokens');
+  const messages = ofType('assistant.miloapis.com/conversation/messages');
+  const toolInv = ofType('assistant.miloapis.com/conversation/tool-invocations').filter(
+    (e) => e?.data?.dimensions?.service === 'streaming.streamco.example',
+  );
+  const valuesOf = (arr) => arr.map((e) => e?.data?.value).join(',');
+
+  record(
+    '5',
+    'diagnose turn meters EXACTLY one input-tokens event = 84 (2 steps x 42)',
+    inputTok.length === 1 && inputTok[0]?.data?.value === '84',
+    `count=${inputTok.length} values=[${valuesOf(inputTok)}]`,
+  );
+  record(
+    '5',
+    'diagnose turn meters EXACTLY one output-tokens event = 46 (2 steps x 23)',
+    outputTok.length === 1 && outputTok[0]?.data?.value === '46',
+    `count=${outputTok.length} values=[${valuesOf(outputTok)}]`,
+  );
+  record(
+    '5',
+    'diagnose turn meters EXACTLY one messages event = 1',
+    messages.length === 1 && messages[0]?.data?.value === '1',
+    `count=${messages.length} values=[${valuesOf(messages)}]`,
+  );
+  record(
+    '5',
+    'diagnose turn meters EXACTLY one tool-invocation (service=streaming.streamco.example)',
+    toolInv.length === 1 && toolInv[0]?.data?.value === '1',
+    `count=${toolInv.length}`,
+  );
+  record(
+    '5',
+    'diagnose turn emits EXACTLY its 4-event set (no double-emit)',
+    mine.length === 4,
+    `total sink events for project=${mine.length} types=[${[...new Set(mine.map((e) => e.type))].join(', ')}]`,
+  );
+  record(
+    '5',
+    'token meters carry resource.kind=Conversation',
+    inputTok.concat(outputTok).length > 0 &&
+      inputTok.concat(outputTok).every((e) => e?.data?.resource?.kind === 'Conversation'),
+    `inputKind=${inputTok[0]?.data?.resource?.kind} outputKind=${outputTok[0]?.data?.resource?.kind}`,
+  );
+
+  // ---- Item 6: multi-turn conversation memory --------------------------------
+  // Turn 1 states a fact; turn 2 reuses the contextId and asks "what did I
+  // say?" — the mock model answers by quoting the user turns it actually saw
+  // in its prompt, so the quote proves history replay reached the model.
+  {
+    const fact = 'My favorite pipeline is p-77';
+    const turn1 = await readStream(a2aEndpoint, userMessage(fact), { token: GOOD_TOKEN });
+    const convId = [...harvestByKey(turn1.events, 'contextId')][0];
+    record('6', 'turn 1 establishes a conversation (contextId observable)', !!convId, `contextId=${convId}`);
+
+    if (convId) {
+      const turn2 = await readStream(a2aEndpoint, userMessage('what did I say?', { contextId: convId }), { token: GOOD_TOKEN });
+      writeFileSync(join(OUT_DIR, 'multiturn-turn2.json'), JSON.stringify(turn2.events, null, 2));
+      const turn2Text = harvestText(turn2.events).join(' ');
+      const recalled = turn2Text.includes(`"${fact}"`);
+      record('6', 'turn 2 (same contextId) recalls turn 1 — history replayed into the prompt', recalled, recalled ? 'answer quotes turn 1' : `answer did not quote turn 1: ${turn2Text.slice(0, 200)}`);
+      const sameContext = [...harvestByKey(turn2.events, 'contextId')].includes(convId);
+      record('6', 'turn 2 events carry the same contextId', sameContext, `contextIds=${[...harvestByKey(turn2.events, 'contextId')].join(',')}`);
+    } else {
+      record('6', 'turn 2 recalls turn 1', false, 'no contextId from turn 1');
+    }
+
+    // Negative control: the same question in a FRESH context must find no
+    // memory — otherwise the recall check above proves nothing.
+    const freshAsk = await readStream(a2aEndpoint, userMessage('what did I say?'), { token: GOOD_TOKEN });
+    const freshText = harvestText(freshAsk.events).join(' ');
+    const noMemory = freshText.includes('first thing') && !freshText.includes(`"${fact}"`);
+    record('6', 'fresh context has no memory (negative control)', noMemory, freshText.slice(0, 160));
+  }
+
+  // ---- Item 7: skills (progressive disclosure via load_skill) ---------------
+  // The fixture publishes the streamco lag-triage skill. Asking to use it makes
+  // the mock model call the built-in load_skill tool; the reply quotes the
+  // fetched body. Loading a skill is NOT a provider tool invocation, so the
+  // sink's tool-invocations count must not grow.
+  {
+    const invBefore = (await fetch(`${SINK_URL}/events`).then((r) => r.json()).catch(() => []))
+      .filter((e) => e?.type === 'assistant.miloapis.com/conversation/tool-invocations').length;
+    const skillTurn = await readStream(a2aEndpoint, userMessage('Use the streaming-streamco-example__lag-triage skill'), { token: GOOD_TOKEN });
+    writeFileSync(join(OUT_DIR, 'skill-turn.json'), JSON.stringify(skillTurn.events, null, 2));
+    const skillText = harvestText(skillTurn.events).join(' ');
+    const loaded =
+      skillText.includes('Following its procedure') &&
+      skillText.includes('Pipeline consumer lag') && // actual runbook body content
+      !skillText.includes('unknown skill') &&
+      !skillText.includes('temporarily unavailable');
+    record('7', 'skill turn loads and follows the skill (load_skill round-trip, body content present)',
+      loaded, skillText.slice(0, 200));
+    const invAfter = (await fetch(`${SINK_URL}/events`).then((r) => r.json()).catch(() => []))
+      .filter((e) => e?.type === 'assistant.miloapis.com/conversation/tool-invocations').length;
+    record('7', 'load_skill does not meter as a provider tool invocation',
+      invAfter === invBefore, `tool-invocation events before=${invBefore} after=${invAfter}`);
+  }
+
+  // ---- Summary --------------------------------------------------------------
+  const requiredFails = results.filter((r) => r.required && !r.ok);
+  const summary = {
+    generatedAt: new Date().toISOString(),
+    assistantUrl: ASSISTANT_URL,
+    a2aEndpoint,
+    project: PROJECT,
+    totals: {
+      checks: results.length,
+      passed: results.filter((r) => r.ok).length,
+      failedRequired: requiredFails.length,
+      failedOptional: results.filter((r) => !r.required && !r.ok).length,
+    },
+    results,
+  };
+  writeFileSync(join(OUT_DIR, 'driver-summary.json'), JSON.stringify(summary, null, 2));
+  appendFileSync(join(OUT_DIR, 'driver.log'), JSON.stringify(summary) + '\n');
+
+  console.log(
+    `\n${requiredFails.length === 0 ? 'DRIVER PASS' : `DRIVER FAIL (${requiredFails.length} required check(s) failed)`}` +
+      ` — ${summary.totals.passed}/${summary.totals.checks} checks passed`,
+  );
+  process.exit(requiredFails.length === 0 ? 0 : 1);
+}
+
+main().catch((err) => {
+  console.error('[a2a-checks] fatal:', err);
+  process.exit(2);
+});
