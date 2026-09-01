@@ -1,0 +1,23 @@
+{
+  "name": "datum-compute-demo-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Datum Compute MCP provider prototype: Streamable HTTP MCP server + knowledge/skill routes for the compute AI plugin.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "selftest": "node src/selftest.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.15.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  }
+}

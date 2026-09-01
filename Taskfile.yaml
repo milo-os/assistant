@@ -20,6 +20,7 @@ vars:
   IMAGE_ASSISTANT: ghcr.io/milo-os/assistant
   IMAGE_APISERVER: ghcr.io/milo-os/assistant-apiserver
   IMAGE_STREAMCO: ghcr.io/milo-os/assistant-streamco
+  IMAGE_COMPUTE: ghcr.io/milo-os/assistant-compute
   IMAGE_SINK: ghcr.io/milo-os/assistant-sink
   IMAGE_TAG: dev
   TEST_INFRA_CLUSTER_NAME: test-infra
@@ -110,7 +111,7 @@ tasks:
 
   dev:build:
     desc: Build the dev images (assistant compiled on the HOST — an in-image
-      go build starves on a busy Docker VM; streamco/sink are thin node images)
+      go build starves on a busy Docker VM; streamco/compute/sink are thin node images)
     vars:
       GOARCH:
         sh: |
@@ -125,12 +126,13 @@ tasks:
       - docker build --provenance=false --sbom=false -t {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} -f deploy/assistant.Dockerfile deploy/.build
       - docker build --provenance=false --sbom=false -t {{.IMAGE_APISERVER}}:{{.IMAGE_TAG}} -f deploy/assistant-apiserver.Dockerfile deploy/.build
       - docker build --provenance=false --sbom=false -t {{.IMAGE_STREAMCO}}:{{.IMAGE_TAG}} -f deploy/streamco.Dockerfile e2e/streamco
+      - docker build --provenance=false --sbom=false -t {{.IMAGE_COMPUTE}}:{{.IMAGE_TAG}} -f deploy/compute.Dockerfile e2e/compute
       - docker build --provenance=false --sbom=false -t {{.IMAGE_SINK}}:{{.IMAGE_TAG}} -f deploy/sink.Dockerfile e2e/sink
 
   dev:load:
     desc: Load the dev images into the kind cluster
     cmds:
-      - kind load docker-image {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} {{.IMAGE_APISERVER}}:{{.IMAGE_TAG}} {{.IMAGE_STREAMCO}}:{{.IMAGE_TAG}} {{.IMAGE_SINK}}:{{.IMAGE_TAG}} --name {{.TEST_INFRA_CLUSTER_NAME}}
+      - kind load docker-image {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} {{.IMAGE_APISERVER}}:{{.IMAGE_TAG}} {{.IMAGE_STREAMCO}}:{{.IMAGE_TAG}} {{.IMAGE_COMPUTE}}:{{.IMAGE_TAG}} {{.IMAGE_SINK}}:{{.IMAGE_TAG}} --name {{.TEST_INFRA_CLUSTER_NAME}}
 
   dev:deploy:
     desc: Deploy dependencies + the stack (staged, with waits). OVERLAY=dev|dev-catalog
@@ -226,6 +228,8 @@ tasks:
         || kubectl -n {{.NS}} wait --for=condition=Available deploy/stub-llm --timeout=60s
       - kubectl -n {{.NS}} rollout status deploy/streamco --timeout=180s
         || kubectl -n {{.NS}} wait --for=condition=Available deploy/streamco --timeout=60s
+      - kubectl -n {{.NS}} rollout status deploy/compute --timeout=180s
+        || kubectl -n {{.NS}} wait --for=condition=Available deploy/compute --timeout=60s
       - kubectl -n {{.NS}} rollout status deploy/sink --timeout=180s
         || kubectl -n {{.NS}} wait --for=condition=Available deploy/sink --timeout=60s
       - kubectl -n {{.NS}} wait --for=condition=Programmed gateway/patch-playground --timeout=300s
