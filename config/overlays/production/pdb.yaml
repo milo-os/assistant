@@ -1,0 +1,10 @@
+# Keep a quorum serving during voluntary disruption (node drains, upgrades).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: assistant
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: assistant
