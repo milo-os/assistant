@@ -1,0 +1,22 @@
+{
+  "name": "streamco-demo-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "StreamCo demo provider: Streamable HTTP MCP server + knowledge routes for the AI Agent Framework local slice.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "selftest": "node src/selftest.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.15.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  }
+}

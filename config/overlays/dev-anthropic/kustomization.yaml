@@ -1,0 +1,41 @@
+# Dev overlay, but the MODEL runs in ANTHROPIC mode — the assistant talks
+# directly to api.anthropic.com instead of the gateway/stub, so replies come
+# from a real model. Everything else (StreamCo MCP capability, sink, durable
+# conversation store, dev auth token) is inherited from the dev overlay
+# unchanged; only the model source is swapped.
+#
+# Requires an `anthropic-api-key` Secret (key `key`) in patch-playground.
+# `task dev:deploy OVERLAY=dev-anthropic` materializes it from key.txt (which
+# is gitignored — never commit the key). The gateway/llm-stub wiring is still
+# deployed but simply unused for the LLM in this mode.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+patches:
+  - target:
+      kind: Deployment
+      name: assistant
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: assistant
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: assistant
+                env:
+                  # Override the base's MODEL_MODE=gateway. GATEWAY_* env stays
+                  # present but is ignored by the service in anthropic mode.
+                  - name: MODEL_MODE
+                    value: anthropic
+                  - name: ANTHROPIC_API_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: anthropic-api-key
+                        key: key
+                  # Optional: pin the model with ANTHROPIC_MODEL; unset uses the
+                  # service default.

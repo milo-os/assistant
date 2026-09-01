@@ -1,0 +1,32 @@
+# Routes the model name `patch-stub-v1` to the stub AIServiceBackend and meters
+# token usage AT THE GATEWAY. llmRequestCosts extracts input/output/total tokens
+# from the upstream `usage` block into io.envoy.ai_gateway dynamic metadata,
+# which the EnvoyProxy access log (10-gateway.yaml) emits as JSON alongside the
+# x-datum-* attribution headers (proof P4).
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: patch-chat
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  parentRefs:
+    - name: patch-playground
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rules:
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: patch-stub-v1
+      backendRefs:
+        - name: patch-stub
+  llmRequestCosts:
+    - metadataKey: llm_input_token
+      type: InputToken
+    - metadataKey: llm_output_token
+      type: OutputToken
+    - metadataKey: llm_total_token
+      type: TotalToken

@@ -1,0 +1,30 @@
+{
+  "protocolVersion": "0.2.6",
+  "name": "StreamCo Streaming Agent",
+  "description": "Provider agent for streaming.streamco.example: answers questions about streams and diagnoses pipeline health. STRETCH artifact for the Tier 3 A2A slice — static card only, no A2A endpoint is served.",
+  "url": "http://127.0.0.1:7810/mcp",
+  "preferredTransport": "HTTP+JSON",
+  "version": "0.1.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["application/json", "text/plain"],
+  "skills": [
+    {
+      "id": "pipeline-diagnosis",
+      "name": "Pipeline diagnosis",
+      "description": "Diagnose a StreamCo pipeline: consumer lag, checkpoint cadence, throughput; returns findings and a remediation recommendation.",
+      "tags": ["streaming", "diagnostics", "sre"],
+      "examples": ["Diagnose pipeline p-1", "Why is playback-telemetry lagging?"]
+    },
+    {
+      "id": "stream-inventory",
+      "name": "Stream inventory",
+      "description": "List streams and report per-stream status, throughput, region, and lag.",
+      "tags": ["streaming", "inventory"],
+      "examples": ["List all StreamCo streams", "Show details for stream s-2"]
+    }
+  ]
+}

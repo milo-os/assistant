@@ -1,0 +1,56 @@
+# Caller identities for the dev environment.
+#
+# There is no static dev token any more: the assistant resolves callers with a
+# TokenReview and authorizes them with a SubjectAccessReview, both against the
+# kind cluster's own apiserver. So a developer authenticates the same way a
+# customer does — with a real Kubernetes token:
+#
+#   kubectl -n patch-playground create token patch-dev
+#
+# `task dev:chat` mints one for you. The upshot is that the local loop now
+# exercises the production auth path instead of bypassing it.
+#
+# NOTE the binding below is a ClusterRoleBinding, so patch-dev is authorized for
+# EVERY project rather than a specific one. On the playground that is the point
+# — a developer switches --project freely. A real deployment binds per project
+# namespace, which is what makes a customer's grant specific to their project.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: patch-dev
+  namespace: patch-playground
+---
+# The permission the assistant's SubjectAccessReview asks about. It mirrors the
+# defaults in internal/auth (assistant.miloapis.com / conversations / create) —
+# change one and this must change with it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: patch-conversation-creator
+rules:
+  - apiGroups: ["assistant.miloapis.com"]
+    resources: ["conversations"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: patch-dev:conversation-creator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: patch-conversation-creator
+subjects:
+  - kind: ServiceAccount
+    name: patch-dev
+    namespace: patch-playground
+---
+# A second identity with NO binding, so a token that authenticates cleanly but
+# is authorized for nothing is available to exercise the 403 path. It replaces
+# the old "wrong project" dev token, and is a truer test: the denial now comes
+# from the control plane rather than from a grant list the service kept itself.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: patch-dev-unauthorized
+  namespace: patch-playground

@@ -1,0 +1,82 @@
+# Dev overlay — FIXTURE capability mode: the full environment with capability
+# documents served from a mounted file. `task dev:deploy` applies this by
+# default; the dev-catalog overlay swaps the fixture for the catalog's
+# capability-provider API. Each overlay declares exactly ONE capability source
+# (they are mutually exclusive in the service config), and switching overlays
+# is a clean declarative swap — kubectl apply prunes the other mode's env.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - caller-rbac.yaml
+  - ../../base/assistant-apiserver
+  - ../../components/gateway
+  - ../../components/llm-stub
+  - ../../components/streamco
+  - ../../components/sink
+
+# The APIService that registers the assistant aggregated apiserver with the
+# kube-aggregator. A Component (not a plain resource) so a production overlay can
+# compose the same registration with a different TLS/caBundle posture.
+components:
+  - ../../components/api-registration
+
+images:
+  - name: ghcr.io/milo-os/assistant
+    newTag: dev
+  - name: ghcr.io/milo-os/assistant-streamco
+    newTag: dev
+  - name: ghcr.io/milo-os/assistant-sink
+    newTag: dev
+  - name: ghcr.io/milo-os/assistant-apiserver
+    newTag: dev
+
+configMapGenerator:
+  - name: assistant-capabilities
+    namespace: patch-playground
+    files:
+      - capability-documents.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: agent-framework-playground
+
+# Dev-grade credential, like the stub upstream key: this is a loopback-only
+# dev environment on a kind cluster, not a production posture.
+
+patches:
+  # Dev has no cluster CA to trust for the aggregated apiserver's self-signed
+  # serving cert, so tell the aggregator to skip TLS verification. Production
+  # injects a real caBundle instead of this.
+  - target:
+      kind: APIService
+      name: v1alpha1.assistant.miloapis.com
+    patch: |-
+      - op: replace
+        path: /spec/insecureSkipTLSVerify
+        value: true
+  - target:
+      kind: Deployment
+      name: assistant
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: assistant
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: assistant
+                env:
+                  - name: CAPABILITY_DOCS_FIXTURE
+                    value: /config/capability-documents.json
+                volumeMounts:
+                  - name: capabilities
+                    mountPath: /config
+                    readOnly: true
+            volumes:
+              - name: capabilities
+                configMap:
+                  name: assistant-capabilities

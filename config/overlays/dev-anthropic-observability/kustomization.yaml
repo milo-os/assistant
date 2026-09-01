@@ -1,0 +1,10 @@
+# The `dev-anthropic` overlay (real Anthropic model calls) plus the opt-in
+# observability wiring (config/components/observability). See
+# dev-observability/kustomization.yaml for what the component adds and why
+# it's layered rather than baked into dev-anthropic directly.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev-anthropic
+components:
+  - ../../components/observability
