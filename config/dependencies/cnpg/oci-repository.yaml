@@ -1,0 +1,14 @@
+# Flux source for the CloudNativePG operator chart. Chart 0.29.0 ships operator
+# appVersion 1.30.0 — the same operator version this environment previously
+# installed from a vendored 20k-line manifest, so the swap to Helm carries no
+# version change.
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: OCIRepository
+metadata:
+  name: cnpg
+  namespace: flux-system
+spec:
+  interval: 12h
+  url: oci://ghcr.io/cloudnative-pg/charts/cloudnative-pg
+  ref:
+    tag: 0.29.0

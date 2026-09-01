@@ -1,0 +1,13 @@
+# CloudNativePG: the Flux source + release that install the operator
+# (cluster-scoped, into cnpg-system). The operator is ADDITIVE shared infra —
+# environment teardown removes the conversation-store Cluster with the
+# namespace but leaves cnpg-system in place.
+#
+# cluster.yaml is deliberately NOT listed here. The Cluster CR is only admitted
+# once the operator's webhook is serving, so the staged deploy applies it
+# separately after waiting on this release — see Stage 2 in Taskfile.yaml.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - oci-repository.yaml
+  - helm-release.yaml
