@@ -1,0 +1,69 @@
+# Usage capture sink (CONTRACT-REAL-ENV.md component 6 / proof P6): the local
+# stand-in for the platform usage collector. The assistant POSTs CloudEvents to
+# it (USAGE_GATEWAY_URL); QA reads them back via GET /events. Capture is written
+# to an emptyDir so the container filesystem stays read-friendly and events
+# survive for the duration of the pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sink
+  namespace: patch-playground
+  labels:
+    app: sink
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: sink }
+  template:
+    metadata:
+      labels:
+        app: sink
+        app.kubernetes.io/part-of: agent-framework-playground
+    spec:
+      containers:
+        - name: sink
+          image: ghcr.io/milo-os/assistant-sink
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 7811
+          env:
+            - name: SINK_HOST
+              value: "0.0.0.0"
+            - name: SINK_PORT
+              value: "7811"
+            - name: CAPTURE_FILE
+              value: "/data/captured-events.jsonl"
+          volumeMounts:
+            - name: capture
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /healthz, port: 7811 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 7811 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 25m, memory: 48Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+      volumes:
+        - name: capture
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sink
+  namespace: patch-playground
+  labels:
+    app: sink
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  selector: { app: sink }
+  ports:
+    - name: http
+      port: 7811
+      targetPort: 7811
+  type: ClusterIP
