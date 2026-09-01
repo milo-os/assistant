@@ -17,7 +17,7 @@
 // Threading: the conversation's contextId is learned from the event stream (as
 // the REPL does) and sent on every later turn, so the whole session is one
 // conversation with memory.
-package main
+package patchcli
 
 import (
 	"context"
@@ -39,7 +39,6 @@ import (
 	glamourstyles "github.com/charmbracelet/glamour/styles"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/a2aproject/a2a-go/v2/a2aclient"
 
 	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
 )
@@ -191,11 +190,11 @@ func newInputStyles(dark bool) textinput.Styles {
 type chatModel struct {
 	ctx        context.Context
 	prog       *tea.Program
-	client     *a2aclient.Client
+	client     *serviceClient
 	project    string
 	kubeconfig string // for the /resume picker's kubectl calls; "" uses normal resolution
 	baseURL    string // for /compact's POST /v1/compact call (outside the a2a client)
-	token      string
+	token      TokenSource
 
 	vp       viewport.Model
 	ti       textinput.Model
@@ -229,7 +228,7 @@ type chatModel struct {
 	width        int // full terminal width; content width subtracts padding
 }
 
-func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextID, firstMessage, kubeconfig, baseURL, token string) int {
+func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, firstMessage, kubeconfig, baseURL string, token TokenSource) int {
 	st := newStyles(false) // provisional (light) until the background is learned
 
 	sp := spin.New(spin.WithSpinner(spin.Dot), spin.WithStyle(st.patch))
@@ -337,7 +336,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case streamErrMsg:
-		errText := friendlyError(msg.err)
+		errText := friendlyError(msg.err, m.client.errs)
 		m.turns = append(m.turns, m.st.err.Render("patch: "+errText))
 		m.raw = append(m.raw, transcriptTurn{role: "system", content: "error: " + errText})
 		m.answer.Reset()
