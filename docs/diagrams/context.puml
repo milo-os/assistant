@@ -15,7 +15,7 @@ System_Ext(llm, "Model Provider", "Anthropic (or any OpenAI-compatible upstream)
 System_Ext(mcp, "Provider MCP Servers", "Service-owned tools (e.g. StreamCo)")
 System_Ext(billing, "Usage / Billing Pipeline", "CloudEvents collector -> metering -> invoices")
 System_Ext(catalog, "Service Catalog (optional)", "CRD registration -> entitlement-gated capability projection")
-System_Ext(iam, "Milo IAM", "OIDC authn; SubjectAccessReview authz")
+System_Ext(iam, "Milo IAM", "TokenReview authn; SubjectAccessReview authz")
 
 Rel(user, portal, "chats via")
 Rel(user, cli, "chats via")

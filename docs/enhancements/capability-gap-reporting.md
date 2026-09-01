@@ -1,4 +1,11 @@
+---
+status: implemented
+---
+
 # Capability gap reporting
+
+> Design record. It describes the decision as it was taken; the shipped
+> behavior is documented under [docs/architecture](../architecture/README.md).
 
 ## Context
 
