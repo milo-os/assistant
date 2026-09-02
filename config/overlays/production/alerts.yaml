@@ -1,0 +1,104 @@
+# Availability alerts for a production deploy, from kube-state-metrics.
+#
+# Distinct from config/components/observability/alerts.yaml, and deliberately
+# so. Those rules read the assistant's OWN metrics (assistant_http_requests_total,
+# turn failures, model-call errors) and answer "is the assistant behaving?".
+# These read the cluster's view of the Deployment and answer "is the assistant
+# running at all?" — the question that still has an answer when the process is
+# too broken to emit metrics, and the one a pager needs first.
+#
+# The two are complementary and the observability component can layer on top;
+# nothing here duplicates it.
+#
+# The namespace selector matches this overlay's own namespace transformer
+# (patch-system). kube-state-metrics series span every namespace, so without it
+# these would also match a dev deploy in the same cluster.
+#
+# What makes this service's failure modes unusual: /readyz gates on dependency
+# reachability — Postgres AND the model gateway — while /healthz is a bare
+# process check. Pods that are Running but never Ready are reporting a broken
+# dependency, not a broken assistant. Both runbooks lead with that, because it
+# inverts the usual triage order.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: assistant-availability
+  namespace: patch-system
+  labels:
+    app.kubernetes.io/name: assistant
+    app.kubernetes.io/part-of: milo-os
+    # Adjust to match whatever ruleSelector the target Prometheus instance
+    # uses; inert under Victoria Metrics' selectAllByDefault.
+    release: prometheus
+spec:
+  groups:
+    - name: assistant.availability
+      rules:
+        - alert: AssistantDown
+          expr: |
+            kube_deployment_status_replicas_available{
+              namespace="patch-system",
+              deployment="assistant"
+            } == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Assistant has no available replicas"
+            runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/assistant-down.md"
+            description: >-
+              No assistant pod is Ready. Every A2A request is failing. Because
+              /readyz gates on both the conversation store and the model
+              gateway, check those before assuming the assistant itself is at
+              fault.
+
+        - alert: AssistantDegraded
+          # Pods exist but some cannot pass readiness. At a single replica this
+          # overlaps AssistantDown; it earns its place as the replica count
+          # rises, which under the HPA in this overlay it will.
+          expr: |
+            kube_deployment_status_replicas_available{
+              namespace="patch-system",
+              deployment="assistant"
+            }
+            <
+            kube_deployment_spec_replicas{
+              namespace="patch-system",
+              deployment="assistant"
+            }
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Assistant is running fewer replicas than desired"
+            runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/assistant-degraded.md"
+            description: >-
+              At least one assistant pod has been unable to reach Ready for 15
+              minutes. Most often a dependency the readiness probe gates on,
+              not the pod itself.
+
+        - alert: AssistantConversationStoreUnhealthy
+          # Fires slightly ahead of AssistantDown and names the cause: the
+          # assistant fails readiness whenever the store is unreachable.
+          expr: |
+            sum(
+              kube_pod_status_ready{
+                namespace="patch-system",
+                condition="true"
+              }
+              * on(namespace, pod) group_left()
+              kube_pod_labels{
+                namespace="patch-system",
+                label_cnpg_io_cluster="conversation-store"
+              }
+            ) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No healthy conversation-store Postgres instance"
+            runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/conversation-store-unhealthy.md"
+            description: >-
+              Every conversation-store CloudNativePG instance is unready.
+              Conversation history and task state are unavailable, and
+              AssistantDown will follow shortly.
