@@ -314,10 +314,11 @@ Options:
                       replays that conversation's history into the turn
   -i, --interactive   Multi-turn chat session; the conversation id is kept
                       across turns (Ctrl-D or /quit to leave)
-      --tui           Full-screen Bubble Tea chat UI: scrollable transcript,
-                      live-streamed answers rendered as markdown, spinner
-                      while the assistant works, tab-completion for slash
-                      commands. Slash commands: /resume (browse/resume a past
+      --tui           Full-screen Bubble Tea chat UI: scrollable transcript
+                      (↑/↓, pgup/pgdn, or the mouse wheel; esc jumps back to
+                      the latest), live-streamed answers rendered as markdown,
+                      spinner while the assistant works, tab-completion for
+                      slash commands. Slash commands: /resume (browse/resume a past
                       conversation, with a live preview of each one's
                       transcript as you move the cursor), /clear (start a
                       fresh one), /compact (force history compaction now,
