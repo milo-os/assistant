@@ -1,0 +1,36 @@
+# Conversation — the resource every request is gated on.
+#
+# The permission names here must match the SubjectAccessReview the service
+# actually sends. internal/auth/sar.go builds it from
+# DefaultSARGroup/Resource/Verb = assistant.miloapis.com / conversations /
+# create, so Milo evaluates `assistant.miloapis.com/conversations.create`.
+# Change one and the other must change with it, or the deployment fails closed.
+#
+# `get` and `list` are the read side served by the conversations aggregated
+# apiserver (internal/apiserver/registry/conversation implements rest.Getter and
+# rest.Lister, and nothing else — no create/update/delete/watch storage exists).
+# They are declared so an operator can grant read access to conversation history
+# without also granting the ability to start turns.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: assistant.miloapis.com-conversations
+spec:
+  serviceRef:
+    name: "assistant.miloapis.com"
+  kind: Conversation
+  plural: conversations
+  singular: conversation
+  permissions:
+    - create
+    - get
+    - list
+  # Conversations are scoped to a project: the SAR carries the project name as
+  # the request namespace (internal/tenant treats the namespace as
+  # authoritative). Organization is listed so an org-level grant is inherited
+  # down to its projects.
+  parentResources:
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Organization
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Project

@@ -1,0 +1,18 @@
+# The role a project member is normally bound to: start conversations and read
+# them back. Composed from the two narrower roles so the create/read split stays
+# available for deployments that want it.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: assistant.miloapis.com-user
+  namespace: milo-system
+  labels:
+    app.kubernetes.io/name: user
+    app.kubernetes.io/part-of: assistant.miloapis.com
+spec:
+  launchStage: Beta
+  inheritedRoles:
+    - name: assistant.miloapis.com-conversation-creator
+      namespace: milo-system
+    - name: assistant.miloapis.com-conversation-viewer
+      namespace: milo-system

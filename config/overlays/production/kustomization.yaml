@@ -33,13 +33,12 @@ labels:
       app.kubernetes.io/part-of: patch
     includeSelectors: false
 
-# Pin the image to an immutable digest at release time (CD substitutes this).
-# NEVER ship :dev/:local to production. Example:
-#   newName: ghcr.io/milo-os/assistant
-#   digest: sha256:<release-digest>
-images:
-  - name: ghcr.io/milo-os/assistant
-    newTag: REPLACE_WITH_RELEASE_TAG_OR_DIGEST
+# NO `images:` block here on purpose. The release pin lives in config/base
+# (`REPLACE_WITH_RELEASE_TAG`), which .github/workflows/build.yaml rewrites with
+# `kustomize edit set image` before pushing the kustomize bundle; this overlay
+# inherits it. An images entry here would run AFTER base's and overwrite the
+# released tag — which is how you ship the wrong version. Pin in base, or not
+# at all.
 
 patches:
   # Structural hardening: replicas, securityContext, probes (readiness gates on

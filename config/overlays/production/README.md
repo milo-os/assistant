@@ -35,8 +35,12 @@ kubectl kustomize config/overlays/production   # render + review, then apply via
 
 ## Placeholders to substitute (search `REPLACE_WITH_`)
 
-- `kustomization.yaml`: image tag/digest, `PUBLIC_BASE_URL`, `GATEWAY_URL`,
-  `GATEWAY_MODEL`, `CAPABILITY_PROVIDER_URL`.
+- `kustomization.yaml`: `PUBLIC_BASE_URL`, `GATEWAY_URL`, `GATEWAY_MODEL`,
+  `CAPABILITY_PROVIDER_URL`. The image tag is **not** among them: it lives in
+  `config/base` (`REPLACE_WITH_RELEASE_TAG`), which is where
+  `.github/workflows/build.yaml` stamps the released tag before publishing the
+  kustomize bundle. Do not add an `images:` block to this overlay — it would run
+  after base's and overwrite the released tag.
 - `cnpg-cluster.yaml`: storage class, backup bucket / object-store provider.
 - `gateway-tls.yaml`: public hostname, `ClusterIssuer`, `GatewayClass`.
 - `networkpolicy.yaml`: the ingress namespace that fronts external traffic.

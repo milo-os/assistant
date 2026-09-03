@@ -12,6 +12,23 @@ Patch runs on Kubernetes as a stateless service backed by a PostgreSQL
 
 The local environment is covered in [development.md](development.md).
 
+## Published artifacts
+
+Every push to `main` and every release publishes two OCI artifacts
+(`.github/workflows/build.yaml`):
+
+| Artifact | Contents |
+|---|---|
+| `ghcr.io/milo-os/assistant` | The service image, built from `deploy/assistant.Dockerfile`. |
+| `ghcr.io/milo-os/assistant-kustomize` | The whole `config/` tree, with the released image tag stamped into `config/base` so every overlay inherits it. |
+
+`config/milo` rides in that bundle but is **not** part of the workload: it is
+the assistant's IAM projection — a `ProtectedResource` registering
+`assistant.miloapis.com/conversations.*` plus the Roles that grant it — and it
+is applied to the *Milo control plane*, not to the cluster the service runs in.
+Without it the SubjectAccessReview below has no permission to evaluate and,
+because that check fails closed, every request 403s.
+
 ## Production
 
 Render and review, then apply through your CD pipeline:

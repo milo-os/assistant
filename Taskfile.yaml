@@ -124,7 +124,10 @@ tasks:
       - mkdir -p deploy/.build
       - CGO_ENABLED=0 GOOS=linux GOARCH={{.GOARCH}} go build -trimpath -ldflags="-s -w" -o deploy/.build/assistant ./cmd/assistant
       - CGO_ENABLED=0 GOOS=linux GOARCH={{.GOARCH}} go build -trimpath -ldflags="-s -w" -o deploy/.build/assistant-apiserver ./cmd/assistant-apiserver
-      - docker build --provenance=false --sbom=false -t {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} -f deploy/assistant.Dockerfile deploy/.build
+      # `--target prebuilt` copies the host-compiled binary above. The
+      # Dockerfile's DEFAULT target compiles in-image (that is what CI
+      # publishes); its build context is the repo root either way.
+      - docker build --provenance=false --sbom=false --target prebuilt -t {{.IMAGE_ASSISTANT}}:{{.IMAGE_TAG}} -f deploy/assistant.Dockerfile .
       - docker build --provenance=false --sbom=false -t {{.IMAGE_APISERVER}}:{{.IMAGE_TAG}} -f deploy/assistant-apiserver.Dockerfile deploy/.build
       - docker build --provenance=false --sbom=false -t {{.IMAGE_STREAMCO}}:{{.IMAGE_TAG}} -f deploy/streamco.Dockerfile e2e/streamco
       - docker build --provenance=false --sbom=false -t {{.IMAGE_SINK}}:{{.IMAGE_TAG}} -f deploy/sink.Dockerfile e2e/sink

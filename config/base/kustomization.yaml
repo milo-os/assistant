@@ -4,3 +4,17 @@ resources:
   - namespace.yaml
   - assistant.yaml
   - rbac.yaml
+
+# The one image this repository publishes, and the single place its release tag
+# is pinned. .github/workflows/build.yaml runs
+#   kustomize edit set image ghcr.io/milo-os/assistant=...:<build tag>
+# against THIS directory before pushing the kustomize bundle, so every overlay
+# that composes base inherits the released tag.
+#
+# The placeholder is deliberate: a bundle that somehow shipped unstamped fails
+# loudly on ImagePullBackOff instead of silently pulling :latest. No overlay may
+# re-pin this image — an overlay's images transformer runs after base's and
+# would overwrite the released tag (see overlays/production).
+images:
+  - name: ghcr.io/milo-os/assistant
+    newTag: REPLACE_WITH_RELEASE_TAG

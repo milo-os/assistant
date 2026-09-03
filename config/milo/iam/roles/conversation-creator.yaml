@@ -1,0 +1,15 @@
+# The grant that makes Patch usable. This single permission is what the
+# assistant's SubjectAccessReview asks for on every request; a subject without
+# it gets a 403 before the agent loop is ever entered.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: assistant.miloapis.com-conversation-creator
+  namespace: milo-system
+  labels:
+    app.kubernetes.io/name: conversation-creator
+    app.kubernetes.io/part-of: assistant.miloapis.com
+spec:
+  launchStage: Beta
+  includedPermissions:
+    - assistant.miloapis.com/conversations.create
