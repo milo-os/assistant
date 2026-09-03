@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -38,9 +39,28 @@ const (
 	// swept first, then one live entry is evicted to make room.
 	maxSARCacheEntries = 4096
 
-	// sarPath is the cluster-scoped SubjectAccessReview endpoint.
+	// sarPath is the SubjectAccessReview endpoint, relative to the project
+	// control plane it is addressed to.
 	sarPath = "/apis/authorization.k8s.io/v1/subjectaccessreviews"
+
+	// projectControlPlanePath is the prefix that scopes a request to one
+	// project's control plane. Milo decides access to project-scoped resources
+	// THERE, not at the core control plane: asking the core plane about
+	// conversations in a project returns an explicit `denied: true` no matter
+	// what has been granted, because the resource does not live at that scope.
+	// %s is the project name.
+	projectControlPlanePath = "/apis/resourcemanager.miloapis.com/v1alpha1/projects/%s/control-plane"
 )
+
+// sarEndpoint returns the URL a review for projectName must be POSTed to.
+//
+// Always project-scoped: the assistant only ever asks whether a subject may act
+// in a specific project, and Milo decides that at the project's control plane.
+func sarEndpoint(baseURL, projectName string) string {
+	return strings.TrimRight(baseURL, "/") +
+		fmt.Sprintf(projectControlPlanePath, url.PathEscape(projectName)) +
+		sarPath
+}
 
 // SubjectAccessReview is the minimal authorization.k8s.io/v1 SubjectAccessReview
 // wire shape the assistant POSTs and reads back. Only the fields the assistant
@@ -237,10 +257,13 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 // ── Default HTTP reviewer ─────────────────────────────────────
 
 // httpReviewer POSTs the SAR to the apiserver's subjectaccessreviews endpoint.
+//
+// baseURL, not a precomputed endpoint: the URL depends on the project under
+// review, so it is built per request from the review's own resourceAttributes.
 type httpReviewer struct {
-	endpoint string
-	token    string
-	client   *http.Client
+	baseURL string
+	token   string
+	client  *http.Client
 }
 
 // newHTTPReviewer builds the reviewer from cfg's control-plane coordinates.
@@ -254,9 +277,9 @@ func newHTTPReviewer(cfg SARConfig) (*httpReviewer, error) {
 		timeout = DefaultSARTimeout
 	}
 	return &httpReviewer{
-		endpoint: strings.TrimRight(cfg.APIURL, "/") + sarPath,
-		token:    cfg.BearerToken,
-		client:   &http.Client{Transport: transport, Timeout: timeout},
+		baseURL: cfg.APIURL,
+		token:   cfg.BearerToken,
+		client:  &http.Client{Transport: transport, Timeout: timeout},
 	}, nil
 }
 
@@ -268,7 +291,11 @@ func (r *httpReviewer) Review(ctx context.Context, review *SubjectAccessReview) 
 	if err != nil {
 		return nil, fmt.Errorf("marshal SubjectAccessReview: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, bytes.NewReader(body))
+	var project string
+	if review.Spec.ResourceAttributes != nil {
+		project = review.Spec.ResourceAttributes.Namespace
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sarEndpoint(r.baseURL, project), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build SubjectAccessReview request: %w", err)
 	}
