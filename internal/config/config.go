@@ -64,6 +64,14 @@ type AuthConfig struct {
 	// AUTHZ_SAR_CA_CERT_PATH). Default to the standard in-cluster mount paths.
 	SARTokenPath  string
 	SARCACertPath string
+	// SARClientCertPath/SARClientKeyPath point at a client certificate the
+	// assistant presents to identify itself for the SAR call (envs
+	// AUTHZ_SAR_CLIENT_CERT_PATH / AUTHZ_SAR_CLIENT_KEY_PATH). Unset on a
+	// same-cluster control plane, where the service-account token is enough.
+	// Required against Milo, which trusts service-account tokens only from its
+	// own issuer. No default: an unset path means "no client certificate".
+	SARClientCertPath string
+	SARClientKeyPath  string
 
 	// TokenReviewAPIURL is the control-plane API base URL the TokenReview is
 	// POSTed to (env AUTHN_TOKENREVIEW_API_URL). When unset it is derived from
@@ -75,6 +83,12 @@ type AuthConfig struct {
 	// the standard in-cluster mount paths.
 	TokenReviewTokenPath  string
 	TokenReviewCACertPath string
+	// TokenReviewClientCertPath/TokenReviewClientKeyPath point at a client
+	// certificate the assistant presents to identify itself for the TokenReview
+	// call (envs AUTHN_TOKENREVIEW_CLIENT_CERT_PATH /
+	// AUTHN_TOKENREVIEW_CLIENT_KEY_PATH). No default; see the SAR pair above.
+	TokenReviewClientCertPath string
+	TokenReviewClientKeyPath  string
 }
 
 // ModelConfig holds the model-backend settings.
@@ -233,6 +247,8 @@ func Load(getenv func(string) string) (*Config, error) {
 	if tokenReviewCACertPath == "" {
 		tokenReviewCACertPath = defaultSARCACertPath
 	}
+	tokenReviewClientCertPath := env("AUTHN_TOKENREVIEW_CLIENT_CERT_PATH")
+	tokenReviewClientKeyPath := env("AUTHN_TOKENREVIEW_CLIENT_KEY_PATH")
 
 	sarAPIURL := controlPlaneURL(env("AUTHZ_SAR_API_URL"), "AUTHZ_SAR_API_URL")
 	sarTokenPath := env("AUTHZ_SAR_TOKEN_PATH")
@@ -243,6 +259,8 @@ func Load(getenv func(string) string) (*Config, error) {
 	if sarCACertPath == "" {
 		sarCACertPath = defaultSARCACertPath
 	}
+	sarClientCertPath := env("AUTHZ_SAR_CLIENT_CERT_PATH")
+	sarClientKeyPath := env("AUTHZ_SAR_CLIENT_KEY_PATH")
 
 	// ── Model ─────────────────────────────────────────────────
 	anthropicKey := env("ANTHROPIC_API_KEY")
@@ -315,16 +333,20 @@ func Load(getenv func(string) string) (*Config, error) {
 		PublicBaseURL: publicBaseURL,
 		LogLevel:      logLevel,
 		Auth: AuthConfig{
-			SARAPIURL:     sarAPIURL,
-			SARGroup:      env("AUTHZ_SAR_GROUP"),
-			SARResource:   env("AUTHZ_SAR_RESOURCE"),
-			SARVerb:       env("AUTHZ_SAR_VERB"),
-			SARTokenPath:  sarTokenPath,
-			SARCACertPath: sarCACertPath,
+			SARAPIURL:         sarAPIURL,
+			SARGroup:          env("AUTHZ_SAR_GROUP"),
+			SARResource:       env("AUTHZ_SAR_RESOURCE"),
+			SARVerb:           env("AUTHZ_SAR_VERB"),
+			SARTokenPath:      sarTokenPath,
+			SARCACertPath:     sarCACertPath,
+			SARClientCertPath: sarClientCertPath,
+			SARClientKeyPath:  sarClientKeyPath,
 
-			TokenReviewAPIURL:     tokenReviewAPIURL,
-			TokenReviewTokenPath:  tokenReviewTokenPath,
-			TokenReviewCACertPath: tokenReviewCACertPath,
+			TokenReviewAPIURL:         tokenReviewAPIURL,
+			TokenReviewTokenPath:      tokenReviewTokenPath,
+			TokenReviewCACertPath:     tokenReviewCACertPath,
+			TokenReviewClientCertPath: tokenReviewClientCertPath,
+			TokenReviewClientKeyPath:  tokenReviewClientKeyPath,
 		},
 		CapabilityDocsFixture:          capabilityDocsFixture,
 		CapabilityProviderURL:          capabilityProviderURL,

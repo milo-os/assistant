@@ -3,8 +3,6 @@ package auth
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -109,6 +107,11 @@ type SARConfig struct {
 	// CACert is the PEM-encoded apiserver CA bundle. Empty falls back to the
 	// system roots. Ignored when Reviewer is injected.
 	CACert []byte
+	// ClientCert/ClientKey are the PEM-encoded client certificate the assistant
+	// presents to identify ITSELF to the control plane, as an alternative to
+	// BearerToken. Both or neither. Ignored when Reviewer is injected.
+	ClientCert []byte
+	ClientKey  []byte
 
 	// Group, Resource, Verb are the resourceAttributes the SAR asks about.
 	// Empty fields fall back to the Default* constants.
@@ -242,13 +245,9 @@ type httpReviewer struct {
 
 // newHTTPReviewer builds the reviewer from cfg's control-plane coordinates.
 func newHTTPReviewer(cfg SARConfig) (*httpReviewer, error) {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if len(cfg.CACert) > 0 {
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(cfg.CACert) {
-			return nil, errors.New("auth: SARConfig.CACert is not valid PEM")
-		}
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	transport, err := newControlPlaneTransport(cfg.CACert, cfg.ClientCert, cfg.ClientKey)
+	if err != nil {
+		return nil, err
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {

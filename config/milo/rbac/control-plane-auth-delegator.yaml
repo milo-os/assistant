@@ -1,0 +1,57 @@
+# Lets the assistant ASK Milo about callers.
+#
+# Every request the assistant serves needs two control-plane round-trips: a
+# TokenReview to turn the caller's bearer token into an identity, and a
+# SubjectAccessReview to decide whether that identity may act in the project.
+# Both are `create` calls, and both are made as the assistant itself — so the
+# assistant needs an identity Milo recognises, and permission to make them.
+#
+# The identity is a client certificate issued by ClusterIssuer/datum-control-plane
+# with CN `agent@assistant.datumapis.com`, mounted into the pod by the
+# cert-manager CSI driver (see datum-cloud/infra apps/patch-assistant). Milo runs
+# with --client-ca-file pointing at that same CA, so the CN arrives as the
+# authenticated username and the binding below matches it.
+#
+# Why not the pod's service-account token: Milo sets
+# --service-account-issuer=https://milo-apiserver.milo-system.svc.cluster.local
+# and validates tokens only against its own issuer. A token minted by the
+# workload cluster is signed by a key Milo has never seen, so it is rejected 401
+# before the TokenReview body is read. That is not a misconfiguration on either
+# side — they are separate control planes — and mTLS is the supported bridge.
+#
+# The permissions are spelled out rather than binding the built-in
+# system:auth-delegator, so the grant is auditable here and does not depend on a
+# bootstrap role being present in this control plane.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: assistant:control-plane-auth-delegator
+  labels:
+    app.kubernetes.io/part-of: assistant.miloapis.com
+rules:
+  # Resolve a caller's bearer token to an identity.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  # Ask whether that identity may create conversations in the project.
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: assistant:control-plane-auth-delegator
+  labels:
+    app.kubernetes.io/part-of: assistant.miloapis.com
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: assistant:control-plane-auth-delegator
+subjects:
+  # The client certificate's CN, as presented to Milo's --client-ca-file.
+  # Deliberately NOT a member of system:masters: this identity may only ask
+  # questions about callers, never act on their behalf.
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: agent@assistant.datumapis.com
