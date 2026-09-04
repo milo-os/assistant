@@ -50,8 +50,9 @@ type Invocation struct {
 	// KindChat, KindCompact and the two task kinds; the conversations and
 	// gaps read views go to the aggregated apiserver instead and ignore it.
 	BaseURL string
-	// Token mints the bearer token for the service. Nil leaves requests
-	// unauthenticated.
+	// Token mints the bearer token. Used for the service AND, with APIHost,
+	// for the aggregated-API read views — they are one identity, not two.
+	// Nil leaves requests unauthenticated.
 	Token TokenSource
 
 	// Message is the chat turn's text. Empty is valid for Interactive/TUI.
@@ -65,7 +66,12 @@ type Invocation struct {
 	Interactive bool
 	TUI         bool
 
-	// Kubeconfig overrides KUBECONFIG for the apiserver read views.
+	// APIHost is Milo's host (datumctl's DATUM_API_HOST). With Token set and
+	// no Kubeconfig, the read views go straight to Milo as the datumctl
+	// identity; otherwise they fall back to kubectl. See readview.go.
+	APIHost string
+	// Kubeconfig overrides KUBECONFIG for the apiserver read views, and
+	// forces the kubectl transport even when APIHost is available.
 	Kubeconfig string
 
 	// ID is the task id for KindTaskGet / KindTaskCancel.
@@ -160,7 +166,7 @@ func (inv Invocation) Execute(ctx context.Context, io Io) int {
 		}
 		defer client.Destroy()
 		if inv.TUI {
-			return runChatTUI(ctx, client, inv.Project, inv.ContextID, inv.Message, inv.Kubeconfig, inv.BaseURL, inv.Token)
+			return runChatTUI(ctx, client, inv.Project, inv.ContextID, inv.Message, inv.BaseURL, inv.Token, ReadViewFor(inv))
 		}
 		if inv.Interactive {
 			return runRepl(ctx, client, inv.Project, inv.ContextID, inv.Message, io)
