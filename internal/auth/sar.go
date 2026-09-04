@@ -40,8 +40,9 @@ const (
 	// swept first, then one live entry is evicted to make room.
 	maxSARCacheEntries = 4096
 
-	// Parent-context keys. Milo's OpenFGA authorizer decides the SCOPE of a
-	// review from these, not from the request path or the namespace: its
+	// Parent-context keys — how the scope is actually decided today. Milo's
+	// OpenFGA authorizer reads them rather than the request path or the
+	// namespace: its
 	// extractParentContext reads them off the subject's extra, and a review
 	// without all three falls through to cluster scope, where a project-scoped
 	// resource is denied no matter what has been granted.
@@ -59,12 +60,16 @@ const (
 	// control plane it is addressed to.
 	sarPath = "/apis/authorization.k8s.io/v1/subjectaccessreviews"
 
-	// projectControlPlanePath is the prefix that scopes a request to one
-	// project's control plane. Milo decides access to project-scoped resources
-	// THERE, not at the core control plane: asking the core plane about
-	// conversations in a project returns an explicit `denied: true` no matter
-	// what has been granted, because the resource does not live at that scope.
-	// %s is the project name.
+	// projectControlPlanePath addresses the review to one project's control
+	// plane. %s is the project name.
+	//
+	// Today the scope is decided by the parent-context extra below, not by this
+	// path — a review posted here without that extra is still answered at
+	// cluster scope. Keep the path anyway: addressing the project's own control
+	// plane is the end state this should converge on, and the extra keys are
+	// the mechanism that currently carries the same fact in-band. If Milo ever
+	// derives scope from the path, the extra becomes redundant, not the other
+	// way round.
 	projectControlPlanePath = "/apis/resourcemanager.miloapis.com/v1alpha1/projects/%s/control-plane"
 )
 
