@@ -12,6 +12,7 @@ resources:
   - ../../components/gateway
   - ../../components/llm-stub
   - ../../components/streamco
+  - ../../components/compute
   - ../../components/sink
 
 # The APIService that registers the assistant aggregated apiserver with the
@@ -24,6 +25,8 @@ images:
   - name: ghcr.io/milo-os/assistant
     newTag: dev
   - name: ghcr.io/milo-os/assistant-streamco
+    newTag: dev
+  - name: ghcr.io/milo-os/assistant-compute
     newTag: dev
   - name: ghcr.io/milo-os/assistant-sink
     newTag: dev

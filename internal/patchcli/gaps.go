@@ -6,9 +6,9 @@
 // capability document), never the project the conversation that hit the gap
 // ran in — the capabilitygapreports resource is namespaced by provider, so a
 // caller only ever sees reports attributed to a provider they have access
-// to. Same read-path shape as `conversations`: shells out to kubectl using
-// the caller's normal k8s identity, no PATCH_TOKEN.
-package main
+// to. Same read path as `conversations`: raw API paths through [ReadView],
+// which prefers datumctl's identity and falls back to kubectl (readview.go).
+package patchcli
 
 import (
 	"context"
@@ -21,13 +21,20 @@ import (
 	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
 )
 
+// gapReportsPath builds the group-relative path for a provider project's
+// capability-gap reports.
+func gapReportsPath(project string) string {
+	return fmt.Sprintf("/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/capabilitygapreports", project)
+}
+
 // runGapsList prints a table of a provider project's capability-gap reports
 // (service, capability, summary, consumer project, age), newest first.
-func runGapsList(ctx context.Context, cmd command, io Io) int {
-	out, err := kubectlJSON(ctx, cmd.kubeconfig,
-		"get", "capabilitygapreports", "-n", cmd.project, "-o", "json")
+func runGapsList(ctx context.Context, inv Invocation, io Io) int {
+	view := ReadViewFor(inv)
+	out, err := view.get(ctx, inv.Project, gapReportsPath(inv.Project))
 	if err != nil {
-		return failKubectl(io, err, out)
+		io.Err("patch: " + readViewErrorText(view, err) + "\n")
+		return 1
 	}
 
 	var list assistantv1alpha1.CapabilityGapReportList
@@ -36,7 +43,7 @@ func runGapsList(ctx context.Context, cmd command, io Io) int {
 		return 1
 	}
 
-	if cmd.json {
+	if inv.JSON {
 		io.Out(string(out))
 		if !strings.HasSuffix(string(out), "\n") {
 			io.Out("\n")
@@ -45,7 +52,7 @@ func runGapsList(ctx context.Context, cmd command, io Io) int {
 	}
 
 	if len(list.Items) == 0 {
-		io.Err("no capability-gap reports for provider project " + cmd.project + "\n")
+		io.Err("no capability-gap reports for provider project " + inv.Project + "\n")
 		return 0
 	}
 
