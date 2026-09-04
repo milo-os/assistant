@@ -1,0 +1,127 @@
+# Opt-in observability wiring for the shared dev cluster's telemetry stack
+# (datum-cloud/test-infra's `task test-infra:install-observability` —
+# Victoria Metrics + Tempo + Grafana + an OTel Collector in the
+# `telemetry-system` namespace; see docs/dashboards-and-alerts.md). This is a
+# Component, not a plain resource list, so it can layer onto either the
+# `dev` or `dev-anthropic` overlay without duplicating them.
+#
+# Deliberately NOT referenced by config/base or by the plain `dev`/
+# `dev-anthropic` overlays: a bare `task dev:setup` (no observability stack
+# installed) must keep working unmodified. internal/tracing.Setup only turns
+# on real OTLP export when OTEL_EXPORTER_OTLP_ENDPOINT is set — with it unset
+# (the plain-overlay default) tracing is a genuine no-op (no dial, no export
+# errors), so adding this component is purely additive and safe to skip.
+#
+# What this adds:
+#   - OTEL_EXPORTER_OTLP_ENDPOINT on the assistant and assistant-apiserver
+#     Deployments, pointed at the collector's OTLP/gRPC port (4317). The
+#     tracing SDK (internal/tracing) reads this via the standard OTel env var,
+#     no code change needed.
+#   - An egress rule on assistant-apiserver's NetworkPolicy allowing TCP
+#     4317 to telemetry-system, so the OTLP endpoint above is actually
+#     reachable (config/base's NetworkPolicy predates this component and its
+#     allow-list doesn't include telemetry-system). assistant has no
+#     NetworkPolicy of its own, so it needs no equivalent patch. Confirmed
+#     live: assistant-apiserver.http spans now land in Tempo.
+#   - A ServiceMonitor for the assistant's plaintext :7820/metrics endpoint,
+#     so vmagent (deployed with selectAllByDefault: true — confirmed live,
+#     no label restriction needed) scrapes it into Victoria Metrics.
+#   - alerts.yaml (a PrometheusRule — VM's operator auto-converts it to a
+#     VMRule, confirmed live) and grafanadashboard.yaml (two GrafanaDashboard
+#     CRs — assistant-sre and assistant-product-quality — each wrapping its
+#     own JSON model via a generated ConfigMap, imported cross-namespace into
+#     the telemetry-system Grafana instance — confirmed live, both render
+#     without import errors). See docs/dashboards-and-alerts.md for why the
+#     dashboard is split in two.
+#
+# NOT included: a ServiceMonitor for assistant-apiserver. Its /metrics
+# endpoint (from the generic k8s.io/apiserver library) is served over HTTPS
+# with delegated SubjectAccessReview authorization
+# (config/base/assistant-apiserver/deployment.yaml only allows
+# /healthz,/readyz,/livez without auth) — scraping it would need a bearer
+# token bound to a ClusterRole granting `get` on the nonResourceURL
+# `/metrics`, wired to vmagent's ServiceAccount. That's a real (if small)
+# RBAC change to a shared operator's ServiceAccount, out of scope for this
+# pass; tracked as follow-up rather than half-wired here.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - servicemonitor-assistant.yaml
+  - grafanadashboard.yaml
+  - alerts.yaml
+configMapGenerator:
+  - name: assistant-grafana-dashboard-sre
+    namespace: patch-playground
+    files:
+      - grafana-dashboard-sre.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: agent-framework-playground
+  - name: assistant-grafana-dashboard-product
+    namespace: patch-playground
+    files:
+      - grafana-dashboard-product.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: agent-framework-playground
+patches:
+  - target:
+      kind: Deployment
+      name: assistant
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: assistant
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: assistant
+                env:
+                  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                    value: http://otel-collector-collector.telemetry-system.svc.cluster.local:4317
+  - target:
+      kind: Deployment
+      name: assistant-apiserver
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: assistant-apiserver
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: apiserver
+                env:
+                  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                    value: http://otel-collector-collector.telemetry-system.svc.cluster.local:4317
+  # config/base/assistant-apiserver/networkpolicy.yaml's Egress allow-list
+  # (DNS, the CloudNativePG store, the kube-apiserver) predates this component
+  # and doesn't include telemetry-system:4317 — without this, the
+  # OTEL_EXPORTER_OTLP_ENDPOINT set above is set but unreachable: the process
+  # itself never crashes or refuses traffic, but every batch export fails with
+  # "dial tcp ...:4317: i/o timeout" (logged, but easy to miss among routine
+  # apiserver noise) and no spans ever reach the collector. Appended as a
+  # JSON6902 add onto /spec/egress/- rather than folded into the base file so
+  # the plain dev/dev-anthropic overlays (where telemetry-system doesn't
+  # exist) keep their tighter policy.
+  - target:
+      kind: NetworkPolicy
+      name: assistant-apiserver
+    patch: |-
+      - op: add
+        path: /spec/egress/-
+        value:
+          to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: telemetry-system
+          ports:
+            - protocol: TCP
+              port: 4317

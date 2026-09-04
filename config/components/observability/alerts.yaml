@@ -1,0 +1,158 @@
+# PrometheusRule for the assistant service. Part of the opt-in observability
+# component (config/components/observability) — layered onto dev/dev-anthropic
+# via the dev-observability/dev-anthropic-observability overlays, NOT applied
+# by the plain dev overlay. Requires the shared test-infra cluster's telemetry
+# stack (`task test-infra:install-observability`): Victoria Metrics' operator
+# auto-converts this prometheus-operator CRD into its own VMRule and vmalert
+# evaluates it — no separate prometheus-operator/Prometheus install needed.
+# `release: prometheus` below is inert in this setup (vmalert's ruleSelector is
+# `selectAllByDefault: true` — confirmed live, no label match required) but is
+# left as-is for portability to a real prometheus-operator/Prometheus stack,
+# where it would need to match that Prometheus instance's ruleSelector.
+#
+# Confirmed live (see docs/dashboards-and-alerts.md): `kubectl get vmrule -A`
+# shows a converted `assistant-alerts` VMRule and vmalert picks it up. Rule
+# *evaluation* (the PromQL actually firing under real error/latency
+# conditions) was not separately exercised — only that the rules load and
+# vmalert has them in its active set.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: assistant-alerts
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/name: assistant
+    app.kubernetes.io/part-of: milo-os
+    # Adjust to match whatever ruleSelector the target Prometheus instance uses.
+    release: prometheus
+spec:
+  groups:
+    - name: assistant.http
+      rules:
+        - alert: AssistantHighErrorRate
+          expr: |
+            sum(rate(assistant_http_requests_total{code=~"5.."}[5m]))
+            /
+            sum(rate(assistant_http_requests_total[5m]))
+            > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Assistant HTTP 5xx rate above 5%"
+            description: >-
+              assistant_http_requests_total shows a 5xx error rate of
+              {{ printf "%.2f" $value }} (fraction of total requests) over the
+              last 5 minutes, sustained for at least 5 minutes. Threshold: 5%.
+              Check recent deploys and downstream dependencies (task store,
+              model provider).
+
+        - alert: AssistantHighErrorRate
+          expr: |
+            sum(rate(assistant_http_requests_total{code=~"5.."}[5m]))
+            /
+            sum(rate(assistant_http_requests_total[5m]))
+            > 0.20
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Assistant HTTP 5xx rate above 20% — critical"
+            description: >-
+              assistant_http_requests_total shows a 5xx error rate of
+              {{ printf "%.2f" $value }} (fraction of total requests) over the
+              last 5 minutes, sustained for at least 5 minutes. Threshold: 20%.
+              This is a critical, likely user-facing outage; page on-call.
+
+        - alert: AssistantNotReady
+          expr: |
+            rate(assistant_readiness_failures_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Assistant readiness probe failing"
+            description: >-
+              assistant_readiness_failures_total has been increasing
+              continuously for at least 5 minutes (current rate
+              {{ printf "%.4f" $value }}/s), meaning /readyz has been
+              reporting not-ready. Traffic to this pod may be getting dropped
+              by the readiness gate. Check pod logs and dependency health
+              (task store, provider connectivity).
+
+    - name: assistant.conversation
+      rules:
+        - alert: AssistantTurnFailureRateHigh
+          expr: |
+            sum(rate(assistant_conversation_turn_duration_seconds_count{state="failed"}[5m]))
+            /
+            sum(rate(assistant_conversation_turn_duration_seconds_count[5m]))
+            > 0.10
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Assistant conversation turn failure rate above 10%"
+            description: >-
+              assistant_conversation_turn_duration_seconds{state="failed"} is
+              {{ printf "%.2f" $value }} of all completed turns over the last
+              5 minutes, sustained for 10 minutes. Threshold: 10%. This can
+              be elevated even when HTTP-level error rate looks fine (e.g.
+              model or tool failures inside an otherwise-200 response).
+
+        - alert: AssistantCompactionFailingOpen
+          expr: |
+            rate(assistant_history_compaction_total{outcome="failed_open"}[15m]) > 0
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary: "Assistant history compaction is failing open (silent degradation)"
+            description: >-
+              assistant_history_compaction_total{outcome="failed_open"} has
+              been nonzero for at least 30 minutes. This means conversation
+              history summarization is erroring and turns are falling back to
+              plain truncation instead of blocking (see
+              docs/conversation-summarization-design.md) — turns keep
+              succeeding, so this alert is the only signal that summarization
+              quality is degrading. Not paging-worthy on its own; investigate
+              when convenient.
+
+    - name: assistant.model
+      rules:
+        - alert: AssistantModelCallErrorRateHigh
+          expr: |
+            sum(rate(assistant_model_call_duration_seconds_count{outcome="error"}[5m]))
+            /
+            sum(rate(assistant_model_call_duration_seconds_count[5m]))
+            > 0.10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Assistant model call error rate above 10%"
+            description: >-
+              assistant_model_call_duration_seconds{outcome="error"} is
+              {{ printf "%.2f" $value }} of all model calls over the last 5
+              minutes, sustained for 5 minutes. Threshold: 10%. This is most
+              often an upstream model-provider issue (rate limiting, outage,
+              latency-induced timeouts) rather than a bug in this service —
+              check provider status before deep-diving locally.
+
+        - alert: AssistantModelCallErrorRateHigh
+          expr: |
+            sum(rate(assistant_model_call_duration_seconds_count{outcome="error"}[5m]))
+            /
+            sum(rate(assistant_model_call_duration_seconds_count[5m]))
+            > 0.40
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Assistant model call error rate above 40% — critical"
+            description: >-
+              assistant_model_call_duration_seconds{outcome="error"} is
+              {{ printf "%.2f" $value }} of all model calls over the last 5
+              minutes, sustained for 5 minutes. Threshold: 40%. Nearly every
+              conversation turn is now likely failing; page on-call and check
+              the model provider's status page first.
