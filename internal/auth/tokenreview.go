@@ -56,7 +56,7 @@ type TokenReviewStatus struct {
 	Error         string   `json:"error,omitempty"`
 }
 
-// UserInfo is the resolved identity. Only Username is consumed downstream (it
+// UserInfo is the resolved identity, carried through to authorization (it
 // becomes [Principal.Subject]); the rest are modeled for completeness/logging.
 type UserInfo struct {
 	Username string              `json:"username,omitempty"`
@@ -201,7 +201,11 @@ func (a *tokenReviewAuthenticator) Authenticate(ctx context.Context, bearerToken
 		return Principal{}, Unauthenticated("TokenReview authenticated the token but returned no username")
 	}
 
-	principal := Principal{Subject: username}
+	principal := Principal{
+		Subject: username,
+		UID:     status.User.UID,
+		Groups:  status.User.Groups,
+	}
 	a.cache.store(bearerToken, principal, a.now())
 	return principal, nil
 }

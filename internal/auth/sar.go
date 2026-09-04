@@ -79,8 +79,14 @@ type SubjectAccessReview struct {
 type SubjectAccessReviewSpec struct {
 	ResourceAttributes *ResourceAttributes `json:"resourceAttributes,omitempty"`
 	// User is the subject under review — the authenticated principal, NOT the
-	// assistant's own identity (that is the bearer token on the HTTP call).
+	// assistant's own identity (that is the client certificate on the HTTP
+	// call).
 	User string `json:"user,omitempty"`
+	// UID and Groups complete the subject's identity. Milo binds policy to a
+	// user's ID rather than to the username string, so omitting UID makes an
+	// otherwise-valid grant evaluate as "not allowed".
+	UID    string   `json:"uid,omitempty"`
+	Groups []string `json:"groups,omitempty"`
 }
 
 // ResourceAttributes scopes the access check to a specific verb/group/resource
@@ -216,7 +222,9 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 		return Unauthorized("SubjectAccessReview requires a subject; token carried none")
 	}
 
-	key := principal.Subject + "\x00" + projectName
+	// UID participates in the key: two principals must never share a cached
+	// decision just because they present the same username.
+	key := principal.Subject + "\x00" + principal.UID + "\x00" + projectName
 	if a.cache.allowed(key, a.now()) {
 		return nil
 	}
@@ -225,7 +233,9 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 		APIVersion: "authorization.k8s.io/v1",
 		Kind:       "SubjectAccessReview",
 		Spec: SubjectAccessReviewSpec{
-			User: principal.Subject,
+			User:   principal.Subject,
+			UID:    principal.UID,
+			Groups: principal.Groups,
 			ResourceAttributes: &ResourceAttributes{
 				Namespace: projectName,
 				Verb:      a.verb,

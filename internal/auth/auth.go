@@ -30,6 +30,14 @@ type Principal struct {
 	// Subject is the stable identifier the control plane returned for the
 	// token (the TokenReview's user.username).
 	Subject string
+	// UID and Groups are the rest of the identity the TokenReview resolved.
+	//
+	// They are not decoration: Milo's authorizer binds policy to a user's ID,
+	// not to the username string, so a SubjectAccessReview carrying only
+	// Subject is answered "not allowed" even when the caller genuinely has the
+	// grant. Carry the whole identity through to the authorization call.
+	UID    string
+	Groups []string
 }
 
 // Error is an authentication (401) or authorization (403) failure.
