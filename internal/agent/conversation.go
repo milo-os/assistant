@@ -1,0 +1,722 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/milo-os/assistant/agentcore"
+	"github.com/milo-os/assistant/internal/capability"
+	"github.com/milo-os/assistant/internal/gapreport"
+	"github.com/milo-os/assistant/internal/history"
+	"github.com/milo-os/assistant/internal/memory"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
+	"github.com/milo-os/assistant/internal/usage"
+)
+
+// AgentAttributionName is the fixed agent identity sent in the x-datum-agent
+// attribution header (gateway mode only).
+const AgentAttributionName = "patch"
+
+// DefaultMaxOutputTokens is the per-request output-token cap applied when
+// [Deps].MaxOutputTokens is unset. It matches the TypeScript service, which
+// always sent 4096; agentcore itself imposes no default (0 defers to the
+// provider), so this service-level policy lives here.
+const DefaultMaxOutputTokens = 4096
+
+// DefaultHistoryTokenBudget caps the estimated tokens of replayed history per
+// turn when [Deps].HistoryTokenBudget is unset. Replayed turns are billed
+// input tokens on every subsequent request, so an unbounded conversation
+// would grow cost quadratically; oldest turns are dropped first.
+const DefaultHistoryTokenBudget = 6000
+
+// DefaultTurnTimeout is the overall wall-clock bound on a single conversation
+// turn when [Deps].TurnTimeout is unset. It covers every model call, tool
+// call, and retry backoff in the turn together, so a stuck real model or tool
+// cannot pin a request forever. Expiry ends the turn canceled (StateCanceled),
+// distinct from a normal completion.
+const DefaultTurnTimeout = 120 * time.Second
+
+// SummaryBatchTurns is how many of a conversation's oldest turns one
+// compaction pass folds into a summary (a small fixed batch, not "everything
+// Truncate would otherwise drop" — see docs/conversation-summarization-design.md
+// #3). If the stored turns already begin with a summary turn (a conversation
+// being compacted for the second-plus time), that summary is included as the
+// first thing folded into the new one — "anchored iterative summarization" —
+// simply because it's turns[0] and this batch always starts from turns[0].
+const SummaryBatchTurns = 15
+
+// CompactionThresholdRatio is the fraction of the history token budget at
+// which [Conversation.loadHistory] triggers compaction — before Truncate
+// would actually have to drop anything, so a turn is never caught needing to
+// both compact and still overflow (docs/conversation-summarization-design.md
+// #1).
+const CompactionThresholdRatio = 0.8
+
+// summarizeSystemPrompt instructs the plain, non-tool completion
+// internal/agent's summarize helper issues to compact aging history.
+const summarizeSystemPrompt = "You compact conversation history for an AI assistant. " +
+	"Read the exchange below (it may itself begin with a prior compaction digest) and write " +
+	"one compact, third-person digest of what was discussed, what was decided, and any open " +
+	"threads. Write a summary, not a transcript: omit pleasantries and restate only what a " +
+	"later turn would need to answer a follow-up correctly. Be concise."
+
+// summarizeUserPrompt is appended as the final message of a summarize request,
+// after the turns being compacted (rendered via history.Messages).
+const summarizeUserPrompt = "Summarize the conversation above into a compact digest."
+
+// summarizeMaxOutputTokens bounds the summarize model call's output. It is
+// sized comfortably above history.MaxSummaryTurnLen (in tokens, roughly
+// MaxSummaryTurnLen/4) so the model is never cut off before the digest is
+// truncated for storage.
+const summarizeMaxOutputTokens = 1536
+
+// State is the terminal state of a conversation task.
+type State string
+
+const (
+	StateCompleted State = "completed"
+	StateFailed    State = "failed"
+	StateCanceled  State = "canceled"
+)
+
+// Deps are the injected collaborators a [Conversation] needs. They are set
+// once from configuration; none is read from the environment here.
+type Deps struct {
+	// Model is the resolved language model (mock, anthropic, or gateway).
+	Model agentcore.Model
+	// ModelMode is "mock", "anthropic", or "gateway". It gates the gateway
+	// attribution headers; those are never sent in other modes.
+	ModelMode string
+	// Source supplies a project's capability documents. Nil means the
+	// assistant runs with no provider capabilities.
+	Source capability.Source
+	// Persona overrides the identity/voice section of the system prompt
+	// (empty uses [DefaultPersona]). The fixed operating rules always follow
+	// it — see [BuildSystemPrompt].
+	Persona string
+	// Emitter delivers usage events. Required (a no-op emitter is fine).
+	Emitter *usage.Emitter
+	// HTTPClient fetches provider knowledge. Nil uses the default client.
+	HTTPClient *http.Client
+	// History replays and records conversation turns per (project, contextId),
+	// making follow-up messages in the same A2A context conversational. Nil
+	// disables memory: every turn is answered standalone.
+	History history.Store
+	// SummarizationDisabled skips compaction entirely: loadHistory behaves
+	// exactly as it did before summarization existed — plain Truncate, no
+	// extra summarize model call, no History.Compact call ever issued. False
+	// (the default) compacts aging history once replay crosses
+	// CompactionThresholdRatio of the token budget. An escape hatch for
+	// load-testing or a customer that wants zero synthetic model calls
+	// injected into their history (see
+	// docs/conversation-summarization-design.md "Still open").
+	SummarizationDisabled bool
+	// Memory backs the memory_remember / memory_forget tools: durable,
+	// project-scoped facts that persist across conversations and users (unlike
+	// History, which is per-conversation and windowed). Nil disables the
+	// feature — no tools are composed.
+	Memory memory.Store
+	// GapReports backs the report_capability_gap__<service> tools: lets
+	// the model flag that a provider service is missing a tool or lookup
+	// a user needed, written to THAT PROVIDER's own project (see
+	// internal/gapreport), never to params.ProjectName. Nil disables the
+	// feature entirely.
+	GapReports gapreport.Store
+	// AllowPrivateCapabilityNetworks relaxes the capability SSRF guard's
+	// loopback/RFC1918 block (link-local/metadata stay blocked either way). The
+	// platform's capability endpoints are in-cluster private ClusterIPs, so real
+	// deployments set this true; it is threaded into capability.Compose.
+	AllowPrivateCapabilityNetworks bool
+	// StepLimit and MaxOutputTokens override the loop defaults when > 0.
+	// HistoryTokenBudget overrides DefaultHistoryTokenBudget when > 0.
+	StepLimit          int
+	MaxOutputTokens    int
+	HistoryTokenBudget int
+	// TurnTimeout bounds the total wall-clock time of one turn when > 0;
+	// otherwise DefaultTurnTimeout applies. A negative value disables the
+	// per-turn deadline (the turn is bounded only by the caller's context).
+	TurnTimeout time.Duration
+	// MaxRetries, RetryBaseDelay, and RetryMaxDelay tune the loop's transient-
+	// failure retry (rate limit / overload / transient transport). Zero values
+	// use the agentcore defaults; a negative MaxRetries disables retries.
+	MaxRetries     int
+	RetryBaseDelay time.Duration
+	RetryMaxDelay  time.Duration
+	// Logger receives orchestration logs. Nil discards them.
+	Logger *slog.Logger
+	// Metrics records assistant_conversation_turn_duration_seconds,
+	// assistant_tool_call_total, assistant_model_call_duration_seconds,
+	// assistant_history_compaction_total, and (via capability.ComposeOptions)
+	// assistant_gap_report_total — see internal/metrics. Unlike Memory or
+	// GapReports this is never optional: [New] backs a nil value with a
+	// fresh, unshared instance (mirroring the Logger fallback just above) so
+	// metrics always record. Production boot shares one instance between
+	// this and server.Deps.Metrics so both land on the same /metrics
+	// endpoint.
+	Metrics *appmetrics.Metrics
+}
+
+// Conversation runs conversational tasks against a fixed set of dependencies.
+// It is safe for concurrent use: each [Conversation.Run] is independent.
+type Conversation struct {
+	deps   Deps
+	logger *slog.Logger
+}
+
+// New constructs a [Conversation].
+func New(deps Deps) *Conversation {
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if deps.Metrics == nil {
+		deps.Metrics = appmetrics.New()
+	}
+	return &Conversation{deps: deps, logger: logger}
+}
+
+// Params identifies one task to run.
+type Params struct {
+	// UserText is the user's message.
+	UserText string
+	// ProjectName scopes capabilities and metering. Empty disables metering.
+	ProjectName string
+	// ContextID is the A2A contextId == conversation id == metering resource.
+	ContextID string
+	// TaskID is the A2A task id, used for logging.
+	TaskID string
+}
+
+// EventKind discriminates streamed [Event]s.
+type EventKind string
+
+const (
+	// EventText is an incremental fragment of the assistant's answer.
+	EventText EventKind = "text-delta"
+	// EventToolCall announces that the model invoked a provider tool.
+	EventToolCall EventKind = "tool-call"
+)
+
+// Event is one streamed happening during a run. The A2A layer translates these
+// into SSE status updates.
+type Event struct {
+	Kind     EventKind
+	Text     string
+	ToolName string
+}
+
+// UsageSummary is the run's aggregated token usage and metering outcome.
+type UsageSummary struct {
+	InputTokens              int64
+	OutputTokens             int64
+	CacheReadTokens          int64
+	CacheWriteTokens         int64
+	TokenEventCount          int
+	ToolInvocationEventCount int
+	// Emitted is true when a collector was configured and accepted the batch.
+	Emitted bool
+}
+
+// Result is the terminal outcome of a run, available from [Stream.Result]
+// after the stream reaches io.EOF.
+type Result struct {
+	State       State
+	Text        string
+	Error       string
+	Usage       UsageSummary
+	UsageEvents []usage.Event
+}
+
+// Run starts a conversation task and returns a [Stream] of its events. The
+// caller drains the stream with Recv until io.EOF, then reads [Stream.Result].
+// Composition always happens; the MCP sessions are always closed and usage is
+// always metered (best-effort) when the stream finalizes.
+func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
+	docs := c.loadDocuments(ctx, params)
+
+	var (
+		mu          sync.Mutex
+		invocations []capability.ProviderToolInvocation
+	)
+	composed, _ := capability.Compose(ctx, docs, capability.ComposeOptions{
+		HTTPClient:           c.deps.HTTPClient,
+		AllowPrivateNetworks: c.deps.AllowPrivateCapabilityNetworks,
+		Memory:               c.deps.Memory,
+		ExpectedProject:      params.ProjectName,
+		GapReports:           c.deps.GapReports,
+		Metrics:              c.deps.Metrics,
+		ContextID:            params.ContextID,
+		OnToolInvocation: func(inv capability.ProviderToolInvocation) {
+			mu.Lock()
+			invocations = append(invocations, inv)
+			mu.Unlock()
+			c.logger.Info("agent.tool.invoked",
+				"taskId", params.TaskID, "projectName", params.ProjectName,
+				"service", inv.ServiceName, "tool", inv.NamespacedToolName)
+		},
+		Logger: c.logger,
+	})
+
+	maxOutputTokens := c.deps.MaxOutputTokens
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = DefaultMaxOutputTokens
+	}
+	messages := append(history.Messages(c.loadHistory(ctx, params)),
+		agentcore.UserMessage(params.UserText))
+
+	// Bound the whole turn (every model call, tool call, and retry backoff)
+	// with one wall-clock deadline so a stuck real model or tool cannot pin
+	// the request forever. Expiry surfaces as a context deadline the loop maps
+	// to FinishCanceled. The cancel is released when the run finalizes.
+	turnCtx, cancelTurn := turnContext(ctx, c.deps.TurnTimeout)
+
+	// The top-level span for this turn. Every model call and tool execution
+	// below nests under it because they all derive their context from
+	// turnCtx (agentcore.Run threads it through the whole loop, including
+	// into each tool's Execute). It carries no user content — see
+	// endTurnSpan and the tracer doc comment in tracing.go.
+	turnCtx, turnSpan := tracer.Start(turnCtx, "conversation.turn")
+	turnStart := time.Now()
+
+	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
+		Model:           tracedModel(c.deps.Model, c.deps.Metrics),
+		System:          BuildSystemPrompt(c.deps.Persona, composed.SystemPromptAddendum),
+		Messages:        messages,
+		Tools:           tracedTools(composed.Tools, c.deps.Metrics),
+		StepLimit:       c.deps.StepLimit,
+		MaxOutputTokens: maxOutputTokens,
+		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),
+		MaxRetries:      c.deps.MaxRetries,
+		RetryBaseDelay:  c.deps.RetryBaseDelay,
+		RetryMaxDelay:   c.deps.RetryMaxDelay,
+	})
+
+	return &Stream{
+		ctx:         ctx,
+		cancelTurn:  cancelTurn,
+		turnSpan:    turnSpan,
+		turnStart:   turnStart,
+		conv:        c,
+		params:      params,
+		inner:       inner,
+		composed:    composed,
+		invocations: &invocations,
+		invMu:       &mu,
+		state:       StateCompleted,
+	}
+}
+
+// turnContext derives the per-turn context. A positive timeout applies a
+// wall-clock deadline; a negative one disables the bound (caller context only);
+// zero uses [DefaultTurnTimeout]. It always returns a cancel to release.
+func turnContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout < 0 {
+		return context.WithCancel(ctx)
+	}
+	if timeout == 0 {
+		timeout = DefaultTurnTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+// loadHistory returns the conversation's prior turns, truncated to the token
+// budget. Any store failure degrades to an empty memory (the turn is still
+// answered) rather than failing the chat. Before truncating, and unless
+// SummarizationDisabled, it compacts aging history once the stored turns'
+// estimated cost crosses CompactionThresholdRatio of the budget — see
+// [Conversation.maybeCompact] and docs/conversation-summarization-design.md.
+func (c *Conversation) loadHistory(ctx context.Context, params Params) []history.Turn {
+	if c.deps.History == nil || params.ContextID == "" {
+		return nil
+	}
+	turns, err := c.deps.History.Turns(ctx, params.ProjectName, params.ContextID)
+	if err != nil {
+		c.logger.Warn("agent.history.load_failed",
+			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
+		return nil
+	}
+	budget := c.deps.HistoryTokenBudget
+	if budget <= 0 {
+		budget = DefaultHistoryTokenBudget
+	}
+	if !c.deps.SummarizationDisabled {
+		turns = c.maybeCompact(ctx, params, turns, budget)
+	}
+	return history.Truncate(turns, budget)
+}
+
+// maybeCompact triggers compactNow once the stored turns' estimated token
+// cost crosses CompactionThresholdRatio of budget; below the threshold it
+// returns turns unchanged. This is the automatic path — see [Conversation.Compact]
+// for the manual, threshold-free entry point used by the /compact command.
+func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []history.Turn, budget int) []history.Turn {
+	if len(turns) == 0 || budget <= 0 {
+		return turns
+	}
+	threshold := int(float64(budget) * CompactionThresholdRatio)
+	if history.EstimateTokens(turns) <= threshold {
+		return turns
+	}
+	return c.compactNow(ctx, params, turns)
+}
+
+// compactNow synchronously summarizes the oldest SummaryBatchTurns turns into
+// one digest and persists [summary]+keep via History.Compact, unconditionally
+// (no threshold check — callers gate that themselves). On any failure
+// (summarize errors, or Compact errors), it returns turns unchanged —
+// compaction never blocks or fails the turn; the caller falls open to plain
+// Truncate exactly as before this feature existed
+// (docs/conversation-summarization-design.md #4).
+//
+// Because the batch is always turns[:batchLen] starting at index 0, a summary
+// turn already at the head of turns (a conversation compacted before) is
+// folded into the new digest alongside the newly-aging raw turns — anchored
+// iterative summarization, not a one-shot summary that never updates again.
+func (c *Conversation) compactNow(ctx context.Context, params Params, turns []history.Turn) []history.Turn {
+	if len(turns) == 0 {
+		return turns
+	}
+
+	batchLen := SummaryBatchTurns
+	if batchLen > len(turns) {
+		batchLen = len(turns)
+	}
+	toSummarize := turns[:batchLen]
+	keep := turns[batchLen:]
+
+	summary, err := summarize(ctx, tracedModel(c.deps.Model, c.deps.Metrics), toSummarize)
+	if err != nil {
+		c.logger.Warn("agent.history.summarize_failed",
+			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
+		c.deps.Metrics.RecordCompaction("failed_open")
+		return turns
+	}
+	if err := c.deps.History.Compact(ctx, params.ProjectName, params.ContextID, summary, keep); err != nil {
+		c.logger.Warn("agent.history.compact_failed",
+			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
+		c.deps.Metrics.RecordCompaction("failed_open")
+		return turns
+	}
+	c.deps.Metrics.RecordCompaction("success")
+
+	compacted := make([]history.Turn, 0, 1+len(keep))
+	compacted = append(compacted, summary)
+	compacted = append(compacted, keep...)
+	return compacted
+}
+
+// ErrNothingToCompact is returned by [Conversation.Compact] when the
+// conversation has no stored history to summarize (new conversation, or
+// already a single summary turn with nothing else to fold in).
+var ErrNothingToCompact = errors.New("agent: no conversation history to compact")
+
+// Compact is the manual, user-triggered entry point for history compaction
+// (the /compact command) — it summarizes unconditionally, skipping
+// CompactionThresholdRatio's automatic-trigger check, so a user can collapse
+// history at any point rather than waiting for it to near the budget. It
+// requires History to be configured and at least one stored turn; unlike the
+// automatic path it reports failure to the caller instead of silently falling
+// open, since a user who explicitly asked to compact should know if it
+// didn't happen.
+func (c *Conversation) Compact(ctx context.Context, params Params) error {
+	if c.deps.History == nil || params.ContextID == "" {
+		return ErrNothingToCompact
+	}
+	turns, err := c.deps.History.Turns(ctx, params.ProjectName, params.ContextID)
+	if err != nil {
+		return fmt.Errorf("agent: compact: load history: %w", err)
+	}
+	if len(turns) == 0 {
+		return ErrNothingToCompact
+	}
+	if len(turns) == 1 && history.IsSummaryTurn(turns[0]) {
+		return ErrNothingToCompact
+	}
+
+	before := history.EstimateTokens(turns)
+	after := c.compactNow(ctx, params, turns)
+	if history.EstimateTokens(after) >= before {
+		return fmt.Errorf("agent: compact: summarization failed, history left unchanged")
+	}
+	return nil
+}
+
+// summarize issues one plain, non-tool model completion over turns and
+// returns a summary turn holding the digest — not a full [agentcore.Run] turn
+// (no capability composition, no tool loop, nothing user-facing). turns is
+// rendered the same way history.Messages already renders replay context, plus
+// a fixed instruction to produce a compact digest rather than a transcript.
+func summarize(ctx context.Context, model agentcore.Model, turns []history.Turn) (history.Turn, error) {
+	messages := append(history.Messages(turns), agentcore.UserMessage(summarizeUserPrompt))
+	stream, err := model.Stream(ctx, agentcore.Request{
+		System:          summarizeSystemPrompt,
+		Messages:        messages,
+		MaxOutputTokens: summarizeMaxOutputTokens,
+	})
+	if err != nil {
+		return history.Turn{}, fmt.Errorf("agent: summarize: %w", err)
+	}
+	defer stream.Close()
+
+	var text strings.Builder
+	for {
+		part, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return history.Turn{}, fmt.Errorf("agent: summarize: %w", err)
+		}
+		if part.Kind == agentcore.StreamPartTextDelta {
+			text.WriteString(part.Text)
+		}
+	}
+
+	digest := strings.TrimSpace(text.String())
+	if digest == "" {
+		return history.Turn{}, errors.New("agent: summarize: model produced an empty digest")
+	}
+	return history.NewSummaryTurn(digest), nil
+}
+
+// loadDocuments fetches the project's capability documents, degrading to none
+// (the built-in-only assistant) on any source failure rather than failing the
+// chat.
+func (c *Conversation) loadDocuments(ctx context.Context, params Params) []capability.CapabilityDocument {
+	if c.deps.Source == nil {
+		return nil
+	}
+	docs, err := c.deps.Source.Documents(ctx, params.ProjectName)
+	if err != nil {
+		c.logger.Warn("agent.documents.load_failed",
+			"projectName", params.ProjectName, "error", err.Error())
+		return nil
+	}
+	return docs
+}
+
+// attributionHeaders returns the gateway attribution headers, or nil in any
+// non-gateway mode (we never leak project/conversation ids to a real provider).
+func attributionHeaders(mode, projectName, contextID string) map[string]string {
+	if mode != "gateway" {
+		return nil
+	}
+	return map[string]string{
+		"x-datum-project":      projectName,
+		"x-datum-conversation": contextID,
+		"x-datum-agent":        AgentAttributionName,
+	}
+}
+
+// Stream is the event stream of one running conversation. It also accumulates
+// the terminal [Result], available after Recv reports io.EOF.
+type Stream struct {
+	ctx         context.Context
+	cancelTurn  context.CancelFunc
+	turnSpan    trace.Span
+	turnStart   time.Time
+	conv        *Conversation
+	params      Params
+	inner       agentcore.StreamReader
+	composed    *capability.Composed
+	invocations *[]capability.ProviderToolInvocation
+	invMu       *sync.Mutex
+
+	text      strings.Builder
+	total     agentcore.Usage
+	state     State
+	errMsg    string
+	result    *Result
+	finalized bool
+}
+
+// Recv returns the next user-facing [Event], or io.EOF once the run is
+// complete. On io.EOF the run has been finalized (sessions closed, usage
+// metered) and [Stream.Result] is ready.
+func (s *Stream) Recv() (Event, error) {
+	for {
+		part, err := s.inner.Recv()
+		if err == io.EOF {
+			s.finalize()
+			return Event{}, io.EOF
+		}
+		if err != nil {
+			s.state = StateFailed
+			s.errMsg = err.Error()
+			s.finalize()
+			return Event{}, io.EOF
+		}
+
+		switch part.Kind {
+		case agentcore.StreamPartTextDelta:
+			s.text.WriteString(part.Text)
+			return Event{Kind: EventText, Text: part.Text}, nil
+		case agentcore.StreamPartToolCall:
+			if part.ToolCall != nil {
+				return Event{Kind: EventToolCall, ToolName: part.ToolCall.Name}, nil
+			}
+		case agentcore.StreamPartFinish:
+			s.total = part.TotalUsage
+			s.state = stateFromReason(part.FinishReason)
+		case agentcore.StreamPartError:
+			// A failed or canceled run still carries the usage of the steps
+			// that completed before it broke, so those inferences are metered
+			// (the provider billed them). Keep a cancellation distinct from a
+			// genuine failure end to end.
+			s.total = part.TotalUsage
+			if part.FinishReason == agentcore.FinishCanceled {
+				s.state = StateCanceled
+			} else {
+				s.state = StateFailed
+			}
+			if part.Err != nil {
+				s.errMsg = part.Err.Error()
+			}
+		default:
+			// tool-result and step-finish are internal to the run.
+		}
+	}
+}
+
+// Result returns the terminal outcome. It is only valid after Recv has
+// returned io.EOF.
+func (s *Stream) Result() Result {
+	if s.result == nil {
+		return Result{State: s.state, Text: s.text.String(), Error: s.errMsg}
+	}
+	return *s.result
+}
+
+// Close releases the stream's resources. It is safe to call more than once and
+// finalizes the run (metering + session close) if that has not happened yet.
+func (s *Stream) Close() error {
+	_ = s.inner.Close()
+	s.finalize()
+	return nil
+}
+
+// finalize closes the MCP sessions and meters usage exactly once. It runs
+// after the loop has fully drained, so the invocation list is complete.
+func (s *Stream) finalize() {
+	if s.finalized {
+		return
+	}
+	s.finalized = true
+
+	// Release the per-turn deadline timer now that the run is done. Metering
+	// below runs on a cancel-immune context, so this cannot cut it short.
+	if s.cancelTurn != nil {
+		s.cancelTurn()
+	}
+	duration := time.Since(s.turnStart)
+	if s.turnSpan != nil {
+		endTurnSpan(s.turnSpan, s.state, s.errMsg)
+	}
+	s.conv.deps.Metrics.RecordTurn(string(s.state), duration)
+	s.conv.logger.Info("agent.turn.completed",
+		"outcome", string(s.state), "durationMs", duration.Milliseconds(),
+		"projectName", s.params.ProjectName, "contextId", s.params.ContextID)
+
+	_ = s.composed.Close()
+
+	events := s.buildUsageEvents()
+
+	// Emit even if the task context was canceled — metering is terminal and
+	// best-effort, and must not be skipped just because the run was aborted.
+	res := s.conv.deps.Emitter.Emit(context.WithoutCancel(s.ctx), events)
+
+	s.recordHistory()
+
+	s.result = &Result{
+		State:       s.state,
+		Text:        s.text.String(),
+		Error:       s.errMsg,
+		UsageEvents: events,
+		Usage: UsageSummary{
+			InputTokens:              s.total.Input,
+			OutputTokens:             s.total.Output,
+			CacheReadTokens:          s.total.CacheRead,
+			CacheWriteTokens:         s.total.CacheWrite,
+			TokenEventCount:          countTokenEvents(events),
+			ToolInvocationEventCount: len(*s.invocations),
+			Emitted:                  res.OK && !res.Noop,
+		},
+	}
+}
+
+// recordHistory appends the finished exchange to conversation memory. Only a
+// completed turn with an actual answer is worth remembering: a failed or
+// canceled run produced nothing the user saw as an answer, and recording it
+// would replay a half-exchange into every later prompt.
+func (s *Stream) recordHistory() {
+	store := s.conv.deps.History
+	if store == nil || s.params.ContextID == "" || s.state != StateCompleted {
+		return
+	}
+	answer := s.text.String()
+	if answer == "" {
+		return
+	}
+	err := store.Append(context.WithoutCancel(s.ctx), s.params.ProjectName, s.params.ContextID,
+		history.Turn{UserText: s.params.UserText, AssistantText: answer})
+	if err != nil {
+		s.conv.logger.Warn("agent.history.append_failed",
+			"projectName", s.params.ProjectName, "contextId", s.params.ContextID, "error", err.Error())
+	}
+}
+
+// buildUsageEvents builds the token meters plus one tool-invocation event per
+// provider tool call. Nothing is billed without a project.
+func (s *Stream) buildUsageEvents() []usage.Event {
+	if s.params.ProjectName == "" {
+		return nil
+	}
+	events := usage.BuildUsageEvents(usage.BuildUsageInput{
+		ProjectName:    s.params.ProjectName,
+		ConversationID: s.params.ContextID,
+		Model:          s.conv.deps.Model.ModelID(),
+		Tokens: usage.UsageTokens{
+			InputTokens:              s.total.Input,
+			OutputTokens:             s.total.Output,
+			CachedInputTokens:        s.total.CacheRead,
+			CacheCreationInputTokens: s.total.CacheWrite,
+		},
+	})
+	s.invMu.Lock()
+	invocations := append([]capability.ProviderToolInvocation(nil), *s.invocations...)
+	s.invMu.Unlock()
+	for _, inv := range invocations {
+		events = append(events, usage.BuildToolInvocationEvent(usage.BuildToolInvocationInput{
+			ProjectName:    s.params.ProjectName,
+			ConversationID: s.params.ContextID,
+			ServiceName:    inv.ServiceName,
+		}))
+	}
+	return events
+}
+
+func countTokenEvents(events []usage.Event) int {
+	n := 0
+	for _, e := range events {
+		if !strings.HasSuffix(e.MeterName, "tool-invocations") {
+			n++
+		}
+	}
+	return n
+}
+
+func stateFromReason(reason agentcore.FinishReason) State {
+	if reason == agentcore.FinishCanceled {
+		return StateCanceled
+	}
+	return StateCompleted
+}
