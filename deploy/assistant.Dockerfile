@@ -25,12 +25,19 @@
 # ── Runtime (playground): a host-compiled binary, no in-image go build ──
 FROM gcr.io/distroless/static:nonroot AS prebuilt
 COPY deploy/.build/assistant /usr/local/bin/assistant
+COPY deploy/.build/assistant-apiserver /usr/local/bin/assistant-apiserver
 EXPOSE 7820
+EXPOSE 8443
 # Numeric UID, not the `nonroot` name: kubelet resolves image users only
 # numerically, so with runAsNonRoot=true and no runAsUser it cannot prove a
 # named user is non-root and refuses to start the container. 65532 is what
 # distroless's `nonroot` resolves to.
 USER 65532:65532
+# The service is the default; the apiserver Deployment overrides `command`.
+# One image because the two are one module released together: they share the
+# conversation-store schema and the assistant.miloapis.com types, so a version
+# skew between them is a bug that separate images would make possible and a
+# single image makes unrepresentable.
 ENTRYPOINT ["/usr/local/bin/assistant"]
 
 # ── Builder: compile ./cmd/assistant statically ────────────────────────
@@ -45,11 +52,15 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/assistant ./cmd/assistant
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/assistant-apiserver ./cmd/assistant-apiserver
 
 # ── Runtime (default): the freshly compiled binary ─────────────────────
 FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /out/assistant /usr/local/bin/assistant
+COPY --from=builder /out/assistant-apiserver /usr/local/bin/assistant-apiserver
 EXPOSE 7820
+EXPOSE 8443
 # Numeric UID, not the `nonroot` name: kubelet resolves image users only
 # numerically, so with runAsNonRoot=true and no runAsUser it cannot prove a
 # named user is non-root and refuses to start the container. 65532 is what

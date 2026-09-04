@@ -5,11 +5,15 @@
 # the `conversation-store-app` secret's `uri` key — so it lives in
 # patch-playground alongside the store and the assistant Deployment.
 #
-# TLS: no --tls-cert-file/--tls-private-key-file is set, so the server
-# self-signs its serving cert on boot into --cert-dir=/tmp. That is safe here
-# because the dev overlay marks the APIService insecureSkipTLSVerify=true — the
-# kube-aggregator does not verify the serving cert. A production overlay would
-# mount a cert-manager cert and inject a caBundle instead.
+# TLS: the serving keypair is named by SERVING_TLS_CERT_FILE /
+# SERVING_TLS_PRIVATE_KEY_FILE, which the args below expand into
+# --tls-cert-file / --tls-private-key-file. Both are empty here, which the
+# apiserver's serving options read as unset, so the server self-signs on boot
+# into --cert-dir=/tmp. That is safe in dev because the overlay marks the
+# APIService insecureSkipTLSVerify=true — the kube-aggregator does not verify
+# the serving cert. An environment fronting this with a verifying APIService
+# mounts a real keypair and points those two variables at it; see the note on
+# the env block.
 #
 # Delegated authn/authz: no --authentication-kubeconfig/--authorization-kubeconfig
 # is set, so the server falls back to its in-cluster client for TokenReview and
@@ -45,7 +49,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: apiserver
-          image: ghcr.io/milo-os/assistant-apiserver
+          # The one image this repo publishes: it carries both binaries, and
+          # the `command` below selects this one.
+          image: ghcr.io/milo-os/assistant
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -62,12 +68,33 @@ spec:
             - --secure-port=8443
             # Self-signed serving cert lands here (root fs is read-only).
             - --cert-dir=/tmp
+            # $(VAR) is expanded by the kubelet from this container's own env.
+            # Deployments that need a real serving certificate override the two
+            # variables rather than this list, so the flag surface stays owned
+            # by this file.
+            - --tls-cert-file=$(SERVING_TLS_CERT_FILE)
+            - --tls-private-key-file=$(SERVING_TLS_PRIVATE_KEY_FILE)
             - --authorization-always-allow-paths=/healthz,/readyz,/livez
           ports:
             - containerPort: 8443
               name: https
               protocol: TCP
           env:
+            # Serving keypair, expanded into --tls-cert-file /
+            # --tls-private-key-file above. Empty means "self-sign into
+            # --cert-dir", which is what dev wants.
+            #
+            # These are env rather than args so that an environment can point
+            # them at a mounted keypair with a strategic-merge patch — `env`
+            # merges by name, so it replaces these two entries and leaves the
+            # rest of the container alone. Patching `args` instead would mean
+            # restating the whole list, and every flag in it would silently
+            # freeze at whatever this file said on the day the patch was
+            # written.
+            - name: SERVING_TLS_CERT_FILE
+              value: ""
+            - name: SERVING_TLS_PRIVATE_KEY_FILE
+              value: ""
             # Same durable store as the assistant: the CNPG-generated
             # `conversation-store-app` secret's `uri` points at the cluster's
             # -rw service. The apiserver reads (list/get/messages) the tables

@@ -9,7 +9,6 @@ kind: Kustomization
 resources:
   - ../../base
   - caller-rbac.yaml
-  - ../../base/assistant-apiserver
   - ../../components/gateway
   - ../../components/llm-stub
   - ../../components/streamco
@@ -27,8 +26,6 @@ images:
   - name: ghcr.io/milo-os/assistant-streamco
     newTag: dev
   - name: ghcr.io/milo-os/assistant-sink
-    newTag: dev
-  - name: ghcr.io/milo-os/assistant-apiserver
     newTag: dev
 
 configMapGenerator:

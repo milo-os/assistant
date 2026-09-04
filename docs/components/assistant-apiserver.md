@@ -50,6 +50,14 @@ An `APIService` registers the group with the kube-aggregator. Development skips
 TLS verification against the server's self-signed certificate; production
 injects a real CA bundle instead.
 
+The serving certificate is selected by environment variable rather than by
+flag. `SERVING_TLS_CERT_FILE` and `SERVING_TLS_PRIVATE_KEY_FILE` are expanded
+into `--tls-cert-file` and `--tls-private-key-file` by the base Deployment, and
+are empty by default — the server then self-signs. A deployment that mounts a
+real keypair overrides those two variables with a strategic-merge patch, which
+merges by name; the flag list itself stays owned by this repo instead of being
+restated wherever the certificate is supplied.
+
 ## Related documentation
 
 - [Architecture overview](../architecture/README.md)

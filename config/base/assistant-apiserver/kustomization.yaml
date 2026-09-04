@@ -14,6 +14,5 @@ resources:
   - rbac-auth-reader.yaml
   - rbac-cluster.yaml
 
-images:
-  - name: ghcr.io/milo-os/assistant-apiserver
-    newTag: latest
+# No `images:` here — the Deployment runs the image pinned in ../kustomization.yaml,
+# whose transformer covers every resource base composes, this directory included.

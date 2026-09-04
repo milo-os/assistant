@@ -7,10 +7,12 @@
 # produce `v0.0.0-<branch>-<YYYYMMDD>-<HHmmss>` for a branch push, so a main
 # build lands as e.g. v0.0.0-main-20260903-121500 and matches.
 #
-# ONE image only. config/overlays/production — the path infra deploys — renders
-# exactly one container image, ghcr.io/milo-os/assistant. The apiserver, sink
-# and streamco Dockerfiles in deploy/ serve the local playground and the e2e
-# harness; nothing on the production path pulls them, so they are not published.
+# ONE image. It carries both binaries this module builds — the service and the
+# aggregated apiserver — because they are released together and share the
+# conversation-store schema and the assistant.miloapis.com types; separate
+# images could drift into a version skew that nothing prevents. The apiserver
+# Deployment selects its binary with `command`. sink and streamco serve the
+# local playground and the e2e harness and are not published.
 name: Build and Publish
 
 on:
@@ -59,7 +61,8 @@ jobs:
       # (the workload) and ./milo (the IAM projection) — the two paths infra's
       # Flux Kustomizations point at.
       bundle-path: config
-      # Stamp the released tag into base; every overlay composes it.
+      # Stamp the released tag into base; every overlay composes it, and the
+      # apiserver Deployment runs the same image, so one pin covers both.
       image-overlays: config/base
       image-name: ghcr.io/milo-os/assistant
     secrets: inherit
