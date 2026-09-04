@@ -1,0 +1,36 @@
+# Routes the model name `patch-stub-v1` to the stub AIServiceBackend and
+# meters token usage AT THE GATEWAY. llmRequestCosts extracts input/output/
+# total tokens from the upstream `usage` block into io.envoy.ai_gateway
+# dynamic metadata, which the EnvoyProxy access log (10-gateway.yaml) emits as
+# JSON alongside the x-datum-* attribution headers. The AI Gateway extproc
+# reads the model from the request body and sets x-ai-eg-model for this match.
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: patch-chat
+  namespace: patch-ai-gateway
+spec:
+  parentRefs:
+    - name: patch-ai-gateway
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rules:
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: patch-stub-v1
+      backendRefs:
+        - name: patch-stub
+  llmRequestCosts:
+    - metadataKey: llm_input_token
+      type: InputToken
+    - metadataKey: llm_output_token
+      type: OutputToken
+    - metadataKey: llm_total_token
+      type: TotalToken
+    # STRETCH cost signal (CEL): a token budget could key off this. Kept
+    # trivial + true so it never distorts the real counts above.
+    - metadataKey: llm_cel_total
+      type: CEL
+      cel: "input_tokens + output_tokens"

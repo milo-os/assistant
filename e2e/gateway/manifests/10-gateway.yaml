@@ -1,0 +1,131 @@
+# Dedicated AI Gateway stack (isolated from test-infra's merged default-gateway).
+#
+# Its own GatewayClass + EnvoyProxy + Gateway so we fully own the access-log
+# format — JSON to stdout, carrying the gateway-counted LLM token costs
+# (io.envoy.ai_gateway dynamic metadata) AND the x-datum-* consumer
+# attribution headers the assistant sends in gateway mode. Reached from the
+# host via `kubectl port-forward` (see up.sh); no nodePort/host-port coupling.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: patch-ai-gw
+  labels:
+    app.kubernetes.io/part-of: agent-framework-e2e
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: patch-ai-proxy
+    namespace: patch-ai-gateway
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: patch-ai-proxy
+  namespace: patch-ai-gateway
+  labels:
+    app.kubernetes.io/part-of: agent-framework-e2e
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      # ClusterIP: kind has no LoadBalancer, so the default type would leave
+      # the Gateway Programmed=False (AddressNotAssigned). We reach it via
+      # `kubectl port-forward`, so a cluster address is all we need.
+      envoyService:
+        type: ClusterIP
+      envoyDeployment:
+        container:
+          # Clear the large default requests so this fits a local kind node.
+          resources: {}
+  telemetry:
+    accessLog:
+      settings:
+        # LLM traffic: emit one JSON line per model request with the
+        # gateway-counted token costs and the consumer attribution headers.
+        - matches:
+            - "request.headers['x-ai-eg-model'] != ''"
+          sinks:
+            - type: File
+              file:
+                path: /dev/stdout
+          format:
+            type: JSON
+            json:
+              log.type: llm
+              start_time: "%START_TIME%"
+              method: "%REQ(:METHOD)%"
+              path: "%REQ(:PATH)%"
+              response_code: "%RESPONSE_CODE%"
+              x-request-id: "%REQ(X-REQUEST-ID)%"
+              # Model + provider (AI Gateway dynamic metadata)
+              gen_ai.request.model: "%REQ(X-AI-EG-MODEL)%"
+              gen_ai.response.model: "%DYNAMIC_METADATA(io.envoy.ai_gateway:response_model)%"
+              gen_ai.provider.name: "%DYNAMIC_METADATA(io.envoy.ai_gateway:backend_name)%"
+              # Gateway-counted token usage (must match AIGatewayRoute.llmRequestCosts metadataKeys)
+              gen_ai.usage.input_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_input_token)%"
+              gen_ai.usage.output_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_output_token)%"
+              gen_ai.usage.total_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_total_token)%"
+              # Consumer attribution (headers the assistant sends in gateway mode)
+              x_datum_project: "%REQ(X-DATUM-PROJECT)%"
+              x_datum_conversation: "%REQ(X-DATUM-CONVERSATION)%"
+              x_datum_agent: "%REQ(X-DATUM-AGENT)%"
+              upstream_cluster: "%UPSTREAM_CLUSTER%"
+              duration_ms: "%DURATION%"
+        # MCP traffic: emit one JSON line per tool call with the resolved
+        # backend + tool name (proves the gateway sees/enforces the MCP path).
+        - matches:
+            - "request.headers['x-ai-eg-mcp-backend'] != ''"
+          sinks:
+            - type: File
+              file:
+                path: /dev/stdout
+          format:
+            type: JSON
+            json:
+              log.type: mcp
+              start_time: "%START_TIME%"
+              method: "%REQ(:METHOD)%"
+              path: "%REQ(:PATH)%"
+              response_code: "%RESPONSE_CODE%"
+              x-request-id: "%REQ(X-REQUEST-ID)%"
+              mcp.method.name: "%DYNAMIC_METADATA(io.envoy.ai_gateway:mcp_method)%"
+              mcp.tool.name: "%DYNAMIC_METADATA(io.envoy.ai_gateway:mcp_tool_name)%"
+              mcp.backend.name: "%DYNAMIC_METADATA(io.envoy.ai_gateway:mcp_backend)%"
+              x_datum_project: "%REQ(X-DATUM-PROJECT)%"
+              x_datum_conversation: "%REQ(X-DATUM-CONVERSATION)%"
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: patch-ai-gateway
+  namespace: patch-ai-gateway
+  labels:
+    app.kubernetes.io/part-of: agent-framework-e2e
+spec:
+  gatewayClassName: patch-ai-gw
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# AI request/response bodies can exceed Envoy's 32kiB default buffer.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: patch-ai-buffer-limit
+  namespace: patch-ai-gateway
+  labels:
+    app.kubernetes.io/part-of: agent-framework-e2e
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: patch-ai-gateway
+  connection:
+    bufferLimit: 50Mi

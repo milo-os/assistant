@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: assistant
+  namespace: patch-playground
+status:
+  availableReplicas: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stub-llm
+  namespace: patch-playground
+status:
+  availableReplicas: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streamco
+  namespace: patch-playground
+status:
+  availableReplicas: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sink
+  namespace: patch-playground
+status:
+  availableReplicas: 1
