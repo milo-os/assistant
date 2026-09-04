@@ -1,0 +1,57 @@
+# Production CloudNativePG cluster backing conversation history AND the durable
+# task store (both use CONVERSATION_STORE_URL). Unlike the dev single-instance
+# cluster, this runs a 3-instance HA cluster with continuous backup.
+#
+# The operator generates the `conversation-store-app` Secret (key `uri`) the
+# assistant consumes — same as dev.
+#
+# BACKUP: barmanObjectStore points at an object store the operator owns; the
+# bucket + credentials Secret (`conversation-store-backup`) are environment
+# infrastructure, created out-of-band (see README). Without a backup target a
+# node/PVC loss is unrecoverable, so this is required for production, not
+# optional. Adjust the provider block (s3/azure/google) to your object store.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: conversation-store
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.8
+  primaryUpdateStrategy: unsupervised
+  bootstrap:
+    initdb:
+      database: conversations
+      owner: patch
+  storage:
+    storageClass: REPLACE_WITH_STORAGE_CLASS
+    size: 20Gi
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 1Gi }
+  monitoring:
+    enablePodMonitor: true
+  # Continuous WAL archiving + base backups to object storage (PITR).
+  backup:
+    retentionPolicy: "30d"
+    barmanObjectStore:
+      destinationPath: "s3://REPLACE_WITH_BACKUP_BUCKET/conversation-store"
+      s3Credentials:
+        accessKeyId:
+          name: conversation-store-backup
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: conversation-store-backup
+          key: SECRET_ACCESS_KEY
+      wal:
+        compression: gzip
+---
+# Scheduled base backup (WAL archiving above gives PITR between these).
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: conversation-store-daily
+spec:
+  schedule: "0 0 2 * * *"
+  backupOwnerReference: self
+  cluster:
+    name: conversation-store
