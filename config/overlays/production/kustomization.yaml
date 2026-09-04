@@ -24,6 +24,7 @@ resources:
   - pdb.yaml
   - networkpolicy.yaml
   - gateway-tls.yaml
+  - alerts.yaml
 
 # Metadata labels only (not selectors — the base already labels pods
 # {app: assistant}, and mutating an existing selector is an error).

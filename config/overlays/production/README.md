@@ -20,6 +20,10 @@ kubectl kustomize config/overlays/production   # render + review, then apply via
 - TLS ingress via a Gateway-API Gateway + HTTPRoute + cert-manager Certificate.
 - A default-deny NetworkPolicy with explicit egress to DNS, Postgres, and the
   in-cluster platform endpoints.
+- Availability alerts (`alerts.yaml`) with runbooks in `docs/runbooks/`. These
+  read the cluster's view of the Deployment — "is it running at all?" — and are
+  complementary to `config/components/observability`, whose rules read the
+  assistant's own metrics. Nothing is duplicated between them.
 
 ## Posture vs. dev
 
