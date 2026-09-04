@@ -301,6 +301,7 @@ type httpReviewer struct {
 	baseURL string
 	token   string
 	client  *http.Client
+	logger  *slog.Logger
 }
 
 // newHTTPReviewer builds the reviewer from cfg's control-plane coordinates.
@@ -317,6 +318,7 @@ func newHTTPReviewer(cfg SARConfig) (*httpReviewer, error) {
 		baseURL: cfg.APIURL,
 		token:   cfg.BearerToken,
 		client:  &http.Client{Transport: transport, Timeout: timeout},
+		logger:  cfg.Logger,
 	}, nil
 }
 
@@ -332,7 +334,8 @@ func (r *httpReviewer) Review(ctx context.Context, review *SubjectAccessReview) 
 	if review.Spec.ResourceAttributes != nil {
 		project = review.Spec.ResourceAttributes.Namespace
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sarEndpoint(r.baseURL, project), bytes.NewReader(body))
+	endpoint := sarEndpoint(r.baseURL, project)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build SubjectAccessReview request: %w", err)
 	}
@@ -359,6 +362,11 @@ func (r *httpReviewer) Review(ctx context.Context, review *SubjectAccessReview) 
 	var out SubjectAccessReview
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode SubjectAccessReview response: %w", err)
+	}
+	if r.logger != nil && (out.Status == nil || !out.Status.Allowed) {
+		// The URL is the thing that decides which control plane answers, and a
+		// refusal is where you need to know which one did.
+		r.logger.Warn("authz.sar.endpoint", "endpoint", endpoint, "httpStatus", resp.StatusCode)
 	}
 	if out.Status == nil {
 		return nil, errors.New("SubjectAccessReview response carried no status")
