@@ -24,6 +24,7 @@ Environment variables, model backends, and the authentication/authorization seam
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Anthropic model id |
 | `GATEWAY_URL` | — | Required when `MODEL_MODE=gateway`; Envoy AI Gateway (OpenAI-compatible) base URL |
 | `GATEWAY_MODEL` | `patch-stub-v1` | Model name the gateway routes to the upstream |
+| `GATEWAY_TOKEN_FILE` | — | Path to a bearer token proving which workload is calling the gateway. Re-read per request, so a rotated token keeps working. Not a model credential — the gateway still injects that |
 | `GATEWAY_CA_CERT` | — | Optional CA PEM path for a self-signed gateway TLS cert |
 | `GATEWAY_TLS_INSECURE` | `false` | Skip gateway TLS verification (local only) |
 | `USAGE_GATEWAY_URL` | — | Usage collector base URL; unset ⇒ emission is a no-op |
