@@ -2,10 +2,14 @@
 # image and the kustomize bundle that references it.
 #
 # datum-cloud/infra's Flux OCIRepository pulls
-# oci://ghcr.io/milo-os/assistant-kustomize and its staging overlay filters tags
-# on `.*-main-\d+-\d+`. The reusable workflow's docker/metadata-action rules
-# produce `v0.0.0-<branch>-<YYYYMMDD>-<HHmmss>` for a branch push, so a main
-# build lands as e.g. v0.0.0-main-20260903-121500 and matches.
+# oci://ghcr.io/milo-os/assistant-kustomize. The reusable workflow's
+# docker/metadata-action rules produce `v0.0.0-<branch>-<YYYYMMDD>-<HHmmss>` for
+# a branch push, and infra's overlays filter on that branch segment. Staging
+# currently filters `.*-integration-\d+-\d+`, not `-main-`: the service still
+# lives in a stack of open PRs and `integration` is that stack's tip, so staging
+# can exercise the real thing ahead of main. When the stack lands and the
+# integration branch is retired, infra's staging patch flips back to
+# `.*-main-\d+-\d+` — identical tag shape, only the branch segment differs.
 #
 # ONE image. It carries both binaries this module builds — the service and the
 # aggregated apiserver — because they are released together and share the
@@ -16,7 +20,22 @@
 name: Build and Publish
 
 on:
+  # Only the branches something deploys from. A bare `push:` publishes an image
+  # and a kustomize bundle on every push to every branch, and this repo carries
+  # ~20 feature branches — ghcr fills with tags no OCIRepository ever pulls and
+  # every WIP commit pays for a two-stage publish.
+  #
+  # `main` feeds production's OCIRepository, `integration` feeds staging's (see
+  # the header); drop either one and that environment stops receiving builds.
   push:
+    branches:
+      - main
+      - integration
+  # Tags are deliberately not in the push filter. Cutting a release fires both
+  # `push` (the tag) and `release: published`, so listing tags here would run
+  # the whole publish twice for one release. The reusable workflows tag off
+  # docker/metadata-action's `type=semver`, which reads refs/tags/* from
+  # github.ref — set on a release event — so `release:` alone publishes v1.2.3.
   release:
     types: ["published"]
 
