@@ -276,13 +276,15 @@ func readViewInvocation(cmd *cobra.Command, kind patchcli.Kind) (patchcli.Invoca
 	return inv, nil
 }
 
-// serviceURL resolves the assistant endpoint from --url, then PATCH_URL.
+// serviceURL resolves the assistant endpoint: --url, then PATCH_URL, then the
+// service's own advertised address.
 //
-// There is deliberately no derivation from DATUM_API_HOST: that names the Milo
-// control plane, and no convention yet exists for locating a project's
-// assistant from it. Endpoint discovery is an open decision — see this
-// command's README — and inventing one here would become a compatibility
-// surface before it was agreed.
+// Discovery is last so an explicit override always wins — pointing at a local
+// or preview instance must not require unsetting anything. It asks the
+// aggregated apiserver, which this CLI already reaches with the caller's
+// Kubernetes identity for `conversations` and `gaps`: no new credential, and no
+// hostname convention derived from DATUM_API_HOST, which names the Milo control
+// plane rather than the assistant.
 func serviceURL(cmd *cobra.Command) (string, error) {
 	if url, _ := cmd.Flags().GetString("url"); url != "" {
 		return url, nil
@@ -290,7 +292,16 @@ func serviceURL(cmd *cobra.Command) (string, error) {
 	if url := os.Getenv("PATCH_URL"); url != "" {
 		return url, nil
 	}
-	return "", fmt.Errorf("no assistant service URL — set PATCH_URL or pass --url")
+	kubeconfig, _ := cmd.Flags().GetString("kubeconfig")
+	url, err := patchcli.DiscoverBaseURL(cmd.Context(), kubeconfig)
+	if err != nil {
+		// Report what discovery hit, then how to proceed anyway — a bare "set
+		// PATCH_URL" hides a fixable cause (no kubeconfig, apiserver not
+		// installed, PUBLIC_BASE_URL unset on the service).
+		return "", fmt.Errorf("could not discover the assistant: %w\n"+
+			"       pass --url or set PATCH_URL to skip discovery", err)
+	}
+	return url, nil
 }
 
 // project resolves the Milo project the request runs against, from --project

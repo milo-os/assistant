@@ -93,15 +93,27 @@ ignored.
 
 Four things are deliberately not settled here.
 
-**Endpoint discovery.** There is no way to find a project's assistant from
-`DATUM_API_HOST`, which names the control plane. Nothing in the service
-advertises its address either — the production HTTPRoute hostname is still a
-placeholder an operator substitutes. So this plugin keeps `--url`/`PATCH_URL`
-and derives nothing, because a convention invented here would become a
-compatibility surface before anyone agreed to it. The candidates are a
-convention over `DATUM_API_HOST`, a datumctl config key, or a discovery
-resource in the `assistant.miloapis.com` aggregated API the CLI can already
-read.
+**Endpoint discovery.** Resolved. The service publishes its address as a
+cluster-scoped `AssistantEndpoint` in the `assistant.miloapis.com` aggregated
+API, and `serviceURL` reads it when neither `--url` nor `PATCH_URL` is set. That
+was the third of the candidates below, chosen over a convention on
+`DATUM_API_HOST` (which names the control plane, not the assistant) and a
+datumctl config key (still per-machine setup): the CLI already reaches this API
+with the caller's Kubernetes identity for `conversations` and `gaps`, so
+discovery needs no new credential and no hostname convention to keep compatible.
+
+The resource reports the same `PUBLIC_BASE_URL` the service puts in its agent
+card, so the two cannot disagree. An unset `PUBLIC_BASE_URL` is reported empty
+rather than guessed, and the CLI turns that into an error naming the unset
+setting instead of a bare "set PATCH_URL".
+
+`--url`/`PATCH_URL` still win, so pointing at a local or preview instance needs
+nothing unset.
+
+Requires the aggregated apiserver (`config/base/assistant-apiserver`) to be
+deployed. Where it is not — staging today, which serves `config/base` only —
+discovery fails the same way `conversations` and `gaps` already do, and
+`PATCH_URL` remains the fallback.
 
 Related: the a2a-go client POSTs to the URL the **agent card advertises**, not
 the one it fetched the card from. A misconfigured `PUBLIC_BASE_URL` will
