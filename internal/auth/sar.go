@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -151,6 +152,9 @@ type SARConfig struct {
 	// a negative value disables the cache (every request round-trips).
 	CacheTTL time.Duration
 
+	// Logger records refused reviews. Optional.
+	Logger *slog.Logger
+
 	// Reviewer overrides the default HTTP reviewer — tests inject a fake.
 	Reviewer SubjectAccessReviewer
 	// now overrides the clock (tests). Nil uses time.Now.
@@ -170,6 +174,11 @@ type sarAuthorizer struct {
 	timeout  time.Duration
 	cache    *allowCache
 	now      func() time.Time
+	// logger records why a review was refused. A fail-closed authorizer that
+	// says only "not allowed" is undebuggable: a missing grant, a subject the
+	// control plane could not match, and an authorizer error all present
+	// identically to the caller. Nil is tolerated (tests).
+	logger *slog.Logger
 }
 
 // NewSubjectAccessReviewAuthorizer builds the production SAR-based [Authorizer].
@@ -209,6 +218,7 @@ func NewSubjectAccessReviewAuthorizer(cfg SARConfig) (Authorizer, error) {
 		timeout:  timeout,
 		cache:    newAllowCache(ttl, maxSARCacheEntries),
 		now:      now,
+		logger:   cfg.Logger,
 	}, nil
 }
 
@@ -257,6 +267,23 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 	// Permit ONLY on an explicit, undenied allow. A nil status, allowed=false,
 	// or an explicit denied all fail closed.
 	if status == nil || !status.Allowed || status.Denied {
+		if a.logger != nil {
+			// Everything needed to tell a missing grant apart from a subject
+			// the control plane could not resolve. No token or credential is
+			// logged — only the identity the control plane itself returned.
+			a.logger.Warn("authz.sar.denied",
+				"subject", principal.Subject,
+				"uid", principal.UID,
+				"groups", principal.Groups,
+				"project", projectName,
+				"group", a.group,
+				"resource", a.resource,
+				"verb", a.verb,
+				"reason", statusReason(status),
+				"evaluationError", statusEvaluationError(status),
+				"explicitDeny", status != nil && status.Denied,
+			)
+		}
 		return Unauthorized(fmt.Sprintf("Subject %q is not allowed to access project %q", principal.Subject, projectName))
 	}
 
@@ -403,4 +430,19 @@ func firstNonEmpty(v, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// statusReason and statusEvaluationError read a possibly-nil status.
+func statusReason(s *SubjectAccessReviewStatus) string {
+	if s == nil {
+		return ""
+	}
+	return s.Reason
+}
+
+func statusEvaluationError(s *SubjectAccessReviewStatus) string {
+	if s == nil {
+		return ""
+	}
+	return s.EvaluationError
 }

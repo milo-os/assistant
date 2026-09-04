@@ -84,6 +84,7 @@ func NewAuthorizer(cfg *config.Config, logger *slog.Logger) (Authorizer, error) 
 		CACert:      caCert,
 		ClientCert:  clientCert,
 		ClientKey:   clientKey,
+		Logger:      logger,
 		Group:       cfg.Auth.SARGroup,
 		Resource:    cfg.Auth.SARResource,
 		Verb:        cfg.Auth.SARVerb,
