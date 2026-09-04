@@ -13,8 +13,9 @@ resources:
   # rather than alongside the workload.
   - assistant-apiserver
 
-# The service image, and the single place its release tag is pinned (the
-# apiserver image is pinned in assistant-apiserver/kustomization.yaml). .github/workflows/build.yaml runs
+# The one image this repo publishes, and the single place its release tag is
+# pinned. It carries both binaries, so this transformer covers the assistant and
+# the aggregated apiserver alike. .github/workflows/build.yaml runs
 #   kustomize edit set image ghcr.io/milo-os/assistant=...:<build tag>
 # against THIS directory before pushing the kustomize bundle, so every overlay
 # that composes base inherits the released tag.
