@@ -1,0 +1,10 @@
+# Build context for deploy/assistant.Dockerfile is the repository root, so keep
+# out what the compile never reads — a docs edit should not bust the layer
+# cache. deploy/.build is DELIBERATELY not ignored: the `prebuilt` target copies
+# the host-compiled binary from there.
+.git
+.github
+docs
+node_modules
+e2e/node_modules
+*.md

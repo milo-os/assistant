@@ -1,0 +1,65 @@
+# Publishes the two artifacts the platform deploys: the assistant container
+# image and the kustomize bundle that references it.
+#
+# datum-cloud/infra's Flux OCIRepository pulls
+# oci://ghcr.io/milo-os/assistant-kustomize and its staging overlay filters tags
+# on `.*-main-\d+-\d+`. The reusable workflow's docker/metadata-action rules
+# produce `v0.0.0-<branch>-<YYYYMMDD>-<HHmmss>` for a branch push, so a main
+# build lands as e.g. v0.0.0-main-20260903-121500 and matches.
+#
+# ONE image only. config/overlays/production — the path infra deploys — renders
+# exactly one container image, ghcr.io/milo-os/assistant. The apiserver, sink
+# and streamco Dockerfiles in deploy/ serve the local playground and the e2e
+# harness; nothing on the production path pulls them, so they are not published.
+name: Build and Publish
+
+on:
+  push:
+  release:
+    types: ["published"]
+
+jobs:
+  validate-kustomize:
+    uses: datum-cloud/actions/.github/workflows/validate-kustomize.yaml@v1.12.1
+
+  publish-container-image:
+    # No point building an image if the manifests that reference it are invalid.
+    needs:
+      - validate-kustomize
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.14.0
+    with:
+      image-name: assistant
+      # Repository root: the Dockerfile's default target compiles ./cmd/assistant
+      # in-image, so it needs the source tree (the `prebuilt` target that copies
+      # a host-compiled binary is for the local playground only).
+      context: .
+      dockerfile-path: deploy/assistant.Dockerfile
+      registry-organization: milo-os
+    secrets: inherit
+
+  publish-kustomize-bundle:
+    # The image must exist before the bundle that pins it is published —
+    # publishing the bundle is what triggers the Flux rollout.
+    needs:
+      - validate-kustomize
+      - publish-container-image
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.14.0
+    with:
+      bundle-name: ghcr.io/milo-os/assistant-kustomize
+      # The whole config/ tree, so the bundle root carries both ./overlays/production
+      # (the workload) and ./milo (the IAM projection) — the two paths infra's
+      # Flux Kustomizations point at.
+      bundle-path: config
+      # Stamp the released tag into base; every overlay composes it.
+      image-overlays: config/base
+      image-name: ghcr.io/milo-os/assistant
+    secrets: inherit

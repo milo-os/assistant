@@ -1,0 +1,18 @@
+# The assistant's projection INTO the Milo control plane.
+#
+# This is not deployed alongside the service — it is applied to Milo itself, by
+# a separate Flux Kustomization in datum-cloud/infra
+# (apps/patch-assistant/base/milo-service-configuration.yaml) that points at
+# `./milo/` inside this repo's published kustomize bundle and targets the
+# milo-system namespace.
+#
+# Why it is load-bearing: with AUTHZ_MODE=sar the assistant asks Milo whether
+# the caller may `create` conversations.assistant.miloapis.com in the project's
+# namespace, and the check FAILS CLOSED. Until the ProtectedResource below
+# registers that permission with Milo's IAM, nothing can grant it and every
+# request 403s.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+components:
+  - iam/

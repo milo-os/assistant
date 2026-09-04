@@ -1,0 +1,17 @@
+# Read-only access to conversation history through the conversations aggregated
+# apiserver. Deliberately excludes conversations.create: a viewer can audit past
+# turns without being able to spend model budget starting new ones.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: assistant.miloapis.com-conversation-viewer
+  namespace: milo-system
+  labels:
+    app.kubernetes.io/name: conversation-viewer
+    app.kubernetes.io/part-of: assistant.miloapis.com
+spec:
+  launchStage: Beta
+  includedPermissions:
+    - assistant.miloapis.com/conversations.get
+    - assistant.miloapis.com/conversations.list
+    - assistant.miloapis.com/capabilitygapreports.list
