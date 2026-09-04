@@ -3,8 +3,6 @@ package auth
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,7 +56,7 @@ type TokenReviewStatus struct {
 	Error         string   `json:"error,omitempty"`
 }
 
-// UserInfo is the resolved identity. Only Username is consumed downstream (it
+// UserInfo is the resolved identity, carried through to authorization (it
 // becomes [Principal.Subject]); the rest are modeled for completeness/logging.
 type UserInfo struct {
 	Username string              `json:"username,omitempty"`
@@ -92,6 +90,14 @@ type TokenReviewConfig struct {
 	// CACert is the PEM-encoded apiserver CA bundle. Empty falls back to the
 	// system roots. Ignored when Reviewer is injected.
 	CACert []byte
+	// ClientCert/ClientKey are the PEM-encoded client certificate the assistant
+	// presents to identify ITSELF to the control plane, as an alternative to
+	// BearerToken. Milo accepts service-account tokens only from its own
+	// issuer, so a workload-cluster token is rejected and mTLS is the path that
+	// works; see newControlPlaneTransport. Both or neither. Ignored when
+	// Reviewer is injected.
+	ClientCert []byte
+	ClientKey  []byte
 
 	// Timeout bounds a single TokenReview round-trip. Zero uses the default.
 	Timeout time.Duration
@@ -195,7 +201,12 @@ func (a *tokenReviewAuthenticator) Authenticate(ctx context.Context, bearerToken
 		return Principal{}, Unauthenticated("TokenReview authenticated the token but returned no username")
 	}
 
-	principal := Principal{Subject: username}
+	principal := Principal{
+		Subject: username,
+		UID:     status.User.UID,
+		Groups:  status.User.Groups,
+		Extra:   status.User.Extra,
+	}
 	a.cache.store(bearerToken, principal, a.now())
 	return principal, nil
 }
@@ -212,13 +223,9 @@ type httpTokenReviewer struct {
 
 // newHTTPTokenReviewer builds the reviewer from cfg's control-plane coordinates.
 func newHTTPTokenReviewer(cfg TokenReviewConfig) (*httpTokenReviewer, error) {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if len(cfg.CACert) > 0 {
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(cfg.CACert) {
-			return nil, errors.New("auth: TokenReviewConfig.CACert is not valid PEM")
-		}
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	transport, err := newControlPlaneTransport(cfg.CACert, cfg.ClientCert, cfg.ClientKey)
+	if err != nil {
+		return nil, err
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {

@@ -254,8 +254,8 @@ func TestSAR_HTTPReviewer_Allow(t *testing.T) {
 	if err := az.AuthorizeProject(context.Background(), Principal{Subject: "alice"}, "projA"); err != nil {
 		t.Fatalf("HTTP allow should permit: %v", err)
 	}
-	if gotPath != sarPath {
-		t.Errorf("path = %q, want %q", gotPath, sarPath)
+	if want := sarEndpointPath("projA"); gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
 	}
 	if gotAuth != "Bearer svc-token" {
 		t.Errorf("authorization = %q", gotAuth)
@@ -298,4 +298,10 @@ func TestSAR_InvalidCARejected(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "PEM") {
 		t.Fatalf("expected PEM error, got %v", err)
 	}
+}
+
+// sarEndpointPath is the path portion of the project-scoped SAR endpoint, for
+// assertions against a test server (an empty base URL yields a bare path).
+func sarEndpointPath(project string) string {
+	return sarEndpoint("", project)
 }

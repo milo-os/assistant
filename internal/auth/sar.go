@@ -3,13 +3,13 @@ package auth
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -40,9 +40,48 @@ const (
 	// swept first, then one live entry is evicted to make room.
 	maxSARCacheEntries = 4096
 
-	// sarPath is the cluster-scoped SubjectAccessReview endpoint.
+	// Parent-context keys — how the scope is actually decided today. Milo's
+	// OpenFGA authorizer reads them rather than the request path or the
+	// namespace: its
+	// extractParentContext reads them off the subject's extra, and a review
+	// without all three falls through to cluster scope, where a project-scoped
+	// resource is denied no matter what has been granted.
+	// (milo-os/openfga-provider internal/webhook/subjectaccessreview_authorizer.go)
+	parentAPIGroupExtraKey = "iam.miloapis.com/parent-api-group"
+	parentKindExtraKey     = "iam.miloapis.com/parent-type"
+	parentNameExtraKey     = "iam.miloapis.com/parent-name"
+
+	// projectAPIGroup and projectKind name the parent a conversation lives
+	// under: the review always asks about one project.
+	projectAPIGroup = "resourcemanager.miloapis.com"
+	projectKind     = "Project"
+
+	// sarPath is the SubjectAccessReview endpoint, relative to the project
+	// control plane it is addressed to.
 	sarPath = "/apis/authorization.k8s.io/v1/subjectaccessreviews"
+
+	// projectControlPlanePath addresses the review to one project's control
+	// plane. %s is the project name.
+	//
+	// Today the scope is decided by the parent-context extra below, not by this
+	// path — a review posted here without that extra is still answered at
+	// cluster scope. Keep the path anyway: addressing the project's own control
+	// plane is the end state this should converge on, and the extra keys are
+	// the mechanism that currently carries the same fact in-band. If Milo ever
+	// derives scope from the path, the extra becomes redundant, not the other
+	// way round.
+	projectControlPlanePath = "/apis/resourcemanager.miloapis.com/v1alpha1/projects/%s/control-plane"
 )
+
+// sarEndpoint returns the URL a review for projectName must be POSTed to.
+//
+// Always project-scoped: the assistant only ever asks whether a subject may act
+// in a specific project, and Milo decides that at the project's control plane.
+func sarEndpoint(baseURL, projectName string) string {
+	return strings.TrimRight(baseURL, "/") +
+		fmt.Sprintf(projectControlPlanePath, url.PathEscape(projectName)) +
+		sarPath
+}
 
 // SubjectAccessReview is the minimal authorization.k8s.io/v1 SubjectAccessReview
 // wire shape the assistant POSTs and reads back. Only the fields the assistant
@@ -61,8 +100,17 @@ type SubjectAccessReview struct {
 type SubjectAccessReviewSpec struct {
 	ResourceAttributes *ResourceAttributes `json:"resourceAttributes,omitempty"`
 	// User is the subject under review — the authenticated principal, NOT the
-	// assistant's own identity (that is the bearer token on the HTTP call).
+	// assistant's own identity (that is the client certificate on the HTTP
+	// call).
 	User string `json:"user,omitempty"`
+	// UID and Groups complete the subject's identity. Milo binds policy to a
+	// user's ID rather than to the username string, so omitting UID makes an
+	// otherwise-valid grant evaluate as "not allowed".
+	UID    string   `json:"uid,omitempty"`
+	Groups []string `json:"groups,omitempty"`
+	// Extra carries the parent-resource context that tells Milo which scope to
+	// evaluate the review in. See parentExtra.
+	Extra map[string][]string `json:"extra,omitempty"`
 }
 
 // ResourceAttributes scopes the access check to a specific verb/group/resource
@@ -109,6 +157,11 @@ type SARConfig struct {
 	// CACert is the PEM-encoded apiserver CA bundle. Empty falls back to the
 	// system roots. Ignored when Reviewer is injected.
 	CACert []byte
+	// ClientCert/ClientKey are the PEM-encoded client certificate the assistant
+	// presents to identify ITSELF to the control plane, as an alternative to
+	// BearerToken. Both or neither. Ignored when Reviewer is injected.
+	ClientCert []byte
+	ClientKey  []byte
 
 	// Group, Resource, Verb are the resourceAttributes the SAR asks about.
 	// Empty fields fall back to the Default* constants.
@@ -121,6 +174,9 @@ type SARConfig struct {
 	// CacheTTL bounds how long an ALLOW is reused. Zero uses DefaultSARCacheTTL;
 	// a negative value disables the cache (every request round-trips).
 	CacheTTL time.Duration
+
+	// Logger records refused reviews. Optional.
+	Logger *slog.Logger
 
 	// Reviewer overrides the default HTTP reviewer — tests inject a fake.
 	Reviewer SubjectAccessReviewer
@@ -141,6 +197,11 @@ type sarAuthorizer struct {
 	timeout  time.Duration
 	cache    *allowCache
 	now      func() time.Time
+	// logger records why a review was refused. A fail-closed authorizer that
+	// says only "not allowed" is undebuggable: a missing grant, a subject the
+	// control plane could not match, and an authorizer error all present
+	// identically to the caller. Nil is tolerated (tests).
+	logger *slog.Logger
 }
 
 // NewSubjectAccessReviewAuthorizer builds the production SAR-based [Authorizer].
@@ -180,6 +241,7 @@ func NewSubjectAccessReviewAuthorizer(cfg SARConfig) (Authorizer, error) {
 		timeout:  timeout,
 		cache:    newAllowCache(ttl, maxSARCacheEntries),
 		now:      now,
+		logger:   cfg.Logger,
 	}, nil
 }
 
@@ -193,7 +255,9 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 		return Unauthorized("SubjectAccessReview requires a subject; token carried none")
 	}
 
-	key := principal.Subject + "\x00" + projectName
+	// UID participates in the key: two principals must never share a cached
+	// decision just because they present the same username.
+	key := principal.Subject + "\x00" + principal.UID + "\x00" + projectName
 	if a.cache.allowed(key, a.now()) {
 		return nil
 	}
@@ -202,7 +266,10 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 		APIVersion: "authorization.k8s.io/v1",
 		Kind:       "SubjectAccessReview",
 		Spec: SubjectAccessReviewSpec{
-			User: principal.Subject,
+			User:   principal.Subject,
+			UID:    principal.UID,
+			Groups: principal.Groups,
+			Extra:  parentExtra(principal.Extra, projectName),
 			ResourceAttributes: &ResourceAttributes{
 				Namespace: projectName,
 				Verb:      a.verb,
@@ -224,6 +291,23 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 	// Permit ONLY on an explicit, undenied allow. A nil status, allowed=false,
 	// or an explicit denied all fail closed.
 	if status == nil || !status.Allowed || status.Denied {
+		if a.logger != nil {
+			// Everything needed to tell a missing grant apart from a subject
+			// the control plane could not resolve. No token or credential is
+			// logged — only the identity the control plane itself returned.
+			a.logger.Warn("authz.sar.denied",
+				"subject", principal.Subject,
+				"uid", principal.UID,
+				"groups", principal.Groups,
+				"project", projectName,
+				"group", a.group,
+				"resource", a.resource,
+				"verb", a.verb,
+				"reason", statusReason(status),
+				"evaluationError", statusEvaluationError(status),
+				"explicitDeny", status != nil && status.Denied,
+			)
+		}
 		return Unauthorized(fmt.Sprintf("Subject %q is not allowed to access project %q", principal.Subject, projectName))
 	}
 
@@ -234,30 +318,31 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 // ── Default HTTP reviewer ─────────────────────────────────────
 
 // httpReviewer POSTs the SAR to the apiserver's subjectaccessreviews endpoint.
+//
+// baseURL, not a precomputed endpoint: the URL depends on the project under
+// review, so it is built per request from the review's own resourceAttributes.
 type httpReviewer struct {
-	endpoint string
-	token    string
-	client   *http.Client
+	baseURL string
+	token   string
+	client  *http.Client
+	logger  *slog.Logger
 }
 
 // newHTTPReviewer builds the reviewer from cfg's control-plane coordinates.
 func newHTTPReviewer(cfg SARConfig) (*httpReviewer, error) {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if len(cfg.CACert) > 0 {
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(cfg.CACert) {
-			return nil, errors.New("auth: SARConfig.CACert is not valid PEM")
-		}
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	transport, err := newControlPlaneTransport(cfg.CACert, cfg.ClientCert, cfg.ClientKey)
+	if err != nil {
+		return nil, err
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = DefaultSARTimeout
 	}
 	return &httpReviewer{
-		endpoint: strings.TrimRight(cfg.APIURL, "/") + sarPath,
-		token:    cfg.BearerToken,
-		client:   &http.Client{Transport: transport, Timeout: timeout},
+		baseURL: cfg.APIURL,
+		token:   cfg.BearerToken,
+		client:  &http.Client{Transport: transport, Timeout: timeout},
+		logger:  cfg.Logger,
 	}, nil
 }
 
@@ -269,7 +354,12 @@ func (r *httpReviewer) Review(ctx context.Context, review *SubjectAccessReview) 
 	if err != nil {
 		return nil, fmt.Errorf("marshal SubjectAccessReview: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, bytes.NewReader(body))
+	var project string
+	if review.Spec.ResourceAttributes != nil {
+		project = review.Spec.ResourceAttributes.Namespace
+	}
+	endpoint := sarEndpoint(r.baseURL, project)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build SubjectAccessReview request: %w", err)
 	}
@@ -296,6 +386,11 @@ func (r *httpReviewer) Review(ctx context.Context, review *SubjectAccessReview) 
 	var out SubjectAccessReview
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode SubjectAccessReview response: %w", err)
+	}
+	if r.logger != nil && (out.Status == nil || !out.Status.Allowed) {
+		// The URL is the thing that decides which control plane answers, and a
+		// refusal is where you need to know which one did.
+		r.logger.Warn("authz.sar.endpoint", "endpoint", endpoint, "httpStatus", resp.StatusCode)
 	}
 	if out.Status == nil {
 		return nil, errors.New("SubjectAccessReview response carried no status")
@@ -367,4 +462,42 @@ func firstNonEmpty(v, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// statusReason and statusEvaluationError read a possibly-nil status.
+func statusReason(s *SubjectAccessReviewStatus) string {
+	if s == nil {
+		return ""
+	}
+	return s.Reason
+}
+
+func statusEvaluationError(s *SubjectAccessReviewStatus) string {
+	if s == nil {
+		return ""
+	}
+	return s.EvaluationError
+}
+
+// parentExtra builds the subject extra that scopes a review to one project.
+//
+// Milo reads the parent resource from the subject's extra and evaluates the
+// review in that scope. All three keys are required — extractParentContext
+// returns nil unless every one is present with exactly one value — and without
+// them the review is answered at cluster scope, which denies a project-scoped
+// resource regardless of any grant.
+//
+// The caller's own extra from the TokenReview is carried through underneath, so
+// context the control plane attached to the identity is not silently dropped;
+// the parent keys are set last because they describe the question being asked,
+// not the caller.
+func parentExtra(principalExtra map[string][]string, projectName string) map[string][]string {
+	extra := make(map[string][]string, len(principalExtra)+3)
+	for k, v := range principalExtra {
+		extra[k] = v
+	}
+	extra[parentAPIGroupExtraKey] = []string{projectAPIGroup}
+	extra[parentKindExtraKey] = []string{projectKind}
+	extra[parentNameExtraKey] = []string{projectName}
+	return extra
 }
