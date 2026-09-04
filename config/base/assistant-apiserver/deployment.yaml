@@ -45,7 +45,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: apiserver
-          image: ghcr.io/milo-os/assistant-apiserver
+          # The one image this repo publishes: it carries both binaries, and
+          # the `command` below selects this one.
+          image: ghcr.io/milo-os/assistant
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

@@ -4,9 +4,17 @@ resources:
   - namespace.yaml
   - assistant.yaml
   - rbac.yaml
+  # The aggregated apiserver. Part of base rather than an overlay opt-in: it
+  # serves assistant.miloapis.com (conversations, capabilitygapreports,
+  # assistantendpoints), so a deployment without it has no read view of its own
+  # data and no way to advertise its address. The APIService that registers it
+  # with an aggregator stays a separate component — that registration is
+  # environment-specific and, on the Datum platform, is installed into Milo
+  # rather than alongside the workload.
+  - assistant-apiserver
 
-# The one image this repository publishes, and the single place its release tag
-# is pinned. .github/workflows/build.yaml runs
+# The service image, and the single place its release tag is pinned (the
+# apiserver image is pinned in assistant-apiserver/kustomization.yaml). .github/workflows/build.yaml runs
 #   kustomize edit set image ghcr.io/milo-os/assistant=...:<build tag>
 # against THIS directory before pushing the kustomize bundle, so every overlay
 # that composes base inherits the released tag.
