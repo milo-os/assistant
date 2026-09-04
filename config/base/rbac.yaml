@@ -1,0 +1,29 @@
+# The assistant's own identity, and the only cluster permission it needs.
+#
+# Both auth seams are answered by the control plane: a TokenReview resolves the
+# caller's identity, a SubjectAccessReview decides whether that caller may act
+# on a project. Issuing either requires create on the corresponding review
+# resource, which is exactly what `system:auth-delegator` grants — the same
+# binding the aggregated apiserver uses for its delegated auth.
+#
+# Note what this does NOT grant: no read access to any project resource. The
+# assistant asks the control plane questions about the caller; it never gains
+# the caller's authority.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: assistant
+  namespace: patch-playground
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: assistant:system:auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: assistant
+    namespace: patch-playground
