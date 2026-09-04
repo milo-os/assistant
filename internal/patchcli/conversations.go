@@ -3,12 +3,10 @@
 //
 // Per the apiserver design (decision #7, "an apiserver is not a chat
 // transport"), listing and resuming are separate paths: this command is a
-// read-only *discovery* view. It shells out to `kubectl` rather than embedding
-// client-go — the `patch` binary is a deliberately thin a2a-go client with no
-// k8s client dependency, and kubectl already carries the kubeconfig + TLS trust
-// for the aggregated apiserver's serving cert (the verified path from Phase 3).
-// The caller authenticates with their normal k8s identity (KUBECONFIG), NOT the
-// A2A service's PATCH_TOKEN. Once you have a context id, resume it with
+// read-only *discovery* view. It fetches raw API paths through [ReadView],
+// which prefers datumctl's own identity and falls back to kubectl — see
+// readview.go for why that order, and why neither transport uses client-side
+// discovery. Once you have a context id, resume it with
 // `patch chat --context-id <id>`.
 package patchcli
 
@@ -29,10 +27,11 @@ import (
 // runConversationsList prints a table of the caller's conversations in a
 // project (id, created, last-active, message count), newest activity first.
 func runConversationsList(ctx context.Context, inv Invocation, io Io) int {
-	out, err := kubectlJSON(ctx, inv.Kubeconfig,
-		"get", "conversations", "-n", inv.Project, "-o", "json")
+	view := ReadViewFor(inv)
+	out, err := view.get(ctx, inv.Project, conversationsPath(inv.Project))
 	if err != nil {
-		return failKubectl(io, err, out)
+		io.Err("patch: " + readViewErrorText(view, err) + "\n")
+		return 1
 	}
 
 	var list assistantv1alpha1.ConversationList
@@ -78,12 +77,11 @@ func runConversationsList(ctx context.Context, inv Invocation, io Io) int {
 // runConversationsShow prints the full transcript of one conversation, fetched
 // from the `messages` subresource.
 func runConversationsShow(ctx context.Context, inv Invocation, io Io) int {
-	path := fmt.Sprintf(
-		"/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/conversations/%s/messages",
-		inv.Project, inv.ContextID)
-	out, err := kubectlJSON(ctx, inv.Kubeconfig, "get", "--raw", path)
+	view := ReadViewFor(inv)
+	out, err := view.get(ctx, inv.Project, messagesPath(inv.Project, inv.ContextID))
 	if err != nil {
-		return failKubectl(io, err, out)
+		io.Err("patch: " + readViewErrorText(view, err) + "\n")
+		return 1
 	}
 
 	if inv.JSON {
@@ -109,6 +107,19 @@ func runConversationsShow(ctx context.Context, inv Invocation, io Io) int {
 	return 0
 }
 
+// conversationsPath and messagesPath build the group-relative paths both
+// transports use. Kept together so the list view and the TUI picker cannot
+// drift apart.
+func conversationsPath(project string) string {
+	return fmt.Sprintf("/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/conversations", project)
+}
+
+func messagesPath(project, contextID string) string {
+	return fmt.Sprintf(
+		"/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/conversations/%s/messages",
+		project, contextID)
+}
+
 // kubectlJSON runs kubectl and returns its combined stdout. A non-empty
 // kubeconfig is passed via --kubeconfig; otherwise kubectl uses its normal
 // resolution (KUBECONFIG env, then ~/.kube/config).
@@ -118,13 +129,6 @@ func kubectlJSON(ctx context.Context, kubeconfig string, args ...string) ([]byte
 		full = append([]string{"--kubeconfig", kubeconfig}, args...)
 	}
 	return exec.CommandContext(ctx, "kubectl", full...).Output()
-}
-
-// failKubectl renders a friendly error for a failed kubectl invocation,
-// surfacing kubectl's own stderr (carried on ExitError) when present.
-func failKubectl(io Io, err error, _ []byte) int {
-	io.Err("patch: " + kubectlErrorText(err) + "\n")
-	return 1
 }
 
 // kubectlErrorText renders a failed kubectl invocation as a one-line message,

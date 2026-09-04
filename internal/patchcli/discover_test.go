@@ -32,7 +32,7 @@ func fakeKubectl(t *testing.T, body string, code int) {
 func TestDiscoverReturnsPublishedURL(t *testing.T) {
 	fakeKubectl(t, `{"spec":{"url":"https://patch.staging.env.datum.net","agentCardPath":"/.well-known/agent-card.json"}}`, 0)
 
-	url, err := DiscoverBaseURL(context.Background(), "")
+	url, err := DiscoverBaseURL(context.Background(), ReadView{}, "demo")
 	if err != nil {
 		t.Fatalf("DiscoverBaseURL: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestDiscoverReturnsPublishedURL(t *testing.T) {
 func TestDiscoverEmptyURLIsAnError(t *testing.T) {
 	fakeKubectl(t, `{"spec":{"url":""}}`, 0)
 
-	_, err := DiscoverBaseURL(context.Background(), "")
+	_, err := DiscoverBaseURL(context.Background(), ReadView{}, "demo")
 	if err == nil {
 		t.Fatal("want an error for an unpublished address")
 	}
@@ -56,11 +56,12 @@ func TestDiscoverEmptyURLIsAnError(t *testing.T) {
 }
 
 // kubectl's own stderr is the useful part when the resource is not installed;
-// it must reach the user rather than being swallowed.
+// it must reach the user rather than being swallowed. (ReadView{} selects the
+// kubectl transport — no API host, no token.)
 func TestDiscoverSurfacesKubectlError(t *testing.T) {
 	fakeKubectl(t, `error: the server doesn't have a resource type "assistantendpoints"`, 1)
 
-	_, err := DiscoverBaseURL(context.Background(), "")
+	_, err := DiscoverBaseURL(context.Background(), ReadView{}, "demo")
 	if err == nil {
 		t.Fatal("want an error")
 	}

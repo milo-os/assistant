@@ -26,15 +26,15 @@ func newRootCmd() *cobra.Command {
 	root := plugin.NewRootCmd("patch", "Chat with Patch, the Datum Cloud assistant")
 	root.Long = "Chat with Patch, the Datum Cloud assistant, from the terminal.\n\n" +
 		"Conversations are held by the assistant service and continued with --context-id.\n" +
-		"'conversations' and 'gaps' read the aggregated apiserver with your own\n" +
-		"Kubernetes identity instead, so they need a kubeconfig rather than a token."
+		"'conversations' and 'gaps' read the aggregated API for the same project,\n" +
+		"using the same datumctl credentials."
 	root.SilenceUsage = true
 	root.SilenceErrors = true
 
 	root.PersistentFlags().String("url", "",
 		"Assistant service base URL (defaults to PATCH_URL)")
 	root.PersistentFlags().String("kubeconfig", "",
-		"Kubeconfig for the conversations apiserver (defaults to KUBECONFIG)")
+		"Read conversations/gaps through this kubeconfig instead of datumctl's credentials")
 
 	root.AddCommand(
 		newCardCmd(),
@@ -127,8 +127,8 @@ func newConversationsCmd() *cobra.Command {
 		Aliases: []string{"conversation", "conv"},
 		Short:   "Browse your durable chat history",
 		Long: "Read the conversations the assistant has stored for a project, through\n" +
-			"the aggregated apiserver. This uses your own Kubernetes identity\n" +
-			"(kubeconfig), not the assistant's bearer token.",
+			"the aggregated API — the same project and the same datumctl credentials\n" +
+			"the rest of these commands use.",
 	}
 	list := &cobra.Command{
 		Use:   "list",
@@ -242,24 +242,36 @@ func serviceInvocation(cmd *cobra.Command, kind patchcli.Kind, needProject bool)
 	}
 	inv.JSON = jsonOut
 
-	inv.BaseURL, err = serviceURL(cmd)
-	if err != nil {
-		return inv, err
-	}
 	inv.Token = tokenSource()
+	inv.APIHost = plugin.Context().APIHost
+	inv.Kubeconfig, _ = cmd.Flags().GetString("kubeconfig")
 
 	if needProject {
 		if inv.Project, err = project(cmd); err != nil {
 			return inv, err
 		}
 	}
-	inv.Kubeconfig, _ = cmd.Flags().GetString("kubeconfig")
+
+	// After the fields discovery depends on: it reads the aggregated API as
+	// this same invocation would.
+	inv.BaseURL, err = serviceURL(cmd, inv)
+	if err != nil {
+		return inv, err
+	}
 	return inv, nil
 }
 
-// readViewInvocation resolves an apiserver read-view command. These reach the
-// aggregated apiserver through kubectl and the caller's own Kubernetes
-// identity, so they need neither the service URL nor a token.
+// readViewInvocation resolves an apiserver read-view command.
+//
+// These read the aggregated API rather than calling the service, but they do it
+// as the SAME identity: Milo accepts the token datumctl already mints, so the
+// project the caller selected with `datumctl context use` is the project they
+// read. Handing these commands a kubeconfig instead would mean a second,
+// unrelated identity — kubectl's current context — which is not the one the
+// caller chose and is usually a different cluster entirely.
+//
+// --kubeconfig remains available and still wins when passed; see
+// internal/patchcli/readview.go.
 func readViewInvocation(cmd *cobra.Command, kind patchcli.Kind) (patchcli.Invocation, error) {
 	inv := patchcli.Invocation{Kind: kind}
 
@@ -272,6 +284,8 @@ func readViewInvocation(cmd *cobra.Command, kind patchcli.Kind) (patchcli.Invoca
 	if inv.Project, err = project(cmd); err != nil {
 		return inv, err
 	}
+	inv.APIHost = plugin.Context().APIHost
+	inv.Token = tokenSource()
 	inv.Kubeconfig, _ = cmd.Flags().GetString("kubeconfig")
 	return inv, nil
 }
@@ -281,22 +295,33 @@ func readViewInvocation(cmd *cobra.Command, kind patchcli.Kind) (patchcli.Invoca
 //
 // Discovery is last so an explicit override always wins — pointing at a local
 // or preview instance must not require unsetting anything. It asks the
-// aggregated apiserver, which this CLI already reaches with the caller's
-// Kubernetes identity for `conversations` and `gaps`: no new credential, and no
+// aggregated API, which this CLI already reaches with the caller's datumctl
+// credentials for `conversations` and `gaps`: no new credential, and no
 // hostname convention derived from DATUM_API_HOST, which names the Milo control
 // plane rather than the assistant.
-func serviceURL(cmd *cobra.Command) (string, error) {
+func serviceURL(cmd *cobra.Command, inv patchcli.Invocation) (string, error) {
 	if url, _ := cmd.Flags().GetString("url"); url != "" {
 		return url, nil
 	}
 	if url := os.Getenv("PATCH_URL"); url != "" {
 		return url, nil
 	}
-	kubeconfig, _ := cmd.Flags().GetString("kubeconfig")
-	url, err := patchcli.DiscoverBaseURL(cmd.Context(), kubeconfig)
+	// The endpoint is cluster-scoped, but it is still reached through a
+	// project's control plane, so discovery needs a project even for the
+	// commands that do not otherwise take one (card, task).
+	discoverIn := inv.Project
+	if discoverIn == "" {
+		discoverIn, _ = cmd.Flags().GetString("project")
+	}
+	if discoverIn == "" {
+		return "", fmt.Errorf("no assistant service URL, and no project to discover one from\n" +
+			"       pass --url, or --project, or run 'datumctl context use <context>'")
+	}
+
+	url, err := patchcli.DiscoverBaseURL(cmd.Context(), patchcli.ReadViewFor(inv), discoverIn)
 	if err != nil {
 		// Report what discovery hit, then how to proceed anyway — a bare "set
-		// PATCH_URL" hides a fixable cause (no kubeconfig, apiserver not
+		// PATCH_URL" hides a fixable cause (credentials, apiserver not
 		// installed, PUBLIC_BASE_URL unset on the service).
 		return "", fmt.Errorf("could not discover the assistant: %w\n"+
 			"       pass --url or set PATCH_URL to skip discovery", err)

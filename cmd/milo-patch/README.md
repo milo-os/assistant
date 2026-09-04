@@ -77,9 +77,14 @@ session outlives the short-lived token it began with. Each call is bounded by a
 10s timeout because `plugin.Token()` takes no context and would otherwise hang
 the plugin on a wedged helper.
 
-`PATCH_URL` still supplies the endpoint. `KUBECONFIG` still backs
-`conversations` and `gaps`, which read the aggregated apiserver with your own
-Kubernetes identity rather than the assistant's token.
+`conversations`, `gaps` and endpoint discovery read the aggregated API with the
+**same datumctl credentials**, against the project the caller selected. They
+used to use `kubectl` and the ambient kubeconfig instead, on the reasoning that
+reading a Kubernetes API deserves the caller's Kubernetes identity. Milo accepts
+the token datumctl already mints, so that bought no extra identity — only a
+second way to be pointed at the wrong server, since kubectl's current context
+has nothing to do with the datumctl context. `--kubeconfig` still selects the
+kubectl path for anyone who wants it.
 
 Exit codes are the standalone CLI's — `0` completed, `1` request/stream failure
 or a task that did not complete, `2` usage or configuration error — plus `130`
@@ -99,7 +104,7 @@ API, and `serviceURL` reads it when neither `--url` nor `PATCH_URL` is set. That
 was the third of the candidates below, chosen over a convention on
 `DATUM_API_HOST` (which names the control plane, not the assistant) and a
 datumctl config key (still per-machine setup): the CLI already reaches this API
-with the caller's Kubernetes identity for `conversations` and `gaps`, so
+with the caller's datumctl credentials for `conversations` and `gaps`, so
 discovery needs no new credential and no hostname convention to keep compatible.
 
 The resource reports the same `PUBLIC_BASE_URL` the service puts in its agent

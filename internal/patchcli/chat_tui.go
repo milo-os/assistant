@@ -188,13 +188,13 @@ func newInputStyles(dark bool) textinput.Styles {
 // pointer receiver so the streaming goroutine (which holds *tea.Program) and
 // Update mutate one shared model.
 type chatModel struct {
-	ctx        context.Context
-	prog       *tea.Program
-	client     *serviceClient
-	project    string
-	kubeconfig string // for the /resume picker's kubectl calls; "" uses normal resolution
-	baseURL    string // for /compact's POST /v1/compact call (outside the a2a client)
-	token      TokenSource
+	ctx     context.Context
+	prog    *tea.Program
+	client  *serviceClient
+	project string
+	view    ReadView // how the /resume picker reaches the aggregated API
+	baseURL string   // for /compact's POST /v1/compact call (outside the a2a client)
+	token   TokenSource
 
 	vp       viewport.Model
 	ti       textinput.Model
@@ -234,7 +234,7 @@ type chatModel struct {
 	width        int // full terminal width; content width subtracts padding
 }
 
-func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, firstMessage, kubeconfig, baseURL string, token TokenSource) int {
+func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, firstMessage, baseURL string, token TokenSource, view ReadView) int {
 	st := newStyles(false) // provisional (light) until the background is learned
 
 	sp := spin.New(spin.WithSpinner(spin.Dot), spin.WithStyle(st.patch))
@@ -248,7 +248,7 @@ func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, 
 		ctx:          ctx,
 		client:       client,
 		project:      project,
-		kubeconfig:   kubeconfig,
+		view:         view,
 		baseURL:      baseURL,
 		token:        token,
 		contextID:    contextID,
@@ -637,16 +637,16 @@ func isEditingKey(s string) bool {
 
 // loadPickerList fetches the project's conversation listing in the background
 // (the same kubectl path as `patch conversations list`), newest activity
-// first. It captures ctx/kubeconfig/project by value at call time rather than
+// first. It captures ctx/view/project by value at call time rather than
 // reading m inside the closure — like stream(), this runs off the Update
 // goroutine, so it must never touch mutable model state directly; only the
 // returned Msg, handled in Update, may.
 func (m *chatModel) loadPickerList() tea.Cmd {
-	ctx, kubeconfig, project := m.ctx, m.kubeconfig, m.project
+	ctx, view, project := m.ctx, m.view, m.project
 	return func() tea.Msg {
-		out, err := kubectlJSON(ctx, kubeconfig, "get", "conversations", "-n", project, "-o", "json")
+		out, err := view.get(ctx, project, conversationsPath(project))
 		if err != nil {
-			return pickerListMsg{err: errors.New(kubectlErrorText(err))}
+			return pickerListMsg{err: errors.New(readViewErrorText(view, err))}
 		}
 		var list assistantv1alpha1.ConversationList
 		if err := json.Unmarshal(out, &list); err != nil {
@@ -660,16 +660,12 @@ func (m *chatModel) loadPickerList() tea.Cmd {
 }
 
 // fetchTranscript fetches one conversation's full transcript (the messages
-// subresource) over kubectl. Shared by loadPickerTranscript (resume) and
-// loadPickerPreview (the picker's preview pane) — same data, different
-// destination Msg.
-func fetchTranscript(ctx context.Context, kubeconfig, project, contextID string) ([]assistantv1alpha1.ConversationMessage, error) {
-	path := fmt.Sprintf(
-		"/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/conversations/%s/messages",
-		project, contextID)
-	out, err := kubectlJSON(ctx, kubeconfig, "get", "--raw", path)
+// subresource). Shared by loadPickerTranscript (resume) and loadPickerPreview
+// (the picker's preview pane) — same data, different destination Msg.
+func fetchTranscript(ctx context.Context, view ReadView, project, contextID string) ([]assistantv1alpha1.ConversationMessage, error) {
+	out, err := view.get(ctx, project, messagesPath(project, contextID))
 	if err != nil {
-		return nil, errors.New(kubectlErrorText(err))
+		return nil, errors.New(readViewErrorText(view, err))
 	}
 	var msgs assistantv1alpha1.ConversationMessages
 	if err := json.Unmarshal(out, &msgs); err != nil {
@@ -682,9 +678,9 @@ func fetchTranscript(ctx context.Context, kubeconfig, project, contextID string)
 // background, for Update to fold into m.turns on arrival (resuming it as the
 // active chat). Same off-goroutine caveat as loadPickerList.
 func (m *chatModel) loadPickerTranscript(contextID string) tea.Cmd {
-	ctx, kubeconfig, project := m.ctx, m.kubeconfig, m.project
+	ctx, view, project := m.ctx, m.view, m.project
 	return func() tea.Msg {
-		items, err := fetchTranscript(ctx, kubeconfig, project, contextID)
+		items, err := fetchTranscript(ctx, view, project, contextID)
 		if err != nil {
 			return pickerTranscriptMsg{err: err}
 		}
@@ -696,9 +692,9 @@ func (m *chatModel) loadPickerTranscript(contextID string) tea.Cmd {
 // for the preview pane — the result is cached in m.picker.preview, never
 // resumed into the main chat. Same off-goroutine caveat as loadPickerList.
 func (m *chatModel) loadPickerPreview(contextID string) tea.Cmd {
-	ctx, kubeconfig, project := m.ctx, m.kubeconfig, m.project
+	ctx, view, project := m.ctx, m.view, m.project
 	return func() tea.Msg {
-		items, err := fetchTranscript(ctx, kubeconfig, project, contextID)
+		items, err := fetchTranscript(ctx, view, project, contextID)
 		if err != nil {
 			return pickerPreviewMsg{contextID: contextID, err: err}
 		}
