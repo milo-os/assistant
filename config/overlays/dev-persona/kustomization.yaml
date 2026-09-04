@@ -1,0 +1,46 @@
+# Dev overlay — layers a platform-provider-style persona override on top of
+# `dev`: PERSONA_PROMPT_FILE points at a ConfigMap-mounted file, proving out
+# the configurable-system-prompt mechanism end to end without duplicating
+# dev's capability fixture / gateway / stub-llm setup. Apply with
+# `task dev:deploy OVERLAY=dev-persona`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+
+configMapGenerator:
+  - name: assistant-persona
+    namespace: patch-playground
+    files:
+      - persona.md
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: agent-framework-playground
+
+patches:
+  - target:
+      kind: Deployment
+      name: assistant
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: assistant
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: assistant
+                env:
+                  - name: PERSONA_PROMPT_FILE
+                    value: /config/persona/persona.md
+                volumeMounts:
+                  - name: persona
+                    mountPath: /config/persona
+                    readOnly: true
+            volumes:
+              - name: persona
+                configMap:
+                  name: assistant-persona

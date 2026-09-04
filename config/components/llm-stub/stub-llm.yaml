@@ -1,0 +1,76 @@
+# Stub OpenAI-compatible LLM upstream (source in
+# e2e/gateway/stub-llm/stub-llm.mjs, mounted via the `stub-llm-src` ConfigMap
+# that playground-up.sh generates from that single file). Uses the streamco
+# image only for its Node runtime; the stub itself is zero-dependency. Requires
+# the injected credential (STUB_API_KEY, from the same Secret the gateway's
+# BackendSecurityPolicy injects) — so a request that reaches it with 200 proves
+# the key was injected at the gateway, not by the keyless assistant.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stub-llm
+  namespace: patch-playground
+  labels:
+    app: stub-llm
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: stub-llm }
+  template:
+    metadata:
+      labels:
+        app: stub-llm
+        app.kubernetes.io/part-of: agent-framework-playground
+    spec:
+      containers:
+        - name: stub-llm
+          image: ghcr.io/milo-os/assistant-streamco
+          imagePullPolicy: IfNotPresent
+          command: ["node", "/config/stub-llm.mjs"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: STUB_PORT
+              value: "8080"
+            - name: STUB_MODEL
+              value: "patch-stub-v1"
+            - name: STUB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: stub-llm-apikey
+                  key: apiKey
+          volumeMounts:
+            - name: src
+              mountPath: /config
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+      volumes:
+        - name: src
+          configMap:
+            name: stub-llm-src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stub-llm
+  namespace: patch-playground
+  labels:
+    app: stub-llm
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  selector: { app: stub-llm }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

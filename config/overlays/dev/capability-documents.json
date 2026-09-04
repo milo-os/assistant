@@ -1,0 +1,52 @@
+[
+  {
+    "apiVersion": "services.miloapis.com/v1alpha1",
+    "kind": "AgentBinding",
+    "metadata": {
+      "name": "streamco-playground-binding",
+      "namespace": "demo-project"
+    },
+    "spec": {
+      "serviceRef": { "name": "streaming-streamco-example" },
+      "serviceName": "streaming.streamco.example",
+      "serviceAgentRef": { "name": "streamco-streaming-agent" },
+      "configurationVersion": "v1-playground",
+      "reportingProject": "streamco-platform",
+      "knowledge": {
+        "concepts": [
+          { "gvk": { "group": "streaming.streamco.example", "kind": "Stream" }, "summary": "A live media stream" }
+        ]
+      },
+      "tools": {
+        "mcpServers": [
+          {
+            "name": "streamco",
+            "endpoint": "http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local:80/mcp",
+            "toolSelector": {
+              "include": [
+                "streamco-backend__streams_list",
+                "streamco-backend__streams_get",
+                "streamco-backend__pipeline_diagnose"
+              ]
+            },
+            "mutating": []
+          }
+        ]
+      },
+      "skills": [
+        {
+          "name": "lag-triage",
+          "description": "Step-by-step procedure for triaging pipeline consumer lag",
+          "source": "http://streamco.patch-playground.svc.cluster.local:7810/runbooks/lag.md"
+        }
+      ],
+      "authority": {
+        "reads": [{ "gvk": { "group": "streaming.streamco.example", "kind": "*" } }],
+        "maxTaskDurationSeconds": 60
+      }
+    },
+    "status": {
+      "conditions": [{ "type": "Ready", "status": "True", "reason": "AllAgentGatesOpen" }]
+    }
+  }
+]

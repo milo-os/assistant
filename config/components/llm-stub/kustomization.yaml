@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - stub-llm.yaml
+  - llm-backend.yaml
+  - aigatewayroute.yaml
+# NOTE: no disableNameSuffixHash here, deliberately — the stub reads its
+# script at process start, so the content-hash suffix (and kustomize's
+# automatic name-reference rewrite in the Deployment) is what rolls the pod
+# when the script changes. The capability fixture ConfigMap keeps a stable
+# name instead: the assistant re-reads it per conversation, so kubelet's
+# live mount refresh suffices there.
+configMapGenerator:
+  - name: stub-llm-src
+    namespace: patch-playground
+    files:
+      - stub-llm.mjs
+    options:
+      labels:
+        app.kubernetes.io/part-of: agent-framework-playground

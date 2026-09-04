@@ -1,0 +1,41 @@
+# Fronts StreamCo's MCP endpoint and enforces the reviewed tool allow-list AT
+# THE GATEWAY. toolSelector.include lists exactly the three sanctioned tools;
+# StreamCo also exposes `streams_delete`, which is absent from this list and so
+# is neither listed nor callable through the gateway — while remaining reachable
+# on a direct-to-StreamCo connection (the enforcement control for proof P3).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: streamco-backend
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  endpoints:
+    - fqdn:
+        hostname: streamco.patch-playground.svc.cluster.local
+        port: 7810
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: MCPRoute
+metadata:
+  name: patch-mcp
+  namespace: patch-playground
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  parentRefs:
+    - name: patch-playground
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  path: "/mcp"
+  backendRefs:
+    - name: streamco-backend
+      kind: Backend
+      group: gateway.envoyproxy.io
+      path: "/mcp"
+      toolSelector:
+        include:
+          - streams_list
+          - streams_get
+          - pipeline_diagnose

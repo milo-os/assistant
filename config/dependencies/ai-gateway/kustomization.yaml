@@ -1,0 +1,10 @@
+# Flux sources + releases for the Envoy AI Gateway. Applied by dev:deploy
+# Stage 1 with `kubectl apply -k`. NOTE: eg-helmrelease-extension.patch.yaml is
+# deliberately NOT listed here — it is a JSON-merge patch applied to the
+# test-infra-owned envoy-gateway HelmRelease (a live-object override), not a
+# standalone resource.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - oci-repository.yaml
+  - helm-release.yaml

@@ -1,0 +1,14 @@
+# The `dev` overlay (gateway/stub model mode) plus the opt-in observability
+# wiring (config/components/observability): OTEL_EXPORTER_OTLP_ENDPOINT
+# pointed at the telemetry-system OTel Collector, and a ServiceMonitor for
+# the assistant's /metrics. Requires
+# `task test-infra:install-observability` to have been run first — with no
+# collector present, OTLP export just fails silently at export time (see
+# internal/tracing) rather than blocking startup, but nothing lands in
+# Tempo/Victoria Metrics until the stack exists.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+components:
+  - ../../components/observability
