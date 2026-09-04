@@ -211,3 +211,61 @@ func (in *ConversationStatus) DeepCopy() *ConversationStatus {
 	in.DeepCopyInto(out)
 	return out
 }
+
+// DeepCopyInto is a deepcopy function, copying the receiver into out.
+func (in *AssistantEndpoint) DeepCopyInto(out *AssistantEndpoint) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Spec = in.Spec
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new AssistantEndpoint.
+func (in *AssistantEndpoint) DeepCopy() *AssistantEndpoint {
+	if in == nil {
+		return nil
+	}
+	out := new(AssistantEndpoint)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject is a deepcopy function, copying the receiver, creating a new runtime.Object.
+func (in *AssistantEndpoint) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver into out.
+func (in *AssistantEndpointList) DeepCopyInto(out *AssistantEndpointList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		l := make([]AssistantEndpoint, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&l[i])
+		}
+		out.Items = l
+	}
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new AssistantEndpointList.
+func (in *AssistantEndpointList) DeepCopy() *AssistantEndpointList {
+	if in == nil {
+		return nil
+	}
+	out := new(AssistantEndpointList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject is a deepcopy function, copying the receiver, creating a new runtime.Object.
+func (in *AssistantEndpointList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}

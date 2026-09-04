@@ -44,3 +44,13 @@ func (in CapabilityGapReportList) OpenAPIModelName() string {
 func (in CapabilityGapReportStatus) OpenAPIModelName() string {
 	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReportStatus"
 }
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in AssistantEndpoint) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.AssistantEndpoint"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in AssistantEndpointList) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.AssistantEndpointList"
+}
