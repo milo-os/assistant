@@ -6,6 +6,36 @@
 package v1alpha1
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
+func (in AssistantEndpoint) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.AssistantEndpoint"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in AssistantEndpointList) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.AssistantEndpointList"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in AssistantEndpointSpec) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.AssistantEndpointSpec"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in CapabilityGapReport) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReport"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in CapabilityGapReportList) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReportList"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in CapabilityGapReportStatus) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReportStatus"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
 func (in Conversation) OpenAPIModelName() string {
 	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.Conversation"
 }
@@ -28,29 +58,4 @@ func (in ConversationMessages) OpenAPIModelName() string {
 // OpenAPIModelName returns the OpenAPI model name for this type.
 func (in ConversationStatus) OpenAPIModelName() string {
 	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.ConversationStatus"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
-func (in CapabilityGapReport) OpenAPIModelName() string {
-	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReport"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
-func (in CapabilityGapReportList) OpenAPIModelName() string {
-	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReportList"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
-func (in CapabilityGapReportStatus) OpenAPIModelName() string {
-	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.CapabilityGapReportStatus"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
-func (in AssistantEndpoint) OpenAPIModelName() string {
-	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.AssistantEndpoint"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
-func (in AssistantEndpointList) OpenAPIModelName() string {
-	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.AssistantEndpointList"
 }
