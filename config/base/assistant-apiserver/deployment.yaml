@@ -94,6 +94,7 @@ spec:
             - --authentication-skip-lookup=$(AUTHENTICATION_SKIP_LOOKUP)
             - --authentication-tolerate-lookup-failure=$(AUTHENTICATION_TOLERATE_LOOKUP_FAILURE)
             - --requestheader-client-ca-file=$(REQUESTHEADER_CLIENT_CA_FILE)
+            - --requestheader-uid-headers=$(REQUESTHEADER_UID_HEADERS)
             - --authorization-always-allow-paths=$(AUTHORIZATION_ALWAYS_ALLOW_PATHS)
           ports:
             - containerPort: 8443
@@ -130,9 +131,23 @@ spec:
               value: "false"
             - name: AUTHENTICATION_TOLERATE_LOOKUP_FAILURE
               value: "false"
-            # Empty means "discover it from the extension-apiserver-authentication
-            # configmap on whichever cluster the kubeconfigs above point at".
+            # Empty means "discover the whole requestheader config from the
+            # extension-apiserver-authentication configmap on whichever cluster
+            # the kubeconfigs above point at". Setting it switches to the static
+            # config, which is the only way to name the UID header below —
+            # the discovered config supplies no UID header at all.
             - name: REQUESTHEADER_CLIENT_CA_FILE
+              value: ""
+            # Header carrying the caller's UID from the aggregator. Empty by
+            # default because it takes effect only alongside the CA file above,
+            # and because the header is a trusted input: naming it while
+            # trusting a CA that is not the aggregator's own would let any
+            # holder of a cert from that CA assert someone else's identity.
+            #
+            # Milo's OpenFGA authorizer rejects a SubjectAccessReview with no
+            # UID outright, so behind Milo this is required, not optional:
+            # without it every request we serve is denied.
+            - name: REQUESTHEADER_UID_HEADERS
               value: ""
             # Unauthenticated paths. A variable so a deployment can add
             # /metrics for a scrape that cannot present credentials.
