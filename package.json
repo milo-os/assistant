@@ -1,0 +1,11 @@
+{
+  "name": "@milo-os/assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Patch — standalone A2A assistant backend service (assistant.miloapis.com). Go service; build with `go build ./cmd/assistant` and `./cmd/patch`. The e2e acceptance harness (e2e/) is the only remaining bun/Node component — see e2e/package.json.",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/milo-os/assistant.git"
+  }
+}

@@ -4,3 +4,26 @@ dist/
 .env
 .env.local
 
+# Go build artifacts: `go build ./cmd/patch` / `./cmd/assistant` drop these
+# binaries in the repo root (cwd). The e2e harness builds into e2e/out/bin.
+/patch
+/assistant
+
+# Playground bring-up artifacts (rendered manifests, port-forward pidfiles,
+# host-compiled binary staged for the image build).
+/deploy/.build/
+/deploy/playground/.run/
+
+
+# Task dev-env machinery
+.test-infra/
+/bin/
+deploy/.build/
+.task/
+
+# Local Anthropic API key for MODEL_MODE=anthropic (dev-anthropic overlay).
+# LIVE credential — must never be committed.
+/key.txt
+
+# Stray kind binary occasionally downloaded to the repo root.
+/kind
