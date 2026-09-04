@@ -1,0 +1,57 @@
+# AssistantEndpoint — the resource that tells a client where the assistant is.
+#
+# `datumctl patch` reads this instead of requiring PATCH_URL: the control-plane
+# address names Milo, not the assistant, so the service publishes its own
+# address as a resource in its own API group
+# (internal/apiserver/registry/endpoint implements rest.Getter and rest.Lister,
+# and nothing else — no create/update/delete/watch storage exists, so `get` and
+# `list` are the whole surface).
+#
+# Registering it here is not optional bookkeeping. Milo's authorizer looks up a
+# ProtectedResource by spec.serviceRef.name + spec.plural and FAILS CLOSED when
+# there is none, and it separately rejects any verb not listed in
+# spec.permissions. Without this file the first `datumctl patch` against a live
+# control plane 403s on discovery, and the message reads like the caller is
+# missing a grant rather than like the resource was never registered.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: assistant.miloapis.com-assistantendpoints
+spec:
+  serviceRef:
+    name: "assistant.miloapis.com"
+  kind: AssistantEndpoint
+  plural: assistantendpoints
+  singular: assistantendpoint
+  permissions:
+    - get
+    - list
+  # Parents are declared even though the resource is CLUSTER-scoped, unlike
+  # conversations and capabilitygapreports.
+  #
+  # spec.parentResources is not the API scope — it is the IAM inheritance graph.
+  # Cluster scope only means the request carries no namespace; it says nothing
+  # about which object a grant may be bound to. Milo's authorizer decides scope
+  # from the caller's parent-context extra (iam.miloapis.com/parent-api-group,
+  # /parent-type, /parent-name), not from the request path — see the note in
+  # internal/auth/sar.go.
+  #
+  # That matters here because callers reach this resource through a project
+  # control plane, the same context they already read conversations from, so the
+  # review arrives project-scoped. In that path auth-provider-openfga runs the
+  # permission check against the *Project* object, and a parent type only carries
+  # the permissions of its declared descendants. Omit Project below and
+  # assistantendpoints.get is not a relation Project has: the check errors out
+  # and fails closed, so the conversation-viewer grant added alongside this file
+  # would silently never apply. Organization is listed for the same reason
+  # conversations lists it — an org-level grant should reach the projects under it.
+  #
+  # The platform root is always an implicit parent (auth-provider-openfga appends
+  # it to every resource), so a ResourceKind/root-level binding still grants this
+  # for a caller with no project context at all. Listing Project and Organization
+  # only adds paths; it removes none.
+  parentResources:
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Organization
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Project

@@ -4,3 +4,4 @@ kind: Component
 resources:
   - conversations.yaml
   - capabilitygapreports.yaml
+  - assistantendpoints.yaml
