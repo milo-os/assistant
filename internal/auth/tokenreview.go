@@ -205,6 +205,7 @@ func (a *tokenReviewAuthenticator) Authenticate(ctx context.Context, bearerToken
 		Subject: username,
 		UID:     status.User.UID,
 		Groups:  status.User.Groups,
+		Extra:   status.User.Extra,
 	}
 	a.cache.store(bearerToken, principal, a.now())
 	return principal, nil

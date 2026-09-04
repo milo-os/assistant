@@ -38,6 +38,9 @@ type Principal struct {
 	// grant. Carry the whole identity through to the authorization call.
 	UID    string
 	Groups []string
+	// Extra is whatever additional context the control plane attached to the
+	// identity. Carried through to authorization rather than dropped.
+	Extra map[string][]string
 }
 
 // Error is an authentication (401) or authorization (403) failure.

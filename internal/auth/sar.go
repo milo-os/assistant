@@ -40,6 +40,21 @@ const (
 	// swept first, then one live entry is evicted to make room.
 	maxSARCacheEntries = 4096
 
+	// Parent-context keys. Milo's OpenFGA authorizer decides the SCOPE of a
+	// review from these, not from the request path or the namespace: its
+	// extractParentContext reads them off the subject's extra, and a review
+	// without all three falls through to cluster scope, where a project-scoped
+	// resource is denied no matter what has been granted.
+	// (milo-os/openfga-provider internal/webhook/subjectaccessreview_authorizer.go)
+	parentAPIGroupExtraKey = "iam.miloapis.com/parent-api-group"
+	parentKindExtraKey     = "iam.miloapis.com/parent-type"
+	parentNameExtraKey     = "iam.miloapis.com/parent-name"
+
+	// projectAPIGroup and projectKind name the parent a conversation lives
+	// under: the review always asks about one project.
+	projectAPIGroup = "resourcemanager.miloapis.com"
+	projectKind     = "Project"
+
 	// sarPath is the SubjectAccessReview endpoint, relative to the project
 	// control plane it is addressed to.
 	sarPath = "/apis/authorization.k8s.io/v1/subjectaccessreviews"
@@ -88,6 +103,9 @@ type SubjectAccessReviewSpec struct {
 	// otherwise-valid grant evaluate as "not allowed".
 	UID    string   `json:"uid,omitempty"`
 	Groups []string `json:"groups,omitempty"`
+	// Extra carries the parent-resource context that tells Milo which scope to
+	// evaluate the review in. See parentExtra.
+	Extra map[string][]string `json:"extra,omitempty"`
 }
 
 // ResourceAttributes scopes the access check to a specific verb/group/resource
@@ -246,6 +264,7 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 			User:   principal.Subject,
 			UID:    principal.UID,
 			Groups: principal.Groups,
+			Extra:  parentExtra(principal.Extra, projectName),
 			ResourceAttributes: &ResourceAttributes{
 				Namespace: projectName,
 				Verb:      a.verb,
@@ -453,4 +472,27 @@ func statusEvaluationError(s *SubjectAccessReviewStatus) string {
 		return ""
 	}
 	return s.EvaluationError
+}
+
+// parentExtra builds the subject extra that scopes a review to one project.
+//
+// Milo reads the parent resource from the subject's extra and evaluates the
+// review in that scope. All three keys are required — extractParentContext
+// returns nil unless every one is present with exactly one value — and without
+// them the review is answered at cluster scope, which denies a project-scoped
+// resource regardless of any grant.
+//
+// The caller's own extra from the TokenReview is carried through underneath, so
+// context the control plane attached to the identity is not silently dropped;
+// the parent keys are set last because they describe the question being asked,
+// not the caller.
+func parentExtra(principalExtra map[string][]string, projectName string) map[string][]string {
+	extra := make(map[string][]string, len(principalExtra)+3)
+	for k, v := range principalExtra {
+		extra[k] = v
+	}
+	extra[parentAPIGroupExtraKey] = []string{projectAPIGroup}
+	extra[parentKindExtraKey] = []string{projectKind}
+	extra[parentNameExtraKey] = []string{projectName}
+	return extra
 }
