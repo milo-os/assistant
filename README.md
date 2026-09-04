@@ -81,25 +81,45 @@ go run ./cmd/patch conversations show <context-id> --project demo-project
 
 ## Documentation
 
-- [**Product & architecture**](docs/product-architecture.md) — what Patch
-  is, the C4 context/container diagrams, and the deployment views.
-- [**API & consumers**](docs/api.md) — the A2A v1.0 wire, the JSON-RPC
-  methods, and the `patch` CLI.
-- [**Capabilities**](docs/capabilities.md) — the capability-document
-  schema (knowledge, tools, skills) and the provider API.
-- [**Conversations & metering**](docs/conversations-and-metering.md) —
-  durable multi-turn memory and the usage CloudEvents.
-- [**Configuration & auth**](docs/configuration.md) — environment
-  variables, model modes, TokenReview / SubjectAccessReview.
-- [**Development**](docs/development.md) — run it, repo layout, the dev
-  environment, and tests.
-- [**Deployment**](docs/deployment.md) — dev vs. production posture; the
-  production overlay lives in
-  [`config/overlays/production/`](config/overlays/production/).
+Start with the [architecture overview](docs/architecture/README.md); it indexes
+every surface below.
 
-The platform-wide design (CRDs, entitlement projection, the AI gateway
-data plane) is in the
-[AI Agent Framework enhancement](https://github.com/datum-cloud/enhancements/tree/main/enhancements/platform/ai-agent-framework).
+**Architecture**
+
+- [Conversation turn](docs/architecture/conversation-turn.md) — the path a
+  question takes, from request to answer.
+- [Capabilities](docs/architecture/capabilities.md) — how a provider's
+  knowledge, tools, and skills reach a project.
+- [Identity and access](docs/architecture/identity-and-access.md) — who is
+  calling, and whether they may act on a project.
+- [Conversation storage](docs/architecture/conversation-storage.md) — durable
+  memory, compaction, and the read view.
+- [Metering](docs/architecture/metering.md) — how usage reaches billing.
+- [Model providers](docs/architecture/model-providers.md) — staying independent
+  of any one model vendor.
+- [Observability](docs/architecture/observability.md) — what the service reports
+  about itself.
+
+**Components**
+
+- [Assistant](docs/components/assistant.md) — the service that runs
+  conversations.
+- [Assistant apiserver](docs/components/assistant-apiserver.md) — conversations
+  as Kubernetes resources.
+
+**Reference and guides**
+
+- [API and consumers](docs/api.md) — the A2A wire, JSON-RPC methods, and the
+  `patch` CLI.
+- [Capability reference](docs/capability-reference.md) — the document schema and
+  provider API.
+- [Configuration](docs/configuration.md) — environment variables and model modes.
+- [Development](docs/development.md) — running the service locally.
+- [Deployment](docs/deployment.md) — dev and production posture.
+- [Operations](docs/operations/observability.md) — dashboards, alerts, and SLOs.
+
+Design records for shipped work live in
+[docs/enhancements](docs/enhancements/).
 
 ## Status
 

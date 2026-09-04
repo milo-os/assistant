@@ -1,10 +1,17 @@
+---
+status: implemented
+---
+
 # Conversation history summarization
+
+> Design record. It describes the decision as it was taken; the shipped
+> behavior is documented under [docs/architecture](../architecture/README.md).
 
 ## Context
 
 `internal/history` replays a conversation's prior turns on every message in
 the same `(project, contextId)`, so a follow-up is answered with context. The
-replay is bounded by [`Truncate`](../internal/history/history.go) — it walks
+replay is bounded by [`Truncate`](../../internal/history/history.go) — it walks
 the stored turns newest-first, accumulating an estimated token cost, and cuts
 at the first turn that would overflow `HistoryTokenBudget` (default 6000
 tokens, see `DefaultHistoryTokenBudget` in `internal/agent/conversation.go`).

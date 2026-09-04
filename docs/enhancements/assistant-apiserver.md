@@ -1,4 +1,11 @@
+---
+status: implemented
+---
+
 # Conversation aggregated apiserver — design & build plan
+
+> Design record. It describes the decision as it was taken; the shipped
+> behavior is documented under [docs/architecture](../architecture/README.md).
 
 Status: **All phases complete.** Phase 1 (API types + scheme, `dd63ecd`), Phases 2–4
 (bespoke REST + apiserver binary, config/dev-overlay wiring, kubectl-based CLI) live-verified
@@ -9,7 +16,7 @@ This is the implementation spec for exposing conversations as a Kubernetes KRM
 resource via a **milo aggregated API server**, so milo users authenticate with
 their normal k8s identity and can `list`/`get`/reopen conversations under
 platform authz. It fulfils the item already noted in
-[`product-architecture.md`](./product-architecture.md): *"Conversation as a KRM
+[`product-architecture.md`](../architecture/README.md): *"Conversation as a KRM
 resource via an aggregated apiserver, messages behind a subresource, so the
 portal/CLI can list and reopen conversations under platform authz."*
 

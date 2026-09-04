@@ -49,6 +49,6 @@ What the production overlay establishes, at a glance:
   (503 until Postgres and, in gateway mode, the model gateway are reachable).
 - **Metrics** `/metrics` (Prometheus): request rate/latency/in-flight,
   task-store and readiness errors. Billing usage is a separate CloudEvents
-  stream — see [conversations-and-metering.md](conversations-and-metering.md).
+  stream — see [conversations-and-metering.md](architecture/metering.md).
 - **Logs** are structured JSON with a per-request id (`X-Request-Id` honored or
   minted); prompt/PII content is never logged at info level.
