@@ -3,7 +3,7 @@
 # turns without being able to spend model budget starting new ones.
 #
 # assistantendpoints.get/list rides along with the read side rather than with
-# the creator role: `datumctl patch` calls it first, before any conversation
+# the creator role: `datumctl assistant` calls it first, before any conversation
 # exists, to discover the service's address. Withholding it from a viewer would
 # leave them able to read history only if someone told them the hostname out of
 # band — which is the problem the endpoint resource exists to remove. Reading it

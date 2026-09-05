@@ -1,6 +1,6 @@
 // Package patchcli is the Datum Cloud assistant (A2A) client shared by the two
 // binaries that ship it: `patch` (cmd/patch, the standalone CLI the e2e harness
-// drives) and `datumctl patch` (cmd/milo-patch, the datumctl plugin). It is
+// drives) and `datumctl assistant` (cmd/milo-assistant, the datumctl plugin). It is
 // a thin client over the official a2a-go client, proving the "the service is
 // just one client away" architecture with a second consumer.
 //
