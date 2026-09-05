@@ -85,6 +85,10 @@ type Conversation struct {
 	CreatedAt    time.Time
 	LastActiveAt time.Time
 	TurnCount    int64
+	// Title is what the conversation is about: the opening user message,
+	// collapsed to one line and cut to MaxTitleLen runes. Empty when the
+	// conversation has no ordinary user turn (only a compaction summary).
+	Title string
 }
 
 // Lister lists a project's conversations. It is a separate interface from
@@ -93,6 +97,19 @@ type Conversation struct {
 type Lister interface {
 	ListConversations(ctx context.Context, projectName string, limit int) ([]Conversation, error)
 }
+
+// firstUserMessageSQL is the correlated subquery both conversation reads use
+// to fetch the opening user message for [Conversation.Title]: the lowest-seq
+// user row that is not the compaction marker (after Compact, seq 1 is the
+// summary turn's synthetic user row). It walks the (project, context, seq)
+// primary key, so it costs one index probe per listed conversation, and it
+// is folded to a title in Go by [TitleOf] rather than in SQL so the two
+// stores truncate identically.
+const firstUserMessageSQL = `COALESCE((
+		SELECT m.content FROM messages m
+		WHERE m.project_name = c.project_name AND m.context_id = c.context_id
+		  AND m.role = 'user' AND m.content <> '` + summaryUserMarker + `'
+		ORDER BY m.seq LIMIT 1), '')`
 
 // PostgresStore is a durable [Store] on PostgreSQL. Safe for concurrent use;
 // concurrent appends to the same conversation serialize on the conversation
@@ -230,16 +247,19 @@ func (s *PostgresStore) GetConversation(ctx context.Context, projectName, contex
 	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
 	defer cancel()
 	var c Conversation
+	var opening string
 	err := s.pool.QueryRow(ctx,
-		`SELECT project_name, context_id, created_at, last_active_at, turn_count
-		 FROM conversations WHERE project_name = $1 AND context_id = $2`,
-		projectName, contextID).Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount)
+		`SELECT c.project_name, c.context_id, c.created_at, c.last_active_at, c.turn_count,
+		        `+firstUserMessageSQL+`
+		 FROM conversations c WHERE c.project_name = $1 AND c.context_id = $2`,
+		projectName, contextID).Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Conversation{}, ErrConversationNotFound
 	}
 	if err != nil {
 		return Conversation{}, fmt.Errorf("conversation store: get conversation: %w", err)
 	}
+	c.Title = TitleOf(opening)
 	return c, nil
 }
 
@@ -452,9 +472,10 @@ func (s *PostgresStore) ListConversations(ctx context.Context, projectName strin
 		limit = 100
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT project_name, context_id, created_at, last_active_at, turn_count
-		 FROM conversations WHERE project_name = $1
-		 ORDER BY last_active_at DESC LIMIT $2`,
+		`SELECT c.project_name, c.context_id, c.created_at, c.last_active_at, c.turn_count,
+		        `+firstUserMessageSQL+`
+		 FROM conversations c WHERE c.project_name = $1
+		 ORDER BY c.last_active_at DESC LIMIT $2`,
 		projectName, limit)
 	if err != nil {
 		return nil, fmt.Errorf("conversation store: list conversations: %w", err)
@@ -464,9 +485,11 @@ func (s *PostgresStore) ListConversations(ctx context.Context, projectName strin
 	var out []Conversation
 	for rows.Next() {
 		var c Conversation
-		if err := rows.Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount); err != nil {
+		var opening string
+		if err := rows.Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening); err != nil {
 			return nil, fmt.Errorf("conversation store: scan conversation: %w", err)
 		}
+		c.Title = TitleOf(opening)
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {

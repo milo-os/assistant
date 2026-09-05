@@ -26,6 +26,9 @@ type ConversationStatus struct {
 	LastActiveAt metav1.Time
 	// MessageCount is the number of stored messages.
 	MessageCount int32
+	// Title is the conversation's opening user message, collapsed to one
+	// line and truncated — what the conversation is about, for listings.
+	Title string
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

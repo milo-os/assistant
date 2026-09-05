@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -84,6 +85,34 @@ const MaxSummaryTurnLen = 4000
 // compaction digest, never something a user actually typed. See
 // [IsSummaryTurn] and [NewSummaryTurn].
 const summaryUserMarker = "[conversation summary]"
+
+// MaxTitleLen caps [Conversation.Title] in runes: long enough to read what a
+// conversation was about in a list, short enough that a listing of a hundred
+// conversations stays a small payload.
+const MaxTitleLen = 120
+
+// TitleOf folds an opening user message into a [Conversation.Title]: internal
+// whitespace (including newlines) collapses to single spaces and the result
+// is cut to MaxTitleLen runes with an ellipsis. Empty in, empty out.
+func TitleOf(opening string) string {
+	s := strings.Join(strings.Fields(opening), " ")
+	r := []rune(s)
+	if len(r) <= MaxTitleLen {
+		return s
+	}
+	return string(r[:MaxTitleLen-1]) + "…"
+}
+
+// openingUserText returns the first ordinary (non-summary) turn's UserText,
+// or "" if the conversation holds only a compaction digest.
+func openingUserText(turns []Turn) string {
+	for _, t := range turns {
+		if !IsSummaryTurn(t) {
+			return t.UserText
+		}
+	}
+	return ""
+}
 
 // IsSummaryTurn reports whether t is a compaction digest (produced by
 // conversation summarization) rather than an ordinary user/assistant
@@ -256,6 +285,7 @@ func (s *MemoryStore) ListConversations(_ context.Context, projectName string, l
 			CreatedAt:    m.createdAt,
 			LastActiveAt: m.lastActiveAt,
 			TurnCount:    int64(len(turns)),
+			Title:        TitleOf(openingUserText(turns)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastActiveAt.After(out[j].LastActiveAt) })
@@ -280,6 +310,7 @@ func (s *MemoryStore) GetConversation(_ context.Context, projectName, contextID 
 		CreatedAt:    m.createdAt,
 		LastActiveAt: m.lastActiveAt,
 		TurnCount:    int64(len(s.turns[key])),
+		Title:        TitleOf(openingUserText(s.turns[key])),
 	}, nil
 }
 

@@ -541,6 +541,13 @@ func schema_pkg_apis_assistant_v1alpha1_ConversationStatus(ref common.ReferenceC
 							Format:      "int32",
 						},
 					},
+					"title": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Title is the conversation's opening user message, collapsed to one line and truncated — what the conversation is about, for listings.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},

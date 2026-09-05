@@ -68,7 +68,7 @@ A2A assistant service ──writes conversations/messages──> Postgres <─�
 ## API design
 
 - **Group/Version:** `assistant.miloapis.com/v1alpha1` (matches the group already used for SAR in `internal/auth/sar.go`).
-- **`Conversation`** — namespaced; **namespace == milo project** (maps to the existing `project_name` column). `metadata.name = context_id`, `creationTimestamp = created_at`. `status: { lastActiveAt, messageCount }`. No spec (born from chat).
+- **`Conversation`** — namespaced; **namespace == milo project** (maps to the existing `project_name` column). `metadata.name = context_id`, `creationTimestamp = created_at`. `status: { lastActiveAt, messageCount, title }` (`title` is the opening user message, one line, truncated — what the conversation is about, so a picker can show and search it without fetching every transcript). No spec (born from chat).
 - **`conversations/messages` subresource** → `ConversationMessages { items: []ConversationMessage{ seq, role, content, createdAt } }` — the transcript.
 - **Verbs (v1):** `list`, `get`, get-`messages`. (`watch`/`delete` later.)
 
