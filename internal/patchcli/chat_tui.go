@@ -3,10 +3,11 @@
 // the plain and interactive modes are untouched.
 //
 // Layout: a header, a scrollable transcript viewport, a status line (spinner
-// while the assistant works, else a hint), and a text input at the bottom, all
-// wrapped in a padded container. Assistant answers stream in live and are
-// rendered as markdown via glamour, so bold/bullets/tables come out formatted
-// rather than as raw `**`.
+// while the assistant works, else a hint), and a multi-line composer at the
+// bottom, all wrapped in a padded container. Assistant answers stream in live
+// and are rendered as markdown via glamour, so bold/bullets/tables come out
+// formatted rather than as raw `**`. The composer itself (its styling, prompt
+// history and paste chips) lives in chat_composer.go; this file owns its keys.
 //
 // Colors & contrast: Bubble Tea (not glamour) owns the OSC-11 terminal
 // background query — glamour querying the terminal itself would leak the
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	spin "charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -141,8 +143,9 @@ func newStyles(dark bool) styles {
 	}
 }
 
-// newInputStyles styles the text input itself. The bubbles defaults render text
-// and placeholder faint (nearly invisible on a cream bg), so override the
+// newInputStyles styles the picker's single-line search field (the chat's own
+// composer is a textarea — see newComposerStyles). The bubbles defaults render
+// text and placeholder faint (nearly invisible on a cream bg), so override the
 // foreground colors explicitly per background for text, placeholder, prompt,
 // and cursor.
 func newInputStyles(dark bool) textinput.Styles {
@@ -175,7 +178,7 @@ type chatModel struct {
 	token   TokenSource
 
 	vp       viewport.Model
-	ti       textinput.Model
+	ta       textarea.Model
 	sp       spin.Model
 	renderer *glamour.TermRenderer
 	st       styles
@@ -213,6 +216,27 @@ type chatModel struct {
 	// changes so a fresh prefix always starts at the top match.
 	suggestIndex int
 
+	// history is this project's past prompts, oldest last-in, shared by ↑/↓
+	// recall and ctrl+r search. histIdx == len(history) means "not recalling":
+	// histDraft then holds whatever the composer had when recall started, and
+	// histRecall the exact text the last recall put there (so an edit is
+	// detectable — see composerRecallable).
+	history    []string
+	histIdx    int
+	histDraft  string
+	histRecall string
+	histPath   string // "" when there was no config dir; recall stays in-session
+
+	// rsearch is the ctrl+r reverse search over history: rsearchQ is what has
+	// been typed into it and rsearchN how many matches back ctrl+r has stepped.
+	rsearch  bool
+	rsearchQ string
+	rsearchN int
+
+	// pastes holds the full text behind each "[Pasted text #N …]" chip in the
+	// composer, in chip order, expanded back into the message on submit.
+	pastes []string
+
 	termHeight int // last WindowSizeMsg height, so View can resize vp around a variable-height suggestion block
 
 	firstMessage string // sent automatically once, on first layout
@@ -229,10 +253,10 @@ func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, 
 
 	sp := spin.New(spin.WithSpinner(spin.Dot), spin.WithStyle(st.patch))
 
-	ti := textinput.New()
-	ti.Placeholder = "Message patch…"
-	ti.SetVirtualCursor(true)
-	ti.SetStyles(newInputStyles(false)) // provisional (light) until bg is learned
+	ta := newComposer(false) // provisional (light) until bg is learned
+
+	path := historyPath(project)
+	hist := loadHistory(path)
 
 	m := &chatModel{
 		ctx:           ctx,
@@ -243,9 +267,12 @@ func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, 
 		token:         token,
 		contextID:     contextID,
 		vp:            viewport.New(),
-		ti:            ti,
+		ta:            ta,
 		sp:            sp,
 		st:            st,
+		history:       hist,
+		histIdx:       len(hist),
+		histPath:      path,
 		firstMessage:  firstMessage,
 		resumeOnStart: resumeOnStart,
 		follow:        true,
@@ -283,7 +310,7 @@ func (m *chatModel) Init() tea.Cmd {
 	// the terminal's reply, so it never leaks into the text input. It's a
 	// Msg-returning func, so wrap it as a Cmd.
 	bgColor := func() tea.Msg { return tea.RequestBackgroundColor() }
-	return tea.Batch(m.ti.Focus(), textinput.Blink, bgColor)
+	return tea.Batch(m.ta.Focus(), textarea.Blink, bgColor)
 }
 
 func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -294,7 +321,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		m.dark = msg.IsDark()
 		m.st = newStyles(m.dark)
-		m.ti.SetStyles(newInputStyles(m.dark))
+		m.ta.SetStyles(newComposerStyles(m.dark))
 		if m.picker.open {
 			m.picker.search.SetStyles(newInputStyles(m.dark))
 		}
@@ -309,6 +336,16 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return m.onKey(msg)
+
+	case tea.PasteMsg:
+		// Bracketed paste is on by default (see newView), so a paste arrives
+		// whole rather than as a burst of keys. Only the composer takes them:
+		// the picker and the overlays are not places to paste into.
+		if m.picker.open || m.overlay != "" || m.rsearch {
+			return m, nil
+		}
+		m.onPaste(msg.Content)
+		return m, nil
 
 	case spin.TickMsg:
 		if !m.working && !m.picker.loading {
@@ -470,12 +507,26 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.overlay = ""
 		return m, nil
 	}
+	if m.rsearch {
+		return m.onSearchKey(msg)
+	}
 	switch msg.String() {
+	case "shift+enter", "ctrl+j", "alt+enter":
+		// The three ways terminals report "newline, don't send". shift+enter
+		// needs a terminal that reports modifiers on enter; ctrl+j (a bare LF)
+		// always gets through, which is why it's here.
+		return m, m.insertNewline()
 	case "enter":
+		// A backslash immediately before the cursor is the Claude Code
+		// convention for continuing onto a new line; it is consumed, not sent.
+		if m.backslashContinuation() {
+			m.ta, _ = m.ta.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+			return m, m.insertNewline()
+		}
 		if m.working {
 			return m, nil
 		}
-		text := strings.TrimSpace(m.ti.Value())
+		text := strings.TrimSpace(m.ta.Value())
 		if text == "" {
 			return m, nil
 		}
@@ -486,20 +537,24 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			text = matches[m.suggestIndex%len(matches)]
 		}
 		m.suggestIndex = 0
-		// /rename is the only command that takes an argument, and the input is
-		// a single line, so it can't be a case in the exact-match switch below.
+		// Chips expand into the real paste before anything else sees the text,
+		// so the transcript, the history file and the assistant all agree on
+		// what was sent. Commands carry no chips, so this is a no-op for them.
+		message := expandPasteChips(text, m.pastes)
+		m.recordHistory(message)
+		// /rename is the only command that takes an argument, so it can't be a case in the exact-match switch below.
 		if arg, ok := commandArg(text, "/rename"); ok {
-			m.ti.Reset()
+			m.resetComposer()
 			return m, m.startRename(arg)
 		}
 		switch text {
 		case "/quit", "/exit":
 			return m, tea.Quit
 		case "/resume":
-			m.ti.Reset()
+			m.resetComposer()
 			return m, m.openPicker()
 		case "/clear":
-			m.ti.Reset()
+			m.resetComposer()
 			m.contextID = ""
 			m.convName = ""
 			m.turns = nil
@@ -509,7 +564,7 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.rebuildViewport()
 			return m, nil
 		case "/compact":
-			m.ti.Reset()
+			m.resetComposer()
 			if m.contextID == "" {
 				m.turns = append(m.turns, m.st.subtle.Render("nothing to compact — no conversation yet"))
 				m.rebuildViewport()
@@ -520,15 +575,15 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			go m.compact()
 			return m, m.sp.Tick
 		case "/help":
-			m.ti.Reset()
+			m.resetComposer()
 			m.overlay = "help"
 			return m, nil
 		case "/status":
-			m.ti.Reset()
+			m.resetComposer()
 			m.overlay = "status"
 			return m, nil
 		case "/export":
-			m.ti.Reset()
+			m.resetComposer()
 			path, err := m.exportTranscript()
 			if err != nil {
 				m.turns = append(m.turns, m.st.err.Render("⚠ export failed: "+err.Error()))
@@ -538,15 +593,18 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.rebuildViewport()
 			return m, nil
 		}
-		m.ti.Reset()
-		return m, m.submit(text)
+		m.resetComposer()
+		return m, m.submit(message)
+	case "ctrl+r":
+		m.rsearch, m.rsearchQ, m.rsearchN = true, "", 0
+		return m, nil
 	case "tab":
 		// Complete to the highlighted suggestion without submitting — lets the
 		// user see/edit before running, and is a no-op when there's nothing to
 		// suggest (already exact, or not a "/" prefix at all).
 		if matches := m.currentSuggestions(); len(matches) > 0 {
-			m.ti.SetValue(matches[m.suggestIndex%len(matches)])
-			m.ti.CursorEnd()
+			m.ta.SetValue(matches[m.suggestIndex%len(matches)])
+			m.ta.MoveToEnd()
 		}
 		return m, nil
 	case "up", "down":
@@ -561,9 +619,19 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// Nothing suggested: scroll the transcript a line at a time. (This
-		// branch previously dropped the key — arrows carry no .Text and aren't
-		// editing keys, so the text input never saw them anyway.)
+		// A one-line composer holding nothing but (at most) the prompt the last
+		// recall put there is the shell case: ↑/↓ walk history. Several lines,
+		// or text the user has since edited, means the cursor moves instead.
+		if !m.composerRecallable() {
+			var cmd tea.Cmd
+			m.ta, cmd = m.ta.Update(msg)
+			return m, cmd
+		}
+		if m.recallHistory(msg.String() == "up") {
+			return m, nil
+		}
+		// Nothing left to recall: scroll the transcript a line at a time, the
+		// behavior these keys had before history existed.
 		if msg.String() == "up" {
 			m.scrollBy(func() { m.vp.ScrollUp(1) })
 		} else {
@@ -600,10 +668,172 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		var cmd tea.Cmd
-		m.ti, cmd = m.ti.Update(msg)
+		m.ta, cmd = m.ta.Update(msg)
 		m.suggestIndex = 0 // a new prefix invalidates the old highlighted index
 		return m, cmd
 	}
+}
+
+// insertNewline feeds the composer its own InsertNewline binding, so every key
+// we accept for "newline, don't send" lands on one code path.
+func (m *chatModel) insertNewline() tea.Cmd {
+	var cmd tea.Cmd
+	m.ta, cmd = m.ta.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	return cmd
+}
+
+// backslashContinuation reports whether the character just before the cursor is
+// a backslash — the marker that this Enter should break the line instead.
+func (m *chatModel) backslashContinuation() bool {
+	lines := strings.Split(m.ta.Value(), "\n")
+	row, col := m.ta.Line(), m.ta.Column()
+	if row < 0 || row >= len(lines) {
+		return false
+	}
+	r := []rune(lines[row])
+	return col > 0 && col <= len(r) && r[col-1] == '\\'
+}
+
+// resetComposer clears the input and everything that hangs off its contents:
+// the paste chips its text referred to, and the history cursor.
+func (m *chatModel) resetComposer() {
+	m.ta.Reset()
+	m.pastes = nil
+	m.histIdx = len(m.history)
+	m.histDraft = ""
+	m.histRecall = ""
+}
+
+// setComposer replaces the input with a recalled prompt and remembers it, so
+// composerRecallable can tell an untouched recall from something typed over it.
+func (m *chatModel) setComposer(s string) {
+	m.ta.SetValue(s)
+	m.ta.MoveToEnd()
+	m.histRecall = s
+}
+
+// composerRecallable reports whether ↑/↓ should walk history rather than move
+// the cursor: a one-line composer that is empty or still holds exactly what the
+// last recall put there.
+func (m *chatModel) composerRecallable() bool {
+	if m.ta.LineCount() > 1 {
+		return false
+	}
+	v := m.ta.Value()
+	return v == "" || v == m.histRecall
+}
+
+// recallHistory steps one entry older (or newer) and loads it into the
+// composer, reporting whether there was anything to step onto. Stepping past
+// the newest entry restores the draft the recall interrupted.
+func (m *chatModel) recallHistory(older bool) bool {
+	if older {
+		if m.histIdx <= 0 {
+			return false
+		}
+		if m.histIdx == len(m.history) {
+			m.histDraft = m.ta.Value()
+		}
+		m.histIdx--
+		m.setComposer(m.history[m.histIdx])
+		return true
+	}
+	if m.histIdx >= len(m.history) {
+		return false
+	}
+	m.histIdx++
+	if m.histIdx == len(m.history) {
+		m.setComposer(m.histDraft)
+		return true
+	}
+	m.setComposer(m.history[m.histIdx])
+	return true
+}
+
+// recordHistory appends a sent prompt, collapsing an immediate repeat the way a
+// shell does, and rewrites the per-project file. Persistence is best effort
+// (see saveHistory) — a session with nowhere to write still recalls in-memory.
+func (m *chatModel) recordHistory(s string) {
+	if s == "" {
+		return
+	}
+	if n := len(m.history); n > 0 && m.history[n-1] == s {
+		return
+	}
+	m.history = append(m.history, s)
+	if len(m.history) > maxHistoryEntries {
+		m.history = m.history[len(m.history)-maxHistoryEntries:]
+	}
+	saveHistory(m.histPath, m.history)
+}
+
+// onSearchKey drives the ctrl+r reverse search over history: enter accepts the
+// current match into the composer, esc leaves the composer untouched, and a
+// further ctrl+r steps to the next older match. The query and match are shown
+// on the row above the input (see searchBar).
+func (m *chatModel) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.rsearch = false
+		return m, nil
+	case "enter":
+		if hit := m.searchHit(); hit != "" {
+			m.setComposer(hit)
+		}
+		m.rsearch = false
+		return m, nil
+	case "ctrl+r":
+		if m.searchHitAt(m.rsearchN+1) != "" {
+			m.rsearchN++
+		}
+		return m, nil
+	case "backspace":
+		if r := []rune(m.rsearchQ); len(r) > 0 {
+			m.rsearchQ = string(r[:len(r)-1])
+			m.rsearchN = 0
+		}
+		return m, nil
+	}
+	if msg.Text != "" {
+		m.rsearchQ += msg.Text
+		m.rsearchN = 0 // a narrower query starts again from the newest match
+	}
+	return m, nil
+}
+
+// searchHitAt returns the (n+1)-th newest history entry containing the search
+// query, case-insensitively, or "" when there aren't that many matches.
+func (m *chatModel) searchHitAt(n int) string {
+	seen := 0
+	q := strings.ToLower(m.rsearchQ)
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if q != "" && !strings.Contains(strings.ToLower(m.history[i]), q) {
+			continue
+		}
+		if seen == n {
+			return m.history[i]
+		}
+		seen++
+	}
+	return ""
+}
+
+// searchHit is the entry ctrl+r has currently landed on.
+func (m *chatModel) searchHit() string { return m.searchHitAt(m.rsearchN) }
+
+// onPaste puts a paste into the composer, collapsing a big one to a chip that
+// expands again on submit so a wall of pasted text can't swallow the screen.
+func (m *chatModel) onPaste(text string) {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	if text == "" {
+		return
+	}
+	if !shouldChipPaste(text) {
+		m.ta.InsertString(text)
+		return
+	}
+	m.pastes = append(m.pastes, text)
+	m.ta.InsertString(pasteChipLabel(len(m.pastes), pasteLineCount(text)))
 }
 
 // isEditingKey reports whether a non-printable key (empty .Text) is still a
@@ -631,6 +861,40 @@ var helpText = []struct{ cmd, desc string }{
 	{"/status", "show the current project, conversation, and turn count"},
 	{"/help", "show this list"},
 	{"/quit, /exit", "leave"},
+}
+
+// composerHelpText documents the composer's keys for the /help overlay. The
+// ↑/↓ rule needs three rows because it is genuinely three-way: history first,
+// then the cursor once there is text to move through, then the transcript when
+// there is no history left to recall.
+var composerHelpText = []struct{ keys, desc string }{
+	{"enter", "send the message"},
+	{"shift+enter, ctrl+j, alt+enter", "new line without sending (a trailing \\ before enter does too)"},
+	{"↑/↓", "recall past prompts while the composer is one line and unedited"},
+	{"", "…move the cursor once it has several lines or you have edited it"},
+	{"", "…scroll the transcript when there is no history left to recall"},
+	{"ctrl+r", "search past prompts (enter accepts, esc cancels)"},
+	{"paste", "over 3 lines or 800 characters collapses to a chip, expanded on send"},
+	{"pgup/pgdn, mouse wheel", "scroll the transcript · esc jumps back to the latest"},
+}
+
+// helpKeyColumnWidth lines the composer help's descriptions up in a column.
+var helpKeyColumnWidth = func() int {
+	w := 0
+	for _, h := range composerHelpText {
+		if n := lipgloss.Width(h.keys); n > w {
+			w = n
+		}
+	}
+	return w
+}()
+
+// padHelpKeys right-pads a composer help key column entry.
+func padHelpKeys(keys string) string {
+	if pad := helpKeyColumnWidth - lipgloss.Width(keys); pad > 0 {
+		return keys + strings.Repeat(" ", pad)
+	}
+	return keys
 }
 
 // commandArg matches text against a slash command that takes the rest of the
@@ -686,13 +950,18 @@ func matchCommands(prefix string) []string {
 	return out
 }
 
-// currentSuggestions returns the slash-command completions for the input's
-// current value, or nil when there's nothing to suggest (not a "/" prefix,
-// no matches, or already an exact command). Used by both the suggestion bar
-// (View) and the tab/enter/up/down key handling (onKey), so they always
-// agree on what's being offered.
+// currentSuggestions returns the slash-command completions for the composer's
+// current value, or nil when there's nothing to suggest (more than one line,
+// not a "/" prefix, no matches, or already an exact command). Used by both the
+// suggestion bar (View) and the tab/enter/up/down key handling (onKey), so they
+// always agree on what's being offered.
 func (m *chatModel) currentSuggestions() []string {
-	text := strings.TrimSpace(m.ti.Value())
+	if m.ta.LineCount() > 1 {
+		// A command is a single line; a multi-line draft that happens to start
+		// with "/" is a message, and ↑/↓ there belong to the cursor.
+		return nil
+	}
+	text := strings.TrimSpace(m.ta.Value())
 	if !strings.HasPrefix(text, "/") || isExactCommand(text) {
 		return nil
 	}
@@ -737,6 +1006,45 @@ func (m *chatModel) suggestionBar() string {
 	return strings.Join(lines, "\n")
 }
 
+// composerBar renders the one variable-height region between the transcript
+// and the input box. Exactly one thing occupies it: slash-command suggestions
+// while a command is being typed, else the ctrl+r search line, else the paste
+// chip legend, else the blank row suggestionBar returns. Everything here is one
+// line unless suggestions are showing, so suggestionRows() still sizes it.
+func (m *chatModel) composerBar() string {
+	if len(m.currentSuggestions()) == 0 {
+		switch {
+		case m.rsearch:
+			return m.searchBar()
+		case len(m.pastes) > 0:
+			return m.chipBar()
+		}
+	}
+	return m.suggestionBar()
+}
+
+// searchBar is the ctrl+r filter line: the query and the best match so far.
+func (m *chatModel) searchBar() string {
+	hit := m.searchHit()
+	if hit == "" {
+		hit = "(no match)"
+	}
+	line := m.st.you.Render("(reverse-i-search)`"+m.rsearchQ+"`: ") +
+		m.st.hint.Render(strings.ReplaceAll(hit, "\n", " ⏎ "))
+	return lipgloss.NewStyle().MaxWidth(m.contentWidth()).Render(line)
+}
+
+// chipBar names the paste chips currently sitting in the composer. They are
+// shown here rather than tinted in place because the textarea styles its whole
+// buffer as one run, so a substring of it can't carry its own color.
+func (m *chatModel) chipBar() string {
+	labels := make([]string, 0, len(m.pastes))
+	for i, p := range m.pastes {
+		labels = append(labels, pasteChipLabel(i+1, pasteLineCount(p)))
+	}
+	return m.st.subtle.MaxWidth(m.contentWidth()).Render(strings.Join(labels, " ") + "  expands on send")
+}
+
 // commandColumnWidth is the widest slash command name, so descriptions in the
 // suggestion list line up in a column regardless of which commands the
 // current prefix has narrowed the list down to.
@@ -767,7 +1075,10 @@ func (m *chatModel) helpView() tea.View {
 	for _, h := range helpText {
 		b.WriteString("  " + m.st.you.Render(h.cmd) + "  " + m.st.subtle.Render(h.desc) + "\n")
 	}
-	b.WriteString("\n" + m.st.hint.Render("scroll  ↑/↓ · pgup/pgdn · mouse wheel · esc jumps to the latest"))
+	b.WriteString("\n" + m.st.header.Render("composing") + "\n")
+	for _, h := range composerHelpText {
+		b.WriteString("  " + m.st.you.Render(padHelpKeys(h.keys)) + "  " + m.st.subtle.Render(h.desc) + "\n")
+	}
 	b.WriteString("\n" + m.st.hint.Render("mouse reporting is on, so selecting text to copy needs option (macOS) or shift held"))
 	b.WriteString("\n\n" + m.st.hint.Render("any key to dismiss"))
 
@@ -844,7 +1155,7 @@ func (m *chatModel) View() tea.View {
 	if m.working {
 		status = m.sp.View() + " " + m.st.subtle.Render("thinking…")
 	} else {
-		status = m.st.hint.Render("enter to send · ↑/↓ pgup/pgdn scroll · / for commands (tab completes) · ctrl+c or /quit to leave")
+		status = m.st.hint.Render("enter sends · shift+enter newline · ↑/↓ history · ctrl+r search · / commands · /help · ctrl+c to leave")
 	}
 	// Scrolled off the bottom is a mode the user can get stuck in — say so, and
 	// say the way out. It replaces the usual hint, but never the spinner: not
@@ -862,9 +1173,10 @@ func (m *chatModel) View() tea.View {
 	// Suggestions sit directly above the box since they're about what you're
 	// typing; the status/hint line reads as a footer below the box instead of
 	// a caption above it. The suggestion block grows downward (vertically, so
-	// ↑/↓ tracks it) up to maxSuggestionRows; the viewport shrinks by the same
-	// amount so total layout height stays constant instead of pushing the
-	// input off-screen.
+	// ↑/↓ tracks it) up to maxSuggestionRows; the input box grows the same way
+	// up to maxComposerRows. The viewport shrinks by whatever the two take, so
+	// total layout height stays constant instead of pushing the input
+	// off-screen.
 	if h := m.viewportHeight(); h != m.vp.Height() {
 		m.vp.SetHeight(h)
 		if m.follow {
@@ -873,13 +1185,16 @@ func (m *chatModel) View() tea.View {
 			m.vp.SetYOffset(m.vp.YOffset()) // SetHeight doesn't re-clamp; this does
 		}
 	}
-	gap := m.suggestionBar()
+	// The hint is longer than a narrow terminal; clip it rather than let it wrap
+	// onto a second row the height budget hasn't allowed for.
+	status = lipgloss.NewStyle().MaxWidth(m.contentWidth()).Render(status)
+	gap := m.composerBar()
 	body := strings.Join([]string{
 		m.st.header.Render("patch") + m.st.subtle.Render("  ·  project "+m.project),
 		"", // gap below the header
 		m.vp.View(),
 		gap,
-		m.st.inputBox.Render(m.ti.View()),
+		m.st.inputBox.Render(m.ta.View()),
 		status,
 	}, "\n")
 
@@ -1007,14 +1322,27 @@ func (m *chatModel) suggestionRows() int {
 	return 1
 }
 
+// composerRows is how many text rows the input box currently needs: the
+// textarea's own dynamic height, clamped to what the layout budgets for it.
+func (m *chatModel) composerRows() int {
+	h := m.ta.Height()
+	if h < 1 {
+		return 1
+	}
+	if h > maxComposerRows {
+		return maxComposerRows
+	}
+	return h
+}
+
 // viewportHeight computes the transcript viewport's height from the last
 // known terminal height, chrome (outer box padding, header, header gap,
-// status line, bordered input), and the current suggestion block size.
+// status line, input border), and the two variable blocks under it: the
+// suggestion/search/chip row and the composer itself.
 func (m *chatModel) viewportHeight() int {
 	// outer box padding (2) + header (1) + header gap (1) + status (1) +
-	// bordered input (3 = border top/bottom + one text row) = 8 rows of fixed
-	// chrome; suggestionRows() adds the variable row(s) above the input.
-	h := m.termHeight - 8 - m.suggestionRows()
+	// input box border (2 = top/bottom) = 7 rows of fixed chrome.
+	h := m.termHeight - 7 - m.composerRows() - m.suggestionRows()
 	if h < 1 {
 		h = 1
 	}
@@ -1027,17 +1355,18 @@ func (m *chatModel) layout(width, height int) tea.Cmd {
 	m.width = width
 	m.termHeight = height
 	cw := m.contentWidth()
-	vpHeight := m.viewportHeight()
-	// Text field width: content width minus the input box's border (2 cols) and
-	// inner padding (2 cols) and the "> " prompt (2 cols), so the box stays
-	// within the content column.
-	tiWidth := cw - 6
-	if tiWidth < 10 {
-		tiWidth = 10
+	// Composer width: content width minus the input box's border (2 cols) and
+	// inner padding (2 cols), so the box stays within the content column.
+	// textarea.SetWidth accounts for its own "> " prompt on top of that.
+	taWidth := cw - 4
+	if taWidth < 10 {
+		taWidth = 10
 	}
+	// Width first: it re-wraps the composer, which is what its height (and so
+	// the viewport's) is computed from.
+	m.ta.SetWidth(taWidth)
 	m.vp.SetWidth(cw)
-	m.vp.SetHeight(vpHeight)
-	m.ti.SetWidth(tiWidth)
+	m.vp.SetHeight(m.viewportHeight())
 	m.renderer = newMarkdownRenderer(cw, m.dark) // glamour wrap stays at content width
 	m.ready = true
 	m.follow = true // the resize re-wraps every line, so the old offset is meaningless

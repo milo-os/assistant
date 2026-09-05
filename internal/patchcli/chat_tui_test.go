@@ -1,15 +1,16 @@
 package patchcli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
 	spin "charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
@@ -20,16 +21,16 @@ import (
 // with no a2a client and no kubeconfig — tests here only exercise key
 // handling and state transitions, never the goroutines that would touch the
 // network (stream) or shell out (kubectl), since those Cmds are captured but
-// never invoked.
+// never invoked. histPath is left empty, so nothing here writes a history file.
 func newTestModel() *chatModel {
 	st := newStyles(false)
-	ti := textinput.New()
-	ti.SetVirtualCursor(true)
-	ti.Focus()
+	ta := newComposer(false)
+	ta.SetWidth(80)
+	ta.Focus()
 	sp := spin.New(spin.WithSpinner(spin.Dot))
 	return &chatModel{
 		project:    "demo-project",
-		ti:         ti,
+		ta:         ta,
 		sp:         sp,
 		st:         st,
 		width:      120,
@@ -96,8 +97,8 @@ func TestTabCompletesWithoutSubmitting(t *testing.T) {
 	m := newTestModel()
 	typeText(t, m, "/re")
 	m.onKey(key(tea.KeyTab, ""))
-	if m.ti.Value() != "/resume" {
-		t.Fatalf("tab should complete input to /resume, got %q", m.ti.Value())
+	if m.ta.Value() != "/resume" {
+		t.Fatalf("tab should complete input to /resume, got %q", m.ta.Value())
 	}
 	if m.picker.open {
 		t.Fatal("tab must only complete, never execute")
@@ -373,8 +374,8 @@ func TestPickerTypingNarrowsListAndPreviewsTopMatch(t *testing.T) {
 	if cmd == nil || !m.picker.previewPending["conv-b"] {
 		t.Fatal("narrowing onto conv-b should kick off its preview fetch")
 	}
-	if strings.TrimSpace(m.ti.Value()) != "" {
-		t.Fatalf("picker typing must not leak into the chat input, got %q", m.ti.Value())
+	if strings.TrimSpace(m.ta.Value()) != "" {
+		t.Fatalf("picker typing must not leak into the chat input, got %q", m.ta.Value())
 	}
 
 	// Enter resumes the highlighted match, not the first item of the full list.
@@ -856,4 +857,388 @@ func containsAll(s string, subs ...string) bool {
 		}
 	}
 	return true
+}
+
+// ── composer ──────────────────────────────────────────────────
+
+// modKey builds a modified keypress (shift+enter, ctrl+j, …); those carry no
+// .Text, so onKey matches them by String() alone.
+func modKey(code rune, mod tea.KeyMod) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code, Mod: mod}
+}
+
+var (
+	shiftEnter = modKey(tea.KeyEnter, tea.ModShift)
+	altEnter   = modKey(tea.KeyEnter, tea.ModAlt)
+	ctrlJ      = modKey('j', tea.ModCtrl)
+	ctrlR      = modKey('r', tea.ModCtrl)
+	enterKey   = key(tea.KeyEnter, "")
+	upKey      = key(tea.KeyUp, "")
+	downKey    = key(tea.KeyDown, "")
+)
+
+// newSubmitTestModel is newTestModel wired up enough to survive a real submit:
+// that path spawns the streaming goroutine, which needs a client to call and a
+// program to send events to. Both contexts are already cancelled, so the turn
+// fails at once and its messages are dropped — these tests are about what
+// submit does to the composer, not about the turn.
+func newSubmitTestModel(t *testing.T) *chatModel {
+	t.Helper()
+	base := newTestServiceWith(t, &echoExecutor{})
+	ctx, cancel := context.WithCancel(context.Background())
+	client, err := newClient(ctx, base, StaticToken("good"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	m := newTestModel()
+	m.ctx = ctx
+	m.client = client
+	m.prog = tea.NewProgram(m, tea.WithContext(ctx))
+	m.layout(120, 40)
+	return m
+}
+
+func TestNewlineKeysInsertWithoutSending(t *testing.T) {
+	for name, k := range map[string]tea.KeyPressMsg{"shift+enter": shiftEnter, "ctrl+j": ctrlJ, "alt+enter": altEnter} {
+		m := newTestModel()
+		typeText(t, m, "one")
+		m.onKey(k)
+		typeText(t, m, "two")
+		if got := m.ta.Value(); got != "one\ntwo" {
+			t.Errorf("%s should break the line, got %q", name, got)
+		}
+		if len(m.raw) != 0 {
+			t.Errorf("%s must not send the message", name)
+		}
+	}
+}
+
+func TestTrailingBackslashBeforeEnterInsertsNewline(t *testing.T) {
+	m := newTestModel()
+	typeText(t, m, `one\`)
+	m.onKey(enterKey)
+	typeText(t, m, "two")
+	if got := m.ta.Value(); got != "one\ntwo" {
+		t.Fatalf("a trailing backslash should be consumed and break the line, got %q", got)
+	}
+	// A backslash anywhere but just before the cursor is ordinary text.
+	m2 := newSubmitTestModel(t)
+	typeText(t, m2, `a\b`)
+	m2.onKey(enterKey)
+	if len(m2.raw) != 1 || m2.raw[0].content != `a\b` {
+		t.Fatalf("enter should have sent the line verbatim, got %+v", m2.raw)
+	}
+}
+
+func TestEnterSendsAndClearsTheComposer(t *testing.T) {
+	m := newSubmitTestModel(t)
+	typeText(t, m, "one")
+	m.onKey(shiftEnter)
+	typeText(t, m, "two")
+	m.onKey(enterKey)
+
+	if len(m.raw) != 1 || m.raw[0].role != "user" || m.raw[0].content != "one\ntwo" {
+		t.Fatalf("enter should send the whole multi-line draft, got %+v", m.raw)
+	}
+	if m.ta.Value() != "" || m.ta.LineCount() != 1 {
+		t.Fatalf("the composer should be empty again, got %q over %d lines", m.ta.Value(), m.ta.LineCount())
+	}
+	if len(m.history) != 1 || m.history[0] != "one\ntwo" {
+		t.Fatalf("the sent prompt should be in history, got %v", m.history)
+	}
+}
+
+func TestComposerGrowsAndTakesRowsFromTheTranscript(t *testing.T) {
+	m := newTestModel()
+	m.layout(120, 40)
+	base := m.viewportHeight()
+	if m.composerRows() != 1 {
+		t.Fatalf("an empty composer is one row, got %d", m.composerRows())
+	}
+	m.onKey(ctrlJ)
+	if m.composerRows() != 2 || m.viewportHeight() != base-1 {
+		t.Fatalf("a second composer row should cost the viewport one: rows=%d height=%d (was %d)",
+			m.composerRows(), m.viewportHeight(), base)
+	}
+	for range maxComposerRows + 5 {
+		m.onKey(ctrlJ)
+	}
+	if m.composerRows() != maxComposerRows {
+		t.Fatalf("the composer should stop growing at %d rows, got %d", maxComposerRows, m.composerRows())
+	}
+	if m.viewportHeight() != base-(maxComposerRows-1) {
+		t.Fatalf("viewport height should track the cap, got %d", m.viewportHeight())
+	}
+}
+
+// ── prompt history ────────────────────────────────────────────
+
+func TestHistoryRecallWalksNewestFirstAndBack(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"first", "second"}
+	m.histIdx = len(m.history)
+
+	m.onKey(upKey)
+	if m.ta.Value() != "second" {
+		t.Fatalf("up should recall the newest prompt, got %q", m.ta.Value())
+	}
+	m.onKey(upKey)
+	if m.ta.Value() != "first" {
+		t.Fatalf("a second up should step further back, got %q", m.ta.Value())
+	}
+	m.onKey(downKey)
+	if m.ta.Value() != "second" {
+		t.Fatalf("down should step forward again, got %q", m.ta.Value())
+	}
+	m.onKey(downKey)
+	if m.ta.Value() != "" {
+		t.Fatalf("stepping past the newest entry should restore the draft, got %q", m.ta.Value())
+	}
+}
+
+func TestHistoryRecallKeepsTheDraftItInterrupted(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"older"}
+	m.histIdx = 1
+	m.setComposer("half typed") // as if recalled, so up/down still walk history
+	m.onKey(upKey)
+	if m.ta.Value() != "older" {
+		t.Fatalf("up should recall, got %q", m.ta.Value())
+	}
+	m.onKey(downKey)
+	if m.ta.Value() != "half typed" {
+		t.Fatalf("down should put the interrupted draft back, got %q", m.ta.Value())
+	}
+}
+
+func TestUpDownScrollWhenThereIsNoHistoryLeftToRecall(t *testing.T) {
+	m := newTestModel()
+	fillTranscript(m, 40)
+	m.onKey(upKey)
+	if m.follow {
+		t.Fatal("with no history, up should scroll the transcript")
+	}
+
+	m2 := newTestModel()
+	fillTranscript(m2, 40)
+	m2.history = []string{"only one"}
+	m2.histIdx = 1
+	m2.onKey(upKey) // consumes the one entry
+	if !m2.follow {
+		t.Fatal("a recall must not scroll the transcript")
+	}
+	m2.onKey(upKey) // nothing older left
+	if m2.follow {
+		t.Fatal("once history is exhausted, up should scroll again")
+	}
+	if m2.ta.Value() != "only one" {
+		t.Fatalf("scrolling must not disturb the recalled prompt, got %q", m2.ta.Value())
+	}
+}
+
+func TestUpDownMoveTheCursorOnceTheComposerIsMultiLineOrEdited(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"recallable"}
+	m.histIdx = 1
+	typeText(t, m, "a")
+	m.onKey(ctrlJ)
+	typeText(t, m, "b")
+	m.onKey(upKey)
+	if m.ta.Value() != "a\nb" {
+		t.Fatalf("up on a multi-line composer must not recall, got %q", m.ta.Value())
+	}
+	if m.ta.Line() != 0 {
+		t.Fatalf("up should have moved the cursor to the first line, got row %d", m.ta.Line())
+	}
+
+	m2 := newTestModel()
+	m2.history = []string{"recallable"}
+	m2.histIdx = 1
+	typeText(t, m2, "typed")
+	m2.onKey(upKey)
+	if m2.ta.Value() != "typed" {
+		t.Fatalf("up on an edited composer must not recall over it, got %q", m2.ta.Value())
+	}
+}
+
+func TestRecordHistoryDedupesAndPersists(t *testing.T) {
+	m := newTestModel()
+	m.histPath = filepath.Join(t.TempDir(), "history-demo.txt")
+	m.recordHistory("hello")
+	m.recordHistory("hello")
+	m.recordHistory("")
+	if len(m.history) != 1 {
+		t.Fatalf("a repeat of the last prompt should not be recorded twice, got %v", m.history)
+	}
+	if got := loadHistory(m.histPath); len(got) != 1 || got[0] != "hello" {
+		t.Fatalf("history should have been written, got %v", got)
+	}
+}
+
+func TestHistoryFileRoundTripsAwkwardPrompts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history-demo.txt")
+	want := []string{"one\ntwo", `a \ b`, `ends with \`, "plain"}
+	saveHistory(path, want)
+	got := loadHistory(path)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("history round trip = %q, want %q", got, want)
+	}
+}
+
+func TestHistoryIsPerProjectAndFailsQuietly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	path := historyPath("demo/project")
+	if path == "" {
+		t.Skip("no user config dir on this platform")
+	}
+	if !strings.HasSuffix(path, filepath.Join("patch", "history-demo_project.txt")) {
+		t.Fatalf("history path should be per project and filename-safe, got %q", path)
+	}
+	// Nothing written yet, and an unwritable path: both are silent no-ops.
+	if got := loadHistory(path); got != nil {
+		t.Fatalf("a missing history file should read as empty, got %v", got)
+	}
+	saveHistory("", []string{"dropped"})
+	if got := loadHistory(""); got != nil {
+		t.Fatalf("no path means no history, got %v", got)
+	}
+}
+
+// ── reverse search ────────────────────────────────────────────
+
+func TestReverseSearchFindsCyclesAndAccepts(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"deploy the api", "check quota for dfw", "deploy the worker"}
+	m.histIdx = len(m.history)
+
+	m.onKey(ctrlR)
+	if !m.rsearch {
+		t.Fatal("ctrl+r should open the search")
+	}
+	typeText(t, m, "DEPLOY") // case-insensitive
+	if got := m.searchHit(); got != "deploy the worker" {
+		t.Fatalf("the newest match should win, got %q", got)
+	}
+	if out := plain(m.composerBar()); !containsAll(out, "reverse-i-search", "DEPLOY", "deploy the worker") {
+		t.Fatalf("the search line should show the query and the match, got %q", out)
+	}
+	m.onKey(ctrlR)
+	if got := m.searchHit(); got != "deploy the api" {
+		t.Fatalf("another ctrl+r should step to the next older match, got %q", got)
+	}
+	m.onKey(ctrlR) // no third match; stay put
+	if got := m.searchHit(); got != "deploy the api" {
+		t.Fatalf("stepping past the last match should stay put, got %q", got)
+	}
+	m.onKey(enterKey)
+	if m.rsearch || m.ta.Value() != "deploy the api" {
+		t.Fatalf("enter should accept the match into the composer (open=%v value=%q)", m.rsearch, m.ta.Value())
+	}
+}
+
+func TestReverseSearchEscLeavesTheComposerAlone(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"deploy the api"}
+	m.histIdx = 1
+	typeText(t, m, "draft")
+	m.onKey(ctrlR)
+	typeText(t, m, "deploy")
+	m.onKey(key(tea.KeyEscape, ""))
+	if m.rsearch || m.ta.Value() != "draft" {
+		t.Fatalf("esc should cancel without touching the composer (open=%v value=%q)", m.rsearch, m.ta.Value())
+	}
+}
+
+func TestReverseSearchWithNoMatchSaysSo(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"deploy the api"}
+	m.histIdx = 1
+	m.onKey(ctrlR)
+	typeText(t, m, "zzz")
+	if out := plain(m.composerBar()); !strings.Contains(out, "(no match)") {
+		t.Fatalf("an unmatched query should say so, got %q", out)
+	}
+	m.onKey(enterKey)
+	if m.ta.Value() != "" {
+		t.Fatalf("accepting nothing should leave the composer empty, got %q", m.ta.Value())
+	}
+}
+
+// ── paste chips ───────────────────────────────────────────────
+
+func TestLargePasteCollapsesToChipsAndExpandsOnSubmit(t *testing.T) {
+	m := newSubmitTestModel(t)
+	first := strings.Repeat("alpha\n", 41) + "alpha" // 42 lines
+	second := "a\nb\nc\nd\ne"                        // 5 lines
+
+	m.Update(tea.PasteMsg{Content: first})
+	if got := m.ta.Value(); got != "[Pasted text #1 +42 lines]" {
+		t.Fatalf("a 42-line paste should collapse to a chip, got %q", got)
+	}
+	typeText(t, m, " and ")
+	m.Update(tea.PasteMsg{Content: second})
+	if got := m.ta.Value(); got != "[Pasted text #1 +42 lines] and [Pasted text #2 +5 lines]" {
+		t.Fatalf("a second paste should get its own chip, got %q", got)
+	}
+	if out := plain(m.composerBar()); !containsAll(out, "[Pasted text #1 +42 lines]", "[Pasted text #2 +5 lines]", "expands on send") {
+		t.Fatalf("the chip legend should name both pastes, got %q", out)
+	}
+
+	m.onKey(enterKey)
+	want := first + " and " + second
+	if len(m.raw) != 1 || m.raw[0].content != want {
+		t.Fatalf("chips should expand back into the sent message, got %q", m.raw[0].content)
+	}
+	if len(m.pastes) != 0 {
+		t.Fatalf("sending should retire the chips, got %v", m.pastes)
+	}
+}
+
+func TestSmallPasteGoesInVerbatim(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.PasteMsg{Content: "one\ntwo"})
+	if m.ta.Value() != "one\ntwo" || len(m.pastes) != 0 {
+		t.Fatalf("a small paste should land as text, got %q (%d chips)", m.ta.Value(), len(m.pastes))
+	}
+	m2 := newTestModel()
+	m2.Update(tea.PasteMsg{Content: strings.Repeat("x", pasteChipChars+1)})
+	if len(m2.pastes) != 1 || m2.ta.Value() != "[Pasted text #1 +1 line]" {
+		t.Fatalf("a long single line should still chip, got %q", m2.ta.Value())
+	}
+}
+
+func TestExpandPasteChipsLeavesUnknownChipsAlone(t *testing.T) {
+	got := expandPasteChips("[Pasted text #1 +2 lines] [Pasted text #9 +2 lines]", []string{"real"})
+	if got != "real [Pasted text #9 +2 lines]" {
+		t.Fatalf("an index with no paste behind it should stay literal, got %q", got)
+	}
+}
+
+// ── autocomplete alongside the composer ───────────────────────
+
+func TestSuggestionsOnlyEngageOnASingleSlashLine(t *testing.T) {
+	m := newTestModel()
+	typeText(t, m, "/res")
+	if len(m.currentSuggestions()) != 1 {
+		t.Fatal("setup: '/res' should suggest /resume alone")
+	}
+	m.onKey(ctrlJ) // now two lines
+	if got := m.currentSuggestions(); got != nil {
+		t.Fatalf("a multi-line draft is a message, not a command, got %v", got)
+	}
+	if out := plain(m.composerBar()); strings.Contains(out, "/resume") {
+		t.Fatalf("the suggestion bar should be gone too, got %q", out)
+	}
+}
+
+func TestHelpOverlayDocumentsTheComposerKeys(t *testing.T) {
+	m := newTestModel()
+	out := plain(m.helpView().Content)
+	if !containsAll(out, "shift+enter", "ctrl+j", "alt+enter", "ctrl+r", "recall past prompts",
+		"scroll the transcript when there is no history left to recall") {
+		t.Fatalf("/help should document the composer, got:\n%s", out)
+	}
 }

@@ -374,10 +374,20 @@ Options:
   -i, --interactive   Multi-turn chat session; the conversation id is kept
                       across turns (Ctrl-D or /quit to leave)
       --tui           Full-screen Bubble Tea chat UI: scrollable transcript
-                      (↑/↓, pgup/pgdn, or the mouse wheel; esc jumps back to
-                      the latest), live-streamed answers rendered as markdown,
+                      (pgup/pgdn or the mouse wheel; esc jumps back to the
+                      latest), live-streamed answers rendered as markdown,
                       spinner while the assistant works, tab-completion for
-                      slash commands. Slash commands: /resume (search and
+                      slash commands. The composer is multi-line: enter sends,
+                      shift+enter / ctrl+j / alt+enter (or a trailing
+                      backslash before enter) start a new line, and the box
+                      grows with the message. ↑/↓ recall past prompts while
+                      the composer is one line and unedited, move the cursor
+                      once it isn't, and scroll the transcript when there is
+                      no history left to recall; ctrl+r searches history.
+                      History is kept per project under your config dir. A
+                      paste over 3 lines or 800 characters collapses to a
+                      "[Pasted text #1 +42 lines]" chip that expands again on
+                      send. Slash commands: /resume (search and
                       resume a past conversation, with a live preview of each
                       one's transcript as you move the cursor), /clear (start a
                       fresh one), /compact (force history compaction now,
