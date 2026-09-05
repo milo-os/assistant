@@ -47,6 +47,9 @@ import (
 type (
 	// streamChunkMsg is one partial answer chunk (artifact/message text).
 	streamChunkMsg struct{ text string }
+	// streamActivityMsg is one tool-activity update (a tool call starting or
+	// finishing) decoded from the service's working status updates.
+	streamActivityMsg struct{ act toolActivity }
 	// streamDoneMsg ends a turn; contextID threads the conversation forward.
 	streamDoneMsg struct {
 		contextID string
@@ -94,6 +97,19 @@ type (
 type transcriptTurn struct {
 	role    string // "user", "assistant", or "system" (a stream/transport error)
 	content string
+}
+
+// activityRow is one tool call shown as a collapsed line inside a Patch turn
+// block. started is when this client saw the call begin, so a running row can
+// count up live; elapsed is the service's own measurement, used once done.
+type activityRow struct {
+	id      string
+	name    string
+	summary string
+	started time.Time
+	elapsed time.Duration
+	done    bool
+	ok      bool
 }
 
 // styles bundles the lipgloss styles that depend on the terminal background, so
@@ -193,6 +209,14 @@ type chatModel struct {
 	answer   strings.Builder  // in-progress assistant answer (raw markdown)
 	working  bool
 	dark     bool
+
+	// activity holds the in-progress turn's tool calls; turnActivity keeps the
+	// finished ones by their index in turns, so the transcript still shows what
+	// each answer did. They stay structured (not pre-rendered into the block)
+	// because ctrl+o re-renders every turn's rows folded or expanded.
+	activity       []activityRow
+	turnActivity   map[int][]activityRow
+	expandActivity bool
 
 	// follow pins the transcript to the newest output. It is cleared when the
 	// user scrolls up and restored when they reach the bottom again (or send a
@@ -353,10 +377,20 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
+		// A running tool row counts up, so the transcript has to be redrawn on
+		// the spinner's beat as well — nothing else moves it between chunks.
+		if hasRunning(m.activity) {
+			m.rebuildViewport()
+		}
 		return m, cmd
 
 	case streamChunkMsg:
 		m.answer.WriteString(msg.text)
+		m.rebuildViewport()
+		return m, nil
+
+	case streamActivityMsg:
+		m.applyActivity(msg.act)
 		m.rebuildViewport()
 		return m, nil
 
@@ -373,6 +407,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			answer = strings.TrimRight(answer, "\n") + "\n" + m.st.err.Render("⚠ "+note)
 		}
 		m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), answer))
+		m.keepActivity(len(m.turns) - 1)
 		rawAnswer := m.answer.String()
 		if msg.failed {
 			note := msg.failMsg
@@ -390,6 +425,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamErrMsg:
 		errText := friendlyError(msg.err, m.client.errs)
 		m.turns = append(m.turns, m.st.err.Render("patch: "+errText))
+		m.keepActivity(len(m.turns) - 1) // what ran before the break is part of the story
 		m.raw = append(m.raw, transcriptTurn{role: "system", content: "error: " + errText})
 		m.answer.Reset()
 		m.working = false
@@ -466,6 +502,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.turns = m.turns[:0]
 		m.raw = m.raw[:0]
 		m.answer.Reset()
+		m.activity, m.turnActivity = nil, nil
 		for _, mm := range msg.items {
 			switch mm.Role {
 			case "user":
@@ -560,6 +597,7 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.turns = nil
 			m.raw = nil
 			m.answer.Reset()
+			m.activity, m.turnActivity = nil, nil
 			m.follow = true
 			m.rebuildViewport()
 			return m, nil
@@ -637,6 +675,13 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.scrollBy(func() { m.vp.ScrollDown(1) })
 		}
+		return m, nil
+	case "ctrl+o":
+		// Expand/collapse the tool-activity rows of every turn at once: the
+		// folded "Called 3 tools" line is a summary of detail the user can ask
+		// for, not a different set of turns.
+		m.expandActivity = !m.expandActivity
+		m.rebuildViewport()
 		return m, nil
 	case "pgup":
 		m.scrollBy(m.vp.PageUp)
@@ -1079,6 +1124,7 @@ func (m *chatModel) helpView() tea.View {
 	for _, h := range composerHelpText {
 		b.WriteString("  " + m.st.you.Render(padHelpKeys(h.keys)) + "  " + m.st.subtle.Render(h.desc) + "\n")
 	}
+	b.WriteString("\n" + m.st.hint.Render("ctrl+o expands or folds the tool activity shown with each answer"))
 	b.WriteString("\n" + m.st.hint.Render("mouse reporting is on, so selecting text to copy needs option (macOS) or shift held"))
 	b.WriteString("\n\n" + m.st.hint.Render("any key to dismiss"))
 
@@ -1208,6 +1254,7 @@ func (m *chatModel) submit(text string) tea.Cmd {
 	m.turns = append(m.turns, m.turnBlock(m.st.you.Render("You"), m.st.userText.Width(m.contentWidth()).Render(text)))
 	m.raw = append(m.raw, transcriptTurn{role: "user", content: text})
 	m.answer.Reset()
+	m.activity = nil
 	m.working = true
 	m.follow = true
 	m.rebuildViewport()
@@ -1242,6 +1289,12 @@ func (m *chatModel) stream(text, contextID string) {
 				m.prog.Send(streamChunkMsg{t})
 			}
 		case *a2a.TaskStatusUpdateEvent:
+			// Tool activity rides on working-state updates (see
+			// internal/a2a/activity.go); everything else is a state change.
+			if act, ok := toolActivityFrom(e.Status.Message); ok {
+				m.prog.Send(streamActivityMsg{act})
+				continue
+			}
 			if e.Status.State == a2a.TaskStateFailed {
 				note := ""
 				if e.Status.Message != nil {
@@ -1386,6 +1439,109 @@ func (m *chatModel) layout(width, height int) tea.Cmd {
 	return nil
 }
 
+// applyActivity folds one tool-activity update into the in-progress turn's
+// rows: a started call appends a row, a finished one closes the matching row
+// out. Calls are matched by id, falling back to the newest unfinished row with
+// the same name for providers that assign no tool-call id.
+func (m *chatModel) applyActivity(act toolActivity) {
+	if act.started() {
+		m.activity = append(m.activity, activityRow{
+			id: act.ID, name: act.Name, summary: act.Summary, started: time.Now(),
+		})
+		return
+	}
+	for i := len(m.activity) - 1; i >= 0; i-- {
+		row := &m.activity[i]
+		if row.done {
+			continue
+		}
+		if (act.ID != "" && row.id == act.ID) || (act.ID == "" && row.name == act.Name) {
+			row.done, row.ok, row.elapsed = true, act.OK, act.elapsed()
+			return
+		}
+	}
+	// A finish with no matching start (a reconnect, or a dropped event) still
+	// belongs in the transcript.
+	m.activity = append(m.activity, activityRow{
+		id: act.ID, name: act.Name, summary: act.Summary,
+		done: true, ok: act.OK, elapsed: act.elapsed(),
+	})
+}
+
+// keepActivity moves the finished turn's rows onto the turn at index i, so the
+// transcript keeps showing what that answer did.
+func (m *chatModel) keepActivity(i int) {
+	rows := m.activity
+	m.activity = nil
+	if len(rows) == 0 || i < 0 {
+		return
+	}
+	if m.turnActivity == nil {
+		m.turnActivity = map[int][]activityRow{}
+	}
+	m.turnActivity[i] = rows
+}
+
+// hasRunning reports whether any row is still in flight.
+func hasRunning(rows []activityRow) bool {
+	for _, r := range rows {
+		if !r.done {
+			return true
+		}
+	}
+	return false
+}
+
+// activityLines renders one turn's rows as collapsed one-line entries, in the
+// style of Claude Code and Codex: a bullet, a verb, and the tool's name.
+// folded (an answer is already streaming, or the turn is finalized) reduces a
+// run of completed calls to a single count line — ctrl+o expands it back to a
+// line per call, with each call's argument summary.
+func (m *chatModel) activityLines(rows []activityRow, folded bool) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	if folded && !m.expandActivity && len(rows) > 1 && !hasRunning(rows) {
+		var total time.Duration
+		for _, r := range rows {
+			total += r.elapsed
+		}
+		return []string{m.st.subtle.Render(fmt.Sprintf("• Called %d tools · %s", len(rows), formatElapsed(total)))}
+	}
+
+	lines := make([]string, 0, len(rows))
+	for _, r := range rows {
+		switch {
+		case !r.done:
+			lines = append(lines, m.st.patch.Render(fmt.Sprintf("• Running %s… %s", r.name, formatElapsed(time.Since(r.started)))))
+		case !r.ok:
+			lines = append(lines, m.st.err.Render(fmt.Sprintf("• Failed %s · %s", r.name, formatElapsed(r.elapsed))))
+		default:
+			line := fmt.Sprintf("• Ran %s · %s", r.name, formatElapsed(r.elapsed))
+			if m.expandActivity && r.summary != "" {
+				line += "  " + r.summary
+			}
+			lines = append(lines, m.st.subtle.Render(line))
+		}
+	}
+	return lines
+}
+
+// withActivity slots activity rows into a rendered turn block, just under the
+// speaker label so they read as part of that turn (turnBlock lays a block out
+// as label\nbody). A label-less block — a bare error line — takes them above.
+func withActivity(block string, lines []string) string {
+	if len(lines) == 0 {
+		return block
+	}
+	rows := strings.Join(lines, "\n")
+	label, body, ok := strings.Cut(block, "\n")
+	if !ok {
+		return rows + "\n" + block
+	}
+	return label + "\n" + rows + "\n" + body
+}
+
 // turnBlock lays out one turn identically for both speakers: a bold colored
 // label line, then the body on the following line(s), both flush-left at the
 // same column. Consecutive turns are separated by exactly one blank line (see
@@ -1400,13 +1556,20 @@ func (m *chatModel) turnBlock(label, body string) string {
 // so streamed chunks accumulate below instead of dragging the view down.
 func (m *chatModel) rebuildViewport() {
 	blocks := make([]string, 0, len(m.turns)+1)
-	blocks = append(blocks, m.turns...)
+	for i, turn := range m.turns {
+		// Activity rows sit above the answer they produced; they are rendered
+		// here rather than baked into the turn so ctrl+o can re-fold them.
+		blocks = append(blocks, withActivity(turn, m.activityLines(m.turnActivity[i], true)))
+	}
 	if m.working {
 		ans := m.renderMarkdown(m.answer.String())
 		if strings.TrimSpace(ans) == "" {
 			ans = m.st.subtle.Render("…")
 		}
-		blocks = append(blocks, m.turnBlock(m.st.patch.Render("Patch"), ans))
+		// Fold only once the answer has started: while tools are the only thing
+		// happening, the rows ARE the progress the user is watching.
+		lines := m.activityLines(m.activity, m.answer.Len() > 0)
+		blocks = append(blocks, withActivity(m.turnBlock(m.st.patch.Render("Patch"), ans), lines))
 	}
 	m.vp.SetContent(strings.Join(blocks, "\n\n"))
 	if m.follow {
