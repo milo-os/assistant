@@ -110,14 +110,16 @@ func (p *pickerState) refilter() {
 
 // filterConversations returns the indexes of the conversations matching
 // query, in the input's order. Every whitespace-separated term must appear,
-// case-insensitively, in the title or the context id — so "quota dfw"
+// case-insensitively, in the name, the title or the context id — so "quota dfw"
 // narrows the way a person expects, without a fuzzy-match ranking that
-// would reorder rows out of newest-first as they type.
+// would reorder rows out of newest-first as they type. The name is searched
+// alongside the title, not instead of it: someone who renamed a conversation
+// may well still look for it by what they originally asked.
 func filterConversations(items []assistantv1alpha1.Conversation, query string) []int {
 	terms := strings.Fields(strings.ToLower(query))
 	out := make([]int, 0, len(items))
 	for i, c := range items {
-		hay := strings.ToLower(c.Status.Title + " " + c.Name)
+		hay := strings.ToLower(c.Status.Name + " " + c.Status.Title + " " + c.Name)
 		ok := true
 		for _, t := range terms {
 			if !strings.Contains(hay, t) {
@@ -459,15 +461,32 @@ func (m *chatModel) pickerFooter(width int) string {
 	return m.st.subtle.Render(rule) + "\n" + line1 + "\n" + line2
 }
 
-// conversationTitle is the row's headline: the opening message the apiserver
-// reports, else the context id — a conversation reduced to a compaction
-// summary has no opening message, and an apiserver predating status.title
-// reports none at all, so the id is the one label always there to show.
+// conversationTitle is the row's headline: the name the user gave this
+// conversation, else the opening message the apiserver reports, else the
+// context id. A user-chosen name wins because it is the label they picked for
+// exactly this purpose; a conversation reduced to a compaction summary has no
+// opening message, and an apiserver predating status.title/status.name reports
+// neither, so the id is the one label always there to show.
 func conversationTitle(c assistantv1alpha1.Conversation) string {
+	if n := strings.TrimSpace(c.Status.Name); n != "" {
+		return n
+	}
 	if t := strings.TrimSpace(c.Status.Title); t != "" {
 		return t
 	}
 	return c.Name
+}
+
+// pickerName is the user-given name of the listed conversation with the given
+// context id, or "" when it has none (or is not in the listing at all) — how
+// the chat picks the name up when a picked conversation is resumed.
+func pickerName(items []assistantv1alpha1.Conversation, contextID string) string {
+	for _, c := range items {
+		if c.Name == contextID {
+			return strings.TrimSpace(c.Status.Name)
+		}
+	}
+	return ""
 }
 
 // rowAge words the row's age column: "3h ago" for recent activity, the bare

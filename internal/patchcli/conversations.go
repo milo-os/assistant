@@ -1,5 +1,5 @@
-// `patch conversations` — browse the durable chat history exposed by the
-// conversations aggregated apiserver (assistant.miloapis.com).
+// `patch conversations` — browse (and name) the durable chat history exposed
+// by the conversations aggregated apiserver (assistant.miloapis.com).
 //
 // Per the apiserver design (decision #7, "an apiserver is not a chat
 // transport"), listing and resuming are separate paths: this command is a
@@ -8,6 +8,10 @@
 // readview.go for why that order, and why neither transport uses client-side
 // discovery. Once you have a context id, resume it with
 // `patch resume <id>` (or non-interactively, `patch chat --context-id <id>`).
+//
+// `rename` is the one subcommand here that writes, and so the one that talks to
+// the assistant service instead: the aggregated API is read-only by design, and
+// the name belongs to the same conversation row the chat path owns.
 package patchcli
 
 import (
@@ -24,8 +28,9 @@ import (
 	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
 )
 
-// listTitleWidth caps the TITLE column so a long opening message doesn't push
-// the table past a normal terminal; the picker and `show` have the full text.
+// listTitleWidth caps the NAME/TITLE column so a long opening message doesn't
+// push the table past a normal terminal; the picker and `show` have the full
+// text.
 const listTitleWidth = 60
 
 // runConversationsList prints a table of the caller's conversations in a
@@ -64,14 +69,14 @@ func runConversationsList(ctx context.Context, inv Invocation, io Io) int {
 
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "CONTEXT-ID\tCREATED\tLAST-ACTIVE\tMESSAGES\tTITLE")
+	fmt.Fprintln(tw, "CONTEXT-ID\tCREATED\tLAST-ACTIVE\tMESSAGES\tNAME/TITLE")
 	for _, c := range list.Items {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n",
 			c.Name,
 			ago(c.CreationTimestamp.Time),
 			ago(c.Status.LastActiveAt.Time),
 			c.Status.MessageCount,
-			previewLine(c.Status.Title, listTitleWidth),
+			previewLine(conversationTitle(c), listTitleWidth),
 		)
 	}
 	_ = tw.Flush()
@@ -111,6 +116,55 @@ func runConversationsShow(ctx context.Context, inv Invocation, io Io) int {
 	}
 	io.Err("resume with:  patch resume " + inv.ContextID + " --project " + inv.Project + "\n")
 	return 0
+}
+
+// runConversationsRename names one conversation through the assistant service
+// (POST /v1/conversations/rename). Unlike its sibling subcommands this is a
+// write, so it needs PATCH_URL/PATCH_TOKEN rather than the apiserver read view.
+func runConversationsRename(ctx context.Context, inv Invocation, io Io) int {
+	err := requestRename(ctx, inv.BaseURL, inv.Token, inv.Project, inv.ContextID, inv.Name)
+	return renderRenameResult(err, inv.ContextID, inv.Name, inv.JSON, io)
+}
+
+// latestConversation returns the id of the project's most recently active
+// conversation, or "" when the project has none — what -c/--continue resumes.
+// The apiserver already serves the listing newest-activity first, but this
+// re-derives the maximum rather than trusting row order, the same way the list
+// view and the picker re-sort what they render.
+func latestConversation(ctx context.Context, view ReadView, project string) (string, error) {
+	out, err := view.get(ctx, project, conversationsPath(project))
+	if err != nil {
+		return "", errors.New(readViewErrorText(view, err))
+	}
+	var list assistantv1alpha1.ConversationList
+	if err := json.Unmarshal(out, &list); err != nil {
+		return "", fmt.Errorf("could not parse conversations response: %w", err)
+	}
+	var (
+		newest string
+		at     time.Time
+	)
+	for _, c := range list.Items {
+		if t := c.Status.LastActiveAt.Time; newest == "" || t.After(at) {
+			newest, at = c.Name, t
+		}
+	}
+	return newest, nil
+}
+
+// continueContextID resolves -c/--continue (and `resume --last`) to a context
+// id, reporting on stderr and returning "" when there is nothing to continue or
+// the listing could not be read. Neither is fatal: a fresh conversation is a
+// far better answer to "continue my last one" than a refusal to start at all.
+func continueContextID(ctx context.Context, inv Invocation, io Io) string {
+	id, err := latestConversation(ctx, ReadViewFor(inv), inv.Project)
+	switch {
+	case err != nil:
+		io.Err("patch: could not look up the last conversation: " + err.Error() + "\n")
+	case id == "":
+		io.Err("no conversations in project " + inv.Project + " yet — starting a new one\n")
+	}
+	return id
 }
 
 // conversationsPath and messagesPath build the group-relative paths both

@@ -57,6 +57,12 @@ type (
 	// a2a client): err is nil on success, [ErrNothingToCompact] when the
 	// server had nothing to fold, or any other error on a real failure.
 	compactDoneMsg struct{ err error }
+	// renameDoneMsg ends a /rename request (POST /v1/conversations/rename):
+	// name is what was asked for, err nil on success.
+	renameDoneMsg struct {
+		name string
+		err  error
+	}
 	// pickerListMsg delivers the picker's conversation listing (or an error).
 	// See chat_picker.go for the picker itself.
 	pickerListMsg struct {
@@ -175,11 +181,15 @@ type chatModel struct {
 	st       styles
 
 	contextID string
-	turns     []string         // finalized, already-rendered conversation blocks
-	raw       []transcriptTurn // parallel to turns, unstyled — source for /export
-	answer    strings.Builder  // in-progress assistant answer (raw markdown)
-	working   bool
-	dark      bool
+	// convName is the user-given name of the active conversation, "" when it
+	// has none. Shown by /status; set by /rename and picked up from the
+	// listing when a conversation is resumed.
+	convName string
+	turns    []string         // finalized, already-rendered conversation blocks
+	raw      []transcriptTurn // parallel to turns, unstyled — source for /export
+	answer   strings.Builder  // in-progress assistant answer (raw markdown)
+	working  bool
+	dark     bool
 
 	// follow pins the transcript to the newest output. It is cleared when the
 	// user scrolls up and restored when they reach the bottom again (or send a
@@ -365,6 +375,19 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildViewport()
 		return m, nil
 
+	case renameDoneMsg:
+		m.working = false
+		if msg.err != nil {
+			m.turns = append(m.turns, m.st.err.Render("⚠ rename failed: "+msg.err.Error()))
+			m.raw = append(m.raw, transcriptTurn{role: "system", content: "rename failed: " + msg.err.Error()})
+		} else {
+			m.convName = msg.name
+			m.turns = append(m.turns, m.st.subtle.Render("renamed to "+msg.name))
+			m.raw = append(m.raw, transcriptTurn{role: "system", content: "renamed to " + msg.name})
+		}
+		m.rebuildViewport()
+		return m, nil
+
 	case tea.MouseWheelMsg:
 		if m.picker.open || m.overlay != "" {
 			// The transcript isn't on screen; scrolling it here would leave the
@@ -402,6 +425,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.contextID = msg.contextID
+		m.convName = pickerName(m.picker.items, msg.contextID)
 		m.turns = m.turns[:0]
 		m.raw = m.raw[:0]
 		m.answer.Reset()
@@ -462,6 +486,12 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			text = matches[m.suggestIndex%len(matches)]
 		}
 		m.suggestIndex = 0
+		// /rename is the only command that takes an argument, and the input is
+		// a single line, so it can't be a case in the exact-match switch below.
+		if arg, ok := commandArg(text, "/rename"); ok {
+			m.ti.Reset()
+			return m, m.startRename(arg)
+		}
 		switch text {
 		case "/quit", "/exit":
 			return m, tea.Quit
@@ -471,6 +501,7 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "/clear":
 			m.ti.Reset()
 			m.contextID = ""
+			m.convName = ""
 			m.turns = nil
 			m.raw = nil
 			m.answer.Reset()
@@ -595,16 +626,31 @@ var helpText = []struct{ cmd, desc string }{
 	{"/resume", "search and resume a past conversation (with a live preview)"},
 	{"/clear", "start a fresh conversation, clearing this transcript"},
 	{"/compact", "compact this conversation's history now"},
+	{"/rename <name>", "name this conversation (shown wherever it's listed)"},
 	{"/export", "save this transcript to a file"},
 	{"/status", "show the current project, conversation, and turn count"},
 	{"/help", "show this list"},
 	{"/quit, /exit", "leave"},
 }
 
+// commandArg matches text against a slash command that takes the rest of the
+// line as its argument. It reports whether the command was typed at all —
+// bare, or with an argument — so the caller can answer "/rename" on its own
+// with what it wants rather than sending it as a message.
+func commandArg(text, command string) (arg string, ok bool) {
+	if text == command {
+		return "", true
+	}
+	if rest, found := strings.CutPrefix(text, command+" "); found {
+		return strings.TrimSpace(rest), true
+	}
+	return "", false
+}
+
 // commandNames is every literal slash command the input recognizes, for
 // autocomplete matching — helpText groups /quit and /exit into one display
 // row, but they're two distinct completable commands here.
-var commandNames = []string{"/resume", "/clear", "/compact", "/export", "/status", "/help", "/quit", "/exit"}
+var commandNames = []string{"/resume", "/clear", "/compact", "/rename", "/export", "/status", "/help", "/quit", "/exit"}
 
 // commandDescriptions is what the suggestion list shows next to each command
 // (see suggestionBar); unlike helpText it keys /quit and /exit separately
@@ -613,6 +659,7 @@ var commandDescriptions = map[string]string{
 	"/resume":  "search and resume a past conversation (with a live preview)",
 	"/clear":   "start a fresh conversation, clearing this transcript",
 	"/compact": "compact this conversation's history now",
+	"/rename":  "name this conversation: /rename <name>",
 	"/export":  "save this transcript to a file",
 	"/status":  "show the current project, conversation, and turn count",
 	"/help":    "show the command list",
@@ -728,16 +775,22 @@ func (m *chatModel) helpView() tea.View {
 }
 
 // statusView renders the /status overlay: the current session's project,
-// conversation id, and turn count. Dismissed by any keypress (see onKey).
+// conversation name and id, and turn count. Dismissed by any keypress (see
+// onKey).
 func (m *chatModel) statusView() tea.View {
 	ctx := m.contextID
 	if ctx == "" {
 		ctx = "(none yet — starts on your first message)"
 	}
+	name := m.convName
+	if name == "" {
+		name = "(unnamed — /rename <name>)"
+	}
 	var b strings.Builder
 	b.WriteString(m.st.header.Render("session status"))
 	b.WriteString("\n\n")
 	fmt.Fprintf(&b, "  %s  %s\n", m.st.you.Render("project"), m.project)
+	fmt.Fprintf(&b, "  %s     %s\n", m.st.you.Render("name"), name)
 	fmt.Fprintf(&b, "  %s  %s\n", m.st.you.Render("context"), ctx)
 	fmt.Fprintf(&b, "  %s  %d\n", m.st.you.Render("turns"), len(m.raw))
 	b.WriteString("\n" + m.st.hint.Render("any key to dismiss"))
@@ -894,6 +947,35 @@ func (m *chatModel) stream(text, contextID string) {
 func (m *chatModel) compact() {
 	err := requestCompact(m.ctx, m.baseURL, m.token, m.project, m.contextID)
 	m.prog.Send(compactDoneMsg{err: err})
+}
+
+// startRename validates "/rename <name>" and kicks off the request. The two
+// ways to get it wrong — no name, or no conversation to name yet — are
+// answered in the transcript rather than by a request the service would only
+// reject, since neither needs the server to know it is wrong.
+func (m *chatModel) startRename(name string) tea.Cmd {
+	switch {
+	case name == "":
+		m.turns = append(m.turns, m.st.subtle.Render("usage: /rename <name>"))
+	case len([]rune(name)) > maxConversationNameLen:
+		m.turns = append(m.turns, m.st.subtle.Render(fmt.Sprintf("name is too long (max %d characters)", maxConversationNameLen)))
+	case m.contextID == "":
+		m.turns = append(m.turns, m.st.subtle.Render("nothing to rename — no conversation yet"))
+	default:
+		m.working = true
+		m.rebuildViewport()
+		go m.rename(name)
+		return m.sp.Tick
+	}
+	m.rebuildViewport()
+	return nil
+}
+
+// rename runs one "/rename" request against POST /v1/conversations/rename, the
+// same plain-REST, producer-in-a-goroutine shape [chatModel.compact] uses.
+func (m *chatModel) rename(name string) {
+	err := requestRename(m.ctx, m.baseURL, m.token, m.project, m.contextID, name)
+	m.prog.Send(renameDoneMsg{name: name, err: err})
 }
 
 // contentWidth is the usable inner width: terminal width minus the outer box's
