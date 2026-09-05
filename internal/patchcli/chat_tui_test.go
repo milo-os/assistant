@@ -63,10 +63,10 @@ func TestSuggestionsForBareSlash(t *testing.T) {
 
 func TestSuggestionsNarrowOnPrefix(t *testing.T) {
 	m := newTestModel()
-	typeText(t, m, "/re")
+	typeText(t, m, "/res")
 	got := m.currentSuggestions()
 	if len(got) != 1 || got[0] != "/resume" {
-		t.Fatalf("'/re' should suggest only /resume, got %v", got)
+		t.Fatalf("'/res' should suggest only /resume, got %v", got)
 	}
 }
 
@@ -174,6 +174,104 @@ func TestSuggestionBarRendersAndDismissesCorrectly(t *testing.T) {
 	}
 }
 
+// ── /rename ───────────────────────────────────────────────────
+
+// The input is one line, so /rename's argument arrives on it — bare, with an
+// argument, and (not a match) as a prefix of some other word.
+func TestCommandArgSplitsOnTheSameLine(t *testing.T) {
+	cases := []struct {
+		text    string
+		wantArg string
+		wantOK  bool
+	}{
+		{"/rename", "", true},
+		{"/rename dfw quota escalation", "dfw quota escalation", true},
+		{"/rename   spaced  ", "spaced", true},
+		{"/renamed", "", false},
+		{"rename x", "", false},
+		{"tell me about /rename", "", false},
+	}
+	for _, c := range cases {
+		arg, ok := commandArg(c.text, "/rename")
+		if ok != c.wantOK || arg != c.wantArg {
+			t.Errorf("commandArg(%q) = %q, %v; want %q, %v", c.text, arg, ok, c.wantArg, c.wantOK)
+		}
+	}
+}
+
+// The three ways /rename can't proceed are answered locally: none of them
+// needs the service to know they are wrong, and a request would only come back
+// with the same answer more slowly.
+func TestRenameGuardsAnswerWithoutARequest(t *testing.T) {
+	cases := []struct {
+		name      string
+		contextID string
+		arg       string
+		want      string
+	}{
+		{"no argument", "ctx-1", "", "usage: /rename <name>"},
+		{"too long", "ctx-1", strings.Repeat("é", maxConversationNameLen+1), "too long"},
+		{"no conversation yet", "", "a name", "nothing to rename"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := newTestModel()
+			m.contextID = c.contextID
+			cmd := m.startRename(c.arg)
+			if cmd != nil {
+				t.Fatal("want no request kicked off")
+			}
+			if m.working {
+				t.Fatal("want the model idle, not waiting on a rename")
+			}
+			if len(m.turns) != 1 || !strings.Contains(m.turns[0], c.want) {
+				t.Fatalf("turns = %q, want one mentioning %q", m.turns, c.want)
+			}
+		})
+	}
+}
+
+// A rename lands in the transcript and in /status; a failure says so and
+// leaves the old name in place.
+func TestRenameDoneUpdatesTheSessionName(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(renameDoneMsg{name: "dfw quota escalation"})
+	if m.convName != "dfw quota escalation" {
+		t.Fatalf("convName = %q", m.convName)
+	}
+	if m.working {
+		t.Fatal("the rename should have cleared working")
+	}
+	m.Update(renameDoneMsg{name: "later", err: errors.New("boom")})
+	if m.convName != "dfw quota escalation" {
+		t.Fatalf("a failed rename changed the name to %q", m.convName)
+	}
+}
+
+// Resuming picks the name up from the listing the picker already holds, so a
+// named conversation is still named after /resume.
+func TestResumingCarriesTheConversationName(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	named := titledConversation("conv-a", "api-backend not available")
+	named.Status.Name = "dfw quota escalation"
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{named, titledConversation("conv-b", "other")}})
+	m.Update(pickerTranscriptMsg{contextID: "conv-a"})
+	if m.convName != "dfw quota escalation" {
+		t.Fatalf("convName = %q, want the listed name", m.convName)
+	}
+
+	// And a conversation with no name resumes unnamed rather than keeping the
+	// previous one's.
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{titledConversation("conv-b", "other")}})
+	m.Update(pickerTranscriptMsg{contextID: "conv-b"})
+	if m.convName != "" {
+		t.Fatalf("convName = %q, want empty", m.convName)
+	}
+}
+
 // ── picker preview ────────────────────────────────────────────
 
 func testConversation(name string) assistantv1alpha1.Conversation {
@@ -212,6 +310,42 @@ func TestFilterConversationsMatchesEveryTermInTitleOrID(t *testing.T) {
 		got := filterConversations(items, c.query)
 		if fmt.Sprint(got) != fmt.Sprint(c.want) {
 			t.Errorf("filter %q = %v, want %v", c.query, got, c.want)
+		}
+	}
+}
+
+// The row headline prefers what the user chose to call the conversation, then
+// the derived title, and falls back to the id so a row is never blank.
+func TestConversationTitlePrefersTheUserGivenName(t *testing.T) {
+	named := titledConversation("01a05ee5-aaaa", "Why is the api-backend workload not available?")
+	named.Status.Name = "dfw quota escalation"
+	cases := []struct {
+		name string
+		in   assistantv1alpha1.Conversation
+		want string
+	}{
+		{"name wins over title", named, "dfw quota escalation"},
+		{"title when unnamed", titledConversation("0b77c2d1-bbbb", "quota triage"), "quota triage"},
+		{"id when neither", testConversation("0c99e3f2-cccc"), "0c99e3f2-cccc"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := conversationTitle(c.in); got != c.want {
+				t.Errorf("conversationTitle = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// Renaming must not hide a conversation from a search for what it was
+// originally about, so the name is searched alongside the title, not instead.
+func TestFilterConversationsMatchesNamesToo(t *testing.T) {
+	named := titledConversation("01a05ee5-aaaa", "Why is the api-backend workload not available?")
+	named.Status.Name = "dfw quota escalation"
+	items := []assistantv1alpha1.Conversation{named, titledConversation("0b77c2d1-bbbb", "unrelated")}
+	for _, query := range []string{"escalation", "api-backend", "escalation api-backend"} {
+		if got := filterConversations(items, query); fmt.Sprint(got) != "[0]" {
+			t.Errorf("filter %q = %v, want [0]", query, got)
 		}
 	}
 }
