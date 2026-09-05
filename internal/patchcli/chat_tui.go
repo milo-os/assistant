@@ -2,9 +2,10 @@
 // an alternative to the line-based REPL (runRepl) selected with `chat --tui`;
 // the plain and interactive modes are untouched.
 //
-// Layout: a header, a scrollable transcript viewport, a status line (spinner
-// while the assistant works, else a hint), and a multi-line composer at the
-// bottom, all wrapped in a padded container. Assistant answers stream in live
+// Layout: a header, a scrollable transcript viewport, a multi-line composer,
+// and a one-line footer holding the session state (spinner while the assistant
+// works, else the key hint) on the left with session badges right-aligned
+// against it, all wrapped in a padded container. Assistant answers stream in live
 // and are rendered as markdown via glamour, so bold/bullets/tables come out
 // formatted rather than as raw `**`. The composer itself (its styling, prompt
 // history and paste chips) lives in chat_composer.go; this file owns its keys.
@@ -18,6 +19,11 @@
 // Threading: the conversation's contextId is learned from the event stream (as
 // the REPL does) and sent on every later turn, so the whole session is one
 // conversation with memory.
+//
+// Turn feedback: every finished turn is closed out by a "Worked for 23s" line
+// under its block, the window title tracks whether a turn is running, and a
+// bell (optionally an OSC 9 desktop notification — see notifyMode) says so to a
+// user who has looked away.
 package patchcli
 
 import (
@@ -37,6 +43,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/glamour"
 	glamourstyles "github.com/charmbracelet/glamour/styles"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 
@@ -210,6 +217,15 @@ type chatModel struct {
 	working  bool
 	dark     bool
 
+	// turnStart is when the current (or last) unit of work began — stamped
+	// wherever the working state is entered (see startedWorking), so the
+	// end-of-turn line and the footer's counter both measure from the
+	// keystroke that started it rather than from the first streamed chunk.
+	turnStart time.Time
+
+	// notify is how a finished turn announces itself; PATCH_NOTIFY chooses it.
+	notify notifyMode
+
 	// activity holds the in-progress turn's tool calls; turnActivity keeps the
 	// finished ones by their index in turns, so the transcript still shows what
 	// each answer did. They stay structured (not pre-rendered into the block)
@@ -300,6 +316,10 @@ func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, 
 		firstMessage:  firstMessage,
 		resumeOnStart: resumeOnStart,
 		follow:        true,
+		// Read here rather than threaded through Invocation: it is a display
+		// preference of this one screen, and both entrypoints (patch and the
+		// datumctl plugin) reach the TUI through this function.
+		notify: parseNotifyMode(os.Getenv("PATCH_NOTIFY")),
 	}
 
 	p := tea.NewProgram(m, tea.WithContext(ctx))
@@ -322,6 +342,9 @@ func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, 
 func (m *chatModel) newView(body string) tea.View {
 	v := tea.NewView(body)
 	v.AltScreen = true
+	// Bubble Tea v2 carries the title on the view (there is no SetWindowTitle
+	// command); the renderer diffs it, so re-setting it every frame is free.
+	v.WindowTitle = m.windowTitle()
 	// Cell motion gives us wheel events for scrolling the transcript. It also
 	// means the terminal, not the app, stops owning click-drag: selecting text
 	// to copy needs Option (macOS) or Shift (Linux) held down.
@@ -340,7 +363,13 @@ func (m *chatModel) Init() tea.Cmd {
 func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		return m, m.layout(msg.Width, msg.Height)
+		// Both handlers can enter the working state (layout fires the auto
+		// first message; onKey submits and runs /compact, /rename), so the
+		// stamp is taken here, around them, instead of inside them.
+		was := m.working
+		cmd := m.layout(msg.Width, msg.Height)
+		m.startedWorking(was)
+		return m, cmd
 
 	case tea.BackgroundColorMsg:
 		m.dark = msg.IsDark()
@@ -359,7 +388,10 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
-		return m.onKey(msg)
+		was := m.working
+		model, cmd := m.onKey(msg)
+		m.startedWorking(was)
+		return model, cmd
 
 	case tea.PasteMsg:
 		// Bracketed paste is on by default (see newView), so a paste arrives
@@ -406,6 +438,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			answer = strings.TrimRight(answer, "\n") + "\n" + m.st.err.Render("⚠ "+note)
 		}
+		tools := len(m.activity)
 		m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), answer))
 		m.keepActivity(len(m.turns) - 1)
 		rawAnswer := m.answer.String()
@@ -419,24 +452,27 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.raw = append(m.raw, transcriptTurn{role: "assistant", content: rawAnswer})
 		m.answer.Reset()
 		m.working = false
+		m.closeOutTurn(tools)
 		m.rebuildViewport()
-		return m, nil
+		return m, m.notifyDone()
 
 	case streamErrMsg:
 		errText := friendlyError(msg.err, m.client.errs)
+		tools := len(m.activity)
 		m.turns = append(m.turns, m.st.err.Render("patch: "+errText))
 		m.keepActivity(len(m.turns) - 1) // what ran before the break is part of the story
 		m.raw = append(m.raw, transcriptTurn{role: "system", content: "error: " + errText})
 		m.answer.Reset()
 		m.working = false
+		m.closeOutTurn(tools)
 		m.rebuildViewport()
-		return m, nil
+		return m, m.notifyDone()
 
 	case compactDoneMsg:
 		m.working = false
 		switch {
 		case msg.err == nil:
-			m.turns = append(m.turns, m.st.subtle.Render("history compacted"))
+			m.turns = append(m.turns, m.compactionRule())
 			m.raw = append(m.raw, transcriptTurn{role: "system", content: "history compacted"})
 		case errors.Is(msg.err, ErrNothingToCompact):
 			m.turns = append(m.turns, m.st.subtle.Render("nothing to compact"))
@@ -512,14 +548,20 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// A compaction digest, not something the assistant said —
 				// rendered de-emphasized (m.st.subtle, the same token used
 				// elsewhere for placeholder/loading text) so it reads as
-				// synthetic history rather than a turn of the conversation.
-				m.turns = append(m.turns, m.turnBlock(m.st.subtle.Render("Summary"),
-					m.st.subtle.Width(m.contentWidth()).Render(mm.Content)))
+				// synthetic history rather than a turn of the conversation,
+				// under the same rule /compact draws when it folds history live.
+				m.turns = append(m.turns, m.compactionRule()+"\n"+
+					m.turnBlock(m.st.subtle.Render("Summary"),
+						m.st.subtle.Width(m.contentWidth()).Render(mm.Content)))
 			default:
 				m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), m.renderMarkdown(mm.Content)))
 			}
 			m.raw = append(m.raw, transcriptTurn{role: mm.Role, content: mm.Content})
 		}
+		// Session state, not conversation content: it closes the loaded
+		// transcript in the viewport but stays out of m.raw, so /export and the
+		// turn count keep describing the conversation itself.
+		m.turns = append(m.turns, m.recapLine(msg.items))
 		m.picker = pickerState{}
 		m.follow = true
 		m.rebuildViewport()
@@ -705,6 +747,13 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.scrollBy(func() { m.vp.GotoBottom() })
 		return m, nil
 	default:
+		// "?" on an empty composer is the keys cheatsheet (the /help overlay,
+		// which any key dismisses — so a second "?" closes it); typed into a
+		// draft it is just a character.
+		if msg.String() == "?" && m.ta.Value() == "" {
+			m.overlay = "help"
+			return m, nil
+		}
 		// Only forward genuine editing input to the text field. Printable keys
 		// carry non-empty .Text; editing keys (backspace, arrows, …) don't but
 		// are allowlisted. Everything else (stray/unparsed escape sequences) is
@@ -921,6 +970,7 @@ var composerHelpText = []struct{ keys, desc string }{
 	{"ctrl+r", "search past prompts (enter accepts, esc cancels)"},
 	{"paste", "over 3 lines or 800 characters collapses to a chip, expanded on send"},
 	{"pgup/pgdn, mouse wheel", "scroll the transcript · esc jumps back to the latest"},
+	{"?", "show this help (on an empty composer; any key dismisses it)"},
 }
 
 // helpKeyColumnWidth lines the composer help's descriptions up in a column.
@@ -1197,27 +1247,10 @@ func (m *chatModel) View() tea.View {
 	case "status":
 		return m.statusView()
 	}
-	var status string
-	if m.working {
-		status = m.sp.View() + " " + m.st.subtle.Render("thinking…")
-	} else {
-		status = m.st.hint.Render("enter sends · shift+enter newline · ↑/↓ history · ctrl+r search · / commands · /help · ctrl+c to leave")
-	}
-	// Scrolled off the bottom is a mode the user can get stuck in — say so, and
-	// say the way out. It replaces the usual hint, but never the spinner: not
-	// following is exactly when you can't see that an answer is still arriving.
-	if !m.follow {
-		scrolled := m.st.hint.Render(fmt.Sprintf("scrolled · %d%% · esc for the latest", int(m.vp.ScrollPercent()*100)))
-		if m.working {
-			status += m.st.hint.Render("  ·  ") + scrolled
-		} else {
-			status = scrolled
-		}
-	}
 	// One blank line between each major region for an even vertical rhythm:
-	// header → blank → transcript → gap/suggestions → bordered input → status.
+	// header → blank → transcript → gap/suggestions → bordered input → footer.
 	// Suggestions sit directly above the box since they're about what you're
-	// typing; the status/hint line reads as a footer below the box instead of
+	// typing; the state/badges line reads as a footer below the box instead of
 	// a caption above it. The suggestion block grows downward (vertically, so
 	// ↑/↓ tracks it) up to maxSuggestionRows; the input box grows the same way
 	// up to maxComposerRows. The viewport shrinks by whatever the two take, so
@@ -1231,9 +1264,6 @@ func (m *chatModel) View() tea.View {
 			m.vp.SetYOffset(m.vp.YOffset()) // SetHeight doesn't re-clamp; this does
 		}
 	}
-	// The hint is longer than a narrow terminal; clip it rather than let it wrap
-	// onto a second row the height budget hasn't allowed for.
-	status = lipgloss.NewStyle().MaxWidth(m.contentWidth()).Render(status)
 	gap := m.composerBar()
 	body := strings.Join([]string{
 		m.st.header.Render("patch") + m.st.subtle.Render("  ·  project "+m.project),
@@ -1241,10 +1271,244 @@ func (m *chatModel) View() tea.View {
 		m.vp.View(),
 		gap,
 		m.st.inputBox.Render(m.ta.View()),
-		status,
+		m.footer(),
 	}, "\n")
 
 	return m.newView(m.st.box.Render(body))
+}
+
+// ── turn and session feedback ─────────────────────────────────
+
+// startedWorking stamps the turn's start when a handler has just entered the
+// working state. It is called from Update around the two handlers that can
+// enter it, so submit/stream stay untouched by the timing.
+func (m *chatModel) startedWorking(before bool) {
+	if !before && m.working {
+		m.turnStart = time.Now()
+	}
+}
+
+// windowTitle names the terminal window (see newView), so a chat left in a
+// background tab still says whether its turn is still running.
+func (m *chatModel) windowTitle() string {
+	if m.working {
+		return "patch · working…"
+	}
+	if m.project == "" {
+		return "patch"
+	}
+	return "patch · " + m.project
+}
+
+// footer composes the single line under the composer: the session state on the
+// left (spinner and a live counter while a turn runs, else the key hint) and
+// the session badges right-aligned against contentWidth. It must stay one line
+// — viewportHeight budgets exactly one row for it.
+func (m *chatModel) footer() string {
+	var left string
+	if m.working {
+		left = m.sp.View() + " " + m.st.subtle.Render("thinking…"+m.workingFor())
+	} else {
+		left = m.st.hint.Render("enter send · / commands · ? keys")
+	}
+	right := m.st.hint.Render(strings.Join(m.sessionBadges(), " · "))
+	w := m.contentWidth()
+	// Two columns of breathing room, or the badges are dropped: the state is
+	// what the user needs here, and the badges repeat what /status shows.
+	if pad := w - lipgloss.Width(left) - lipgloss.Width(right); pad >= 2 {
+		return left + strings.Repeat(" ", pad) + right
+	}
+	return lipgloss.NewStyle().MaxWidth(w).Render(left)
+}
+
+// workingFor is the " 12s" the footer counts up during a turn, empty when
+// there was no start to measure from (a turn adopted mid-flight in a test).
+func (m *chatModel) workingFor() string {
+	if m.turnStart.IsZero() {
+		return ""
+	}
+	return " " + formatWorkedFor(time.Since(m.turnStart))
+}
+
+// sessionBadges are the right-hand side of the footer: which conversation this
+// is, how far into it we are, and — only when it applies — that the transcript
+// is scrolled off the bottom, with the way back.
+func (m *chatModel) sessionBadges() []string {
+	var out []string
+	if label := m.sessionLabel(); label != "" {
+		out = append(out, label)
+	}
+	if n := m.turnCount(); n > 0 {
+		out = append(out, countLabel(n, "turn"))
+	}
+	if !m.follow {
+		out = append(out, fmt.Sprintf("scrolled · %d%% · esc for the latest", int(m.vp.ScrollPercent()*100)))
+	}
+	return out
+}
+
+// sessionLabel names the conversation in a footer-sized space: its name when
+// it has one, else a short id, else nothing (there is no conversation yet).
+func (m *chatModel) sessionLabel() string {
+	if m.convName != "" {
+		return m.convName
+	}
+	return shortContextID(m.contextID)
+}
+
+// shortContextID trims a context id (a UUID) to a recognizable prefix — enough
+// to tell two conversations apart without spending the footer's width on 36
+// characters.
+func shortContextID(id string) string {
+	if r := []rune(id); len(r) > 8 {
+		return string(r[:8])
+	}
+	return id
+}
+
+// turnCount is how many prompts this session has sent — one per exchange,
+// which is what "3 turns" means to a reader. m.raw holds a row per message
+// (plus system notes), so it can't be counted directly.
+func (m *chatModel) turnCount() int {
+	n := 0
+	for _, t := range m.raw {
+		if t.role == "user" {
+			n++
+		}
+	}
+	return n
+}
+
+// closeOutTurn appends the end-of-turn summary under the block that was just
+// finalized (rather than as a block of its own, so it reads as that turn's
+// footer) and records it in the transcript so /export carries it too.
+func (m *chatModel) closeOutTurn(tools int) {
+	if len(m.turns) == 0 {
+		return
+	}
+	line := m.endOfTurnLine(tools)
+	m.turns[len(m.turns)-1] += "\n" + m.st.subtle.Render(line)
+	m.raw = append(m.raw, transcriptTurn{role: "system", content: line})
+}
+
+// endOfTurnLine words the summary: "✻ Worked for 23s · 3 tools · done 6:05 PM".
+// The tools segment is dropped when nothing ran, and the elapsed one when the
+// turn's start was never stamped, leaving the wall-clock time as the one thing
+// always worth saying.
+func (m *chatModel) endOfTurnLine(tools int) string {
+	var parts []string
+	if !m.turnStart.IsZero() {
+		parts = append(parts, "Worked for "+formatWorkedFor(time.Since(m.turnStart)))
+	}
+	if tools > 0 {
+		parts = append(parts, countLabel(tools, "tool"))
+	}
+	parts = append(parts, "done "+time.Now().Format("3:04 PM"))
+	return "✻ " + strings.Join(parts, " · ")
+}
+
+// formatWorkedFor renders a turn's duration at human glance precision: whole
+// seconds ("23s"), minutes and padded seconds past a minute ("1m 06s"). Tool
+// calls use formatElapsed instead — tenths matter there, not here.
+func formatWorkedFor(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	secs := int(d.Seconds())
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	return fmt.Sprintf("%dm %02ds", secs/60, secs%60)
+}
+
+// countLabel words a count with its unit ("1 tool", "3 tools").
+func countLabel(n int, unit string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, unit)
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
+}
+
+// compactionRule is the divider that marks folded history — a subtle rule with
+// the label centred in it, the shape other agents use, so a compaction reads as
+// a seam in the transcript rather than as something the assistant said.
+func (m *chatModel) compactionRule() string {
+	const label = " history compacted "
+	fill := m.contentWidth() - lipgloss.Width(label)
+	if fill < 2 {
+		return m.st.subtle.Render(strings.TrimSpace(label))
+	}
+	left := fill / 2
+	return m.st.subtle.Render(strings.Repeat("─", left) + label + strings.Repeat("─", fill-left))
+}
+
+// recapLine closes a resumed transcript with where the user has landed: which
+// conversation, how much of it there is, and how stale it is.
+func (m *chatModel) recapLine(items []assistantv1alpha1.ConversationMessage) string {
+	label := m.sessionLabel()
+	if label == "" {
+		label = "conversation"
+	}
+	parts := []string{"resumed " + label, countLabel(len(items), "message")}
+	if n := len(items); n > 0 {
+		if phrase := lastActivePhrase(items[n-1].CreatedAt.Time); phrase != "" {
+			parts = append(parts, phrase)
+		}
+	}
+	return m.st.subtle.Render(strings.Join(parts, " · "))
+}
+
+// lastActivePhrase words a timestamp as "last active 3h ago", or "last active
+// on 2026-01-02" once ago() has fallen back to a date (the picker's rowAge
+// words its own column the same way). An unset timestamp has nothing to say.
+func lastActivePhrase(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	a := ago(t)
+	if strings.Contains(a, "-") {
+		return "last active on " + a
+	}
+	return "last active " + a + " ago"
+}
+
+// notifyMode is how a finished turn announces itself. Bell-only is the default:
+// every terminal has a bell (even if the user has muted it), while OSC 9 is
+// ignored by terminals that don't implement it and can raise an OS banner in
+// the ones that do — so the desktop notification is opt-in.
+type notifyMode int
+
+const (
+	notifyBell    notifyMode = iota // the terminal bell alone
+	notifyOff                       // say nothing
+	notifyDesktop                   // bell plus an OSC 9 desktop notification
+)
+
+// parseNotifyMode reads PATCH_NOTIFY. Anything unrecognized (including an
+// unset variable) is the default — a typo'd env var must not cost a chat.
+func parseNotifyMode(s string) notifyMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "off", "none":
+		return notifyOff
+	case "desktop":
+		return notifyDesktop
+	default:
+		return notifyBell
+	}
+}
+
+// notifyDone tells a user who has looked away that their turn is finished.
+// tea.Raw writes through the program's own output, which is the only correct
+// way to emit an escape sequence while the renderer owns the terminal.
+func (m *chatModel) notifyDone() tea.Cmd {
+	switch m.notify {
+	case notifyOff:
+		return nil
+	case notifyDesktop:
+		return tea.Raw("\a" + ansi.Notify("Patch finished"))
+	default:
+		return tea.Raw("\a")
+	}
 }
 
 // submit records the user's line, starts the spinner, and launches the
