@@ -1,6 +1,6 @@
 # AssistantEndpoint — the resource that tells a client where the assistant is.
 #
-# `datumctl patch` reads this instead of requiring PATCH_URL: the control-plane
+# `datumctl assistant` reads this instead of requiring PATCH_URL: the control-plane
 # address names Milo, not the assistant, so the service publishes its own
 # address as a resource in its own API group
 # (internal/apiserver/registry/endpoint implements rest.Getter and rest.Lister,
@@ -10,7 +10,7 @@
 # Registering it here is not optional bookkeeping. Milo's authorizer looks up a
 # ProtectedResource by spec.serviceRef.name + spec.plural and FAILS CLOSED when
 # there is none, and it separately rejects any verb not listed in
-# spec.permissions. Without this file the first `datumctl patch` against a live
+# spec.permissions. Without this file the first `datumctl assistant` against a live
 # control plane 403s on discovery, and the message reads like the caller is
 # missing a grant rather than like the resource was never registered.
 apiVersion: iam.miloapis.com/v1alpha1

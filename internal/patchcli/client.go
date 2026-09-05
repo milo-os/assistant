@@ -138,6 +138,50 @@ func requestCompact(ctx context.Context, baseURL string, token TokenSource, proj
 	return nil
 }
 
+// maxConversationNameLen mirrors the service's own cap (history.MaxNameLen) so
+// the TUI can say "too long" without a round trip. It is duplicated rather than
+// imported because this package is linked into a CLI, and internal/history
+// would drag the Postgres driver in with it; the service validates regardless,
+// so a drift here costs a worse message, never a wrong outcome.
+const maxConversationNameLen = 80
+
+// requestRename calls POST /v1/conversations/rename — the sibling of
+// /v1/compact for naming a conversation, outside the A2A surface for the same
+// reason (a store mutation, not a message to answer). Same bearer-token auth
+// ([bearerTransport]) as every other call this CLI makes.
+func requestRename(ctx context.Context, baseURL string, token TokenSource, project, contextID, name string) error {
+	body, err := json.Marshal(map[string]string{"contextId": contextID, "projectName": project, "name": name})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(baseURL, "/") + "/v1/conversations/rename"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Transport: bearerTransport{token: token, base: http.DefaultTransport}}
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(res.Body).Decode(&errBody)
+		msg := errBody.Error
+		if msg == "" {
+			msg = res.Status
+		}
+		return fmt.Errorf("rename: %s", msg)
+	}
+	return nil
+}
+
 // httpErrRecorder remembers the message from the last non-2xx response the
 // transport saw.
 //

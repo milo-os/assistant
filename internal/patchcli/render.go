@@ -124,6 +124,31 @@ func renderCompactResult(err error, jsonOut bool, io Io) int {
 	return 0
 }
 
+// renderRenameResult prints the outcome of `patch conversations rename` (POST
+// /v1/conversations/rename via [requestRename]) and returns the process exit
+// code. Simpler than renderCompactResult: there is no "nothing to do" outcome
+// to soften — a rename either landed or failed.
+func renderRenameResult(err error, contextID, name string, jsonOut bool, io Io) int {
+	if jsonOut {
+		body := map[string]any{"renamed": err == nil, "contextId": contextID, "name": name}
+		if err != nil {
+			body["error"] = err.Error()
+		}
+		if b, mErr := json.Marshal(body); mErr == nil {
+			io.Out(string(b) + "\n")
+		}
+	} else if err != nil {
+		io.Err("patch: " + err.Error() + "\n")
+	} else {
+		io.Out("renamed " + contextID + " to " + name + "\n")
+	}
+
+	if err != nil {
+		return 1
+	}
+	return 0
+}
+
 // renderCard prints an agent card, either pretty or as raw JSON.
 func renderCard(card *a2a.AgentCard, jsonOut bool, io Io) {
 	if jsonOut {
