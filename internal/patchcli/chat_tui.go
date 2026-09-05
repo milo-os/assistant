@@ -24,6 +24,12 @@
 // under its block, the window title tracks whether a turn is running, and a
 // bell (optionally an OSC 9 desktop notification — see notifyMode) says so to a
 // user who has looked away.
+//
+// Turns: each streaming turn owns a cancellable context, so esc can stop this
+// turn without touching the session's. A stopped turn is finalized in place
+// (kept text plus an "interrupted" marker) and its generation is bumped, which
+// is what makes the abandoned goroutine's remaining messages stale. Messages
+// typed while a turn runs are queued and sent one per turn as each finishes.
 package patchcli
 
 import (
@@ -51,20 +57,42 @@ import (
 )
 
 // Streaming messages delivered to the model via p.Send from the turn goroutine.
+// Each carries the gen of the turn that produced it: an interrupt bumps
+// chatModel.turnGen, so the abandoned goroutine's late messages are dropped
+// instead of landing in the next turn (see [chatModel.interrupt]).
 type (
 	// streamChunkMsg is one partial answer chunk (artifact/message text).
-	streamChunkMsg struct{ text string }
+	streamChunkMsg struct {
+		gen  int
+		text string
+	}
 	// streamActivityMsg is one tool-activity update (a tool call starting or
 	// finishing) decoded from the service's working status updates.
-	streamActivityMsg struct{ act toolActivity }
+	streamActivityMsg struct {
+		gen int
+		act toolActivity
+	}
+	// streamIDsMsg carries the task and context ids as soon as the stream
+	// reveals them, rather than only at the end of the turn: an interrupt
+	// needs the task id to cancel, and the context id so the conversation an
+	// abandoned turn started is still threaded onto by the next one.
+	streamIDsMsg struct {
+		gen       int
+		taskID    a2a.TaskID
+		contextID string
+	}
 	// streamDoneMsg ends a turn; contextID threads the conversation forward.
 	streamDoneMsg struct {
+		gen       int
 		contextID string
 		failed    bool
 		failMsg   string
 	}
 	// streamErrMsg is a transport/stream error surfaced by the a2a client.
-	streamErrMsg struct{ err error }
+	streamErrMsg struct {
+		gen int
+		err error
+	}
 	// compactDoneMsg ends a /compact request (POST /v1/compact, outside the
 	// a2a client): err is nil on success, [ErrNothingToCompact] when the
 	// server had nothing to fold, or any other error on a real failure.
@@ -117,6 +145,9 @@ type activityRow struct {
 	elapsed time.Duration
 	done    bool
 	ok      bool
+	// stopped marks a call that was still running when the user interrupted
+	// the turn: finished, but neither a success nor a failure of its own.
+	stopped bool
 }
 
 // styles bundles the lipgloss styles that depend on the terminal background, so
@@ -233,6 +264,23 @@ type chatModel struct {
 	activity       []activityRow
 	turnActivity   map[int][]activityRow
 	expandActivity bool
+
+	// turnGen identifies the running turn, cancelTurn cancels its context and
+	// taskID is the service-side task to cancel with it. An interrupt bumps
+	// turnGen, which is what makes the abandoned goroutine's remaining
+	// messages stale (see [chatModel.interrupt]).
+	turnGen    int
+	cancelTurn context.CancelFunc
+	taskID     a2a.TaskID
+
+	// queued holds messages typed while a turn was running, listed above the
+	// composer and sent one per turn as each finishes. Capped at
+	// maxQueuedMessages.
+	queued []string
+
+	// ctrlCAt is when ctrl+c was last pressed, so a second press within
+	// ctrlCExitWindow leaves whatever the first one did instead.
+	ctrlCAt time.Time
 
 	// follow pins the transcript to the newest output. It is cleared when the
 	// user scrolls up and restored when they reach the bottom again (or send a
@@ -417,16 +465,35 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case streamChunkMsg:
+		if msg.gen != m.turnGen {
+			return m, nil
+		}
 		m.answer.WriteString(msg.text)
 		m.rebuildViewport()
 		return m, nil
 
 	case streamActivityMsg:
+		if msg.gen != m.turnGen {
+			return m, nil
+		}
 		m.applyActivity(msg.act)
 		m.rebuildViewport()
 		return m, nil
 
+	case streamIDsMsg:
+		if msg.gen != m.turnGen {
+			return m, nil
+		}
+		m.taskID = msg.taskID
+		if msg.contextID != "" {
+			m.contextID = msg.contextID
+		}
+		return m, nil
+
 	case streamDoneMsg:
+		if msg.gen != m.turnGen {
+			return m, nil
+		}
 		if msg.contextID != "" {
 			m.contextID = msg.contextID
 		}
@@ -451,19 +518,25 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.raw = append(m.raw, transcriptTurn{role: "assistant", content: rawAnswer})
 		m.answer.Reset()
-		m.working = false
+		m.endTurn()
 		m.closeOutTurn(tools)
 		m.rebuildViewport()
-		return m, m.notifyDone()
+		return m, tea.Batch(m.notifyDone(), m.drainQueue())
 
 	case streamErrMsg:
+		if msg.gen != m.turnGen {
+			return m, nil
+		}
 		errText := friendlyError(msg.err, m.client.errs)
 		tools := len(m.activity)
 		m.turns = append(m.turns, m.st.err.Render("patch: "+errText))
 		m.keepActivity(len(m.turns) - 1) // what ran before the break is part of the story
 		m.raw = append(m.raw, transcriptTurn{role: "system", content: "error: " + errText})
 		m.answer.Reset()
-		m.working = false
+		m.endTurn()
+		// The queue is dropped rather than drained: the breaks that end a turn
+		// this way (auth, a bad project) would fail every held message too.
+		m.queued = nil
 		m.closeOutTurn(tools)
 		m.rebuildViewport()
 		return m, m.notifyDone()
@@ -571,11 +644,21 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Ctrl-C/D always quits, picker open or not — a universal escape hatch
-	// regardless of what overlay is showing.
+	// In the picker or an overlay ctrl+c/d stay the plain escape hatch they
+	// always were; only the chat itself gives ctrl+c its three-way meaning.
 	switch msg.String() {
-	case "ctrl+c", "ctrl+d":
-		return m, tea.Quit
+	case "ctrl+c":
+		if m.picker.open || m.overlay != "" {
+			return m, tea.Quit
+		}
+		return m.onCtrlC()
+	case "ctrl+d":
+		// The shell rule: EOF ends the session only on an empty line, so a
+		// stray ctrl+d cannot throw a half-typed message away.
+		if m.picker.open || m.overlay != "" || m.ta.Value() == "" {
+			return m, tea.Quit
+		}
+		return m, nil
 	}
 	if m.picker.open {
 		return m.onPickerKey(msg)
@@ -602,9 +685,6 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.ta, _ = m.ta.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 			return m, m.insertNewline()
 		}
-		if m.working {
-			return m, nil
-		}
 		text := strings.TrimSpace(m.ta.Value())
 		if text == "" {
 			return m, nil
@@ -620,6 +700,16 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// so the transcript, the history file and the assistant all agree on
 		// what was sent. Commands carry no chips, so this is a no-op for them.
 		message := expandPasteChips(text, m.pastes)
+		if m.working {
+			// Slash commands act on the session rather than the conversation,
+			// so they are not held for later — they would run against a state
+			// the user can no longer see when the turn ends.
+			if strings.HasPrefix(text, "/") {
+				return m, nil
+			}
+			m.enqueue(message)
+			return m, nil
+		}
 		m.recordHistory(message)
 		// /rename is the only command that takes an argument, so it can't be a case in the exact-match switch below.
 		if arg, ok := commandArg(text, "/rename"); ok {
@@ -740,10 +830,21 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+home":
 		m.scrollBy(func() { m.vp.GotoTop() })
 		return m, nil
-	case "ctrl+end", "esc":
-		// esc doubles as "back to the latest" — the way out of having scrolled
-		// up, without hunting for the bottom. It's unbound outside the picker,
-		// which is handled earlier in this function.
+	case "esc":
+		// Newest intent first: drop what has not been sent yet, then stop what
+		// is running, and only then fall back to "back to the latest" — the
+		// way out of having scrolled up, without hunting for the bottom.
+		if len(m.queued) > 0 {
+			m.queued = nil
+			return m, nil
+		}
+		if m.interruptible() {
+			m.interrupt()
+			return m, nil
+		}
+		m.scrollBy(func() { m.vp.GotoBottom() })
+		return m, nil
+	case "ctrl+end":
 		m.scrollBy(func() { m.vp.GotoBottom() })
 		return m, nil
 	default:
@@ -962,14 +1063,17 @@ var helpText = []struct{ cmd, desc string }{
 // then the cursor once there is text to move through, then the transcript when
 // there is no history left to recall.
 var composerHelpText = []struct{ keys, desc string }{
-	{"enter", "send the message"},
+	{"enter", "send the message — or queue it while an answer is streaming"},
 	{"shift+enter, ctrl+j, alt+enter", "new line without sending (a trailing \\ before enter does too)"},
+	{"esc", "interrupt the running turn — a queue is dropped first"},
+	{"ctrl+c", "interrupt, else clear the draft, else leave (twice = leave)"},
+	{"ctrl+d", "leave, when the composer is empty"},
 	{"↑/↓", "recall past prompts while the composer is one line and unedited"},
 	{"", "…move the cursor once it has several lines or you have edited it"},
 	{"", "…scroll the transcript when there is no history left to recall"},
 	{"ctrl+r", "search past prompts (enter accepts, esc cancels)"},
 	{"paste", "over 3 lines or 800 characters collapses to a chip, expanded on send"},
-	{"pgup/pgdn, mouse wheel", "scroll the transcript · esc jumps back to the latest"},
+	{"pgup/pgdn, mouse wheel", "scroll the transcript · esc jumps back to the latest when idle"},
 	{"?", "show this help (on an empty composer; any key dismisses it)"},
 }
 
@@ -1102,20 +1206,40 @@ func (m *chatModel) suggestionBar() string {
 }
 
 // composerBar renders the one variable-height region between the transcript
-// and the input box. Exactly one thing occupies it: slash-command suggestions
-// while a command is being typed, else the ctrl+r search line, else the paste
-// chip legend, else the blank row suggestionBar returns. Everything here is one
-// line unless suggestions are showing, so suggestionRows() still sizes it.
+// and the input box: the queued-message list, then exactly one of
+// slash-command suggestions (while a command is being typed), the ctrl+r
+// search line, the paste chip legend, or the blank row suggestionBar returns.
+// It is always composerBarRows() lines tall, which is what View sizes the
+// viewport around.
 func (m *chatModel) composerBar() string {
+	rows := m.queuedBar()
 	if len(m.currentSuggestions()) == 0 {
 		switch {
 		case m.rsearch:
-			return m.searchBar()
+			return strings.Join(append(rows, m.searchBar()), "\n")
 		case len(m.pastes) > 0:
-			return m.chipBar()
+			return strings.Join(append(rows, m.chipBar()), "\n")
 		}
 	}
-	return m.suggestionBar()
+	return strings.Join(append(rows, m.suggestionBar()), "\n")
+}
+
+// maxQueuedMessages caps how many messages can wait behind a running turn.
+// Past it the composer keeps the text, so the cap never eats a message.
+const maxQueuedMessages = 5
+
+// queuedBar lists the messages waiting behind the running turn, one row each,
+// cut to a first line so a multi-line draft still takes a single row.
+func (m *chatModel) queuedBar() []string {
+	lines := make([]string, 0, len(m.queued)+1)
+	for _, q := range m.queued {
+		first, _, multiline := strings.Cut(q, "\n")
+		if multiline {
+			first += "…"
+		}
+		lines = append(lines, m.st.subtle.MaxWidth(m.contentWidth()).Render("↳ queued: "+first))
+	}
+	return lines
 }
 
 // searchBar is the ctrl+r filter line: the query and the best match so far.
@@ -1306,10 +1430,15 @@ func (m *chatModel) windowTitle() string {
 // — viewportHeight budgets exactly one row for it.
 func (m *chatModel) footer() string {
 	var left string
-	if m.working {
-		left = m.sp.View() + " " + m.st.subtle.Render("thinking…"+m.workingFor())
-	} else {
-		left = m.st.hint.Render("enter send · / commands · ? keys")
+	switch {
+	case m.ctrlCArmed():
+		// A ctrl+c that did something other than leave has to say how to leave.
+		left = m.st.hint.Render("ctrl+c again to exit")
+	case m.working:
+		left = m.sp.View() + " " + m.st.subtle.Render("thinking…"+m.workingFor()) +
+			m.st.hint.Render("  ·  esc interrupts · type to queue")
+	default:
+		left = m.st.hint.Render("enter send · / commands · ? keys · ctrl+c clears, twice leaves")
 	}
 	right := m.st.hint.Render(strings.Join(m.sessionBadges(), " · "))
 	w := m.contentWidth()
@@ -1512,18 +1641,24 @@ func (m *chatModel) notifyDone() tea.Cmd {
 }
 
 // submit records the user's line, starts the spinner, and launches the
-// streaming turn. It returns the spinner tick command; answer chunks arrive
-// asynchronously via p.Send from the goroutine started here.
+// streaming turn under a context of its own (see [chatModel.interrupt]). It
+// returns the spinner tick command; answer chunks arrive asynchronously via
+// p.Send from the goroutine started here.
 func (m *chatModel) submit(text string) tea.Cmd {
 	m.turns = append(m.turns, m.turnBlock(m.st.you.Render("You"), m.st.userText.Width(m.contentWidth()).Render(text)))
 	m.raw = append(m.raw, transcriptTurn{role: "user", content: text})
 	m.answer.Reset()
 	m.activity = nil
+	m.taskID = ""
 	m.working = true
 	m.follow = true
 	m.rebuildViewport()
 
-	go m.stream(text, m.contextID)
+	// Each turn streams under its own cancellable context, so esc can stop
+	// this turn without tearing down the session's.
+	ctx, cancel := context.WithCancel(m.baseContext())
+	m.cancelTurn = cancel
+	go m.stream(ctx, m.turnGen, text, m.contextID)
 	return m.sp.Tick
 }
 
@@ -1531,32 +1666,41 @@ func (m *chatModel) submit(text string) tea.Cmd {
 // via p.Send. It runs in its own goroutine (a Cmd yields a single message,
 // whereas a turn produces many), which is the supported Bubble Tea pattern for
 // long-lived producers.
-func (m *chatModel) stream(text, contextID string) {
+func (m *chatModel) stream(ctx context.Context, gen int, text, contextID string) {
 	req := &a2a.SendMessageRequest{Message: buildMessage(text, m.project, contextID)}
-	events := m.client.SendStreamingMessage(m.ctx, req)
+	events := m.client.SendStreamingMessage(ctx, req)
 	seen := contextID
+	var task, sentTask a2a.TaskID
+	sentCtx := contextID
 	for ev, err := range events {
 		if err != nil {
-			m.prog.Send(streamErrMsg{err})
+			m.prog.Send(streamErrMsg{gen: gen, err: err})
 			return
 		}
 		if id := eventContextID(ev); id != "" {
 			seen = id
 		}
+		if id := ev.TaskInfo().TaskID; id != "" {
+			task = id
+		}
+		if task != sentTask || seen != sentCtx {
+			sentTask, sentCtx = task, seen
+			m.prog.Send(streamIDsMsg{gen: gen, taskID: task, contextID: seen})
+		}
 		switch e := ev.(type) {
 		case *a2a.TaskArtifactUpdateEvent:
 			if t := textOf(e.Artifact.Parts); t != "" {
-				m.prog.Send(streamChunkMsg{t})
+				m.prog.Send(streamChunkMsg{gen: gen, text: t})
 			}
 		case *a2a.Message:
 			if t := textOf(e.Parts); t != "" {
-				m.prog.Send(streamChunkMsg{t})
+				m.prog.Send(streamChunkMsg{gen: gen, text: t})
 			}
 		case *a2a.TaskStatusUpdateEvent:
 			// Tool activity rides on working-state updates (see
 			// internal/a2a/activity.go); everything else is a state change.
 			if act, ok := toolActivityFrom(e.Status.Message); ok {
-				m.prog.Send(streamActivityMsg{act})
+				m.prog.Send(streamActivityMsg{gen: gen, act: act})
 				continue
 			}
 			if e.Status.State == a2a.TaskStateFailed {
@@ -1564,12 +1708,147 @@ func (m *chatModel) stream(text, contextID string) {
 				if e.Status.Message != nil {
 					note = textOf(e.Status.Message.Parts)
 				}
-				m.prog.Send(streamDoneMsg{contextID: seen, failed: true, failMsg: note})
+				m.prog.Send(streamDoneMsg{gen: gen, contextID: seen, failed: true, failMsg: note})
 				return
 			}
 		}
 	}
-	m.prog.Send(streamDoneMsg{contextID: seen})
+	m.prog.Send(streamDoneMsg{gen: gen, contextID: seen})
+}
+
+// interruptedMarker ends a turn the user stopped. It is rendered subtle, not
+// in the error style: an interrupt is something the user did, not a failure.
+const interruptedMarker = "⏹ interrupted"
+
+// cancelTaskTimeout bounds the best-effort task cancellation an interrupt
+// sends; it runs off the UI path, so a slow service can never stall a keypress.
+const cancelTaskTimeout = 10 * time.Second
+
+// baseContext is the session's context, or a background one for a model built
+// without one (the tests that drive Update directly).
+func (m *chatModel) baseContext() context.Context {
+	if m.ctx == nil {
+		return context.Background()
+	}
+	return m.ctx
+}
+
+// interruptible reports whether there is a streaming turn to stop. /compact
+// and /rename also set working, but have no turn context behind them.
+func (m *chatModel) interruptible() bool { return m.working && m.cancelTurn != nil }
+
+// interrupt abandons the running turn: whatever text arrived is kept and
+// finalized with interruptedMarker, running tool rows are closed out, and the
+// generation is bumped so the goroutine's remaining messages are dropped
+// rather than bleeding into the next turn. The service is told to drop the
+// task too, in the background — the local turn is over either way.
+func (m *chatModel) interrupt() {
+	m.turnGen++
+	task := m.taskID
+	m.stopRunning()
+
+	answer := strings.TrimRight(m.renderMarkdown(m.answer.String()), "\n")
+	if answer != "" {
+		answer += "\n"
+	}
+	m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), answer+m.st.subtle.Render(interruptedMarker)))
+	m.keepActivity(len(m.turns) - 1)
+	rawAnswer := strings.TrimRight(m.answer.String(), "\n")
+	if rawAnswer != "" {
+		rawAnswer += "\n"
+	}
+	m.raw = append(m.raw, transcriptTurn{role: "assistant", content: rawAnswer + interruptedMarker})
+	m.answer.Reset()
+	m.endTurn()
+	m.follow = true
+	m.rebuildViewport()
+
+	if task != "" && m.client != nil {
+		go m.cancelTask(task)
+	}
+}
+
+// endTurn clears the per-turn state a finished or abandoned turn leaves
+// behind. Cancelling even a completed turn's context is what releases it.
+func (m *chatModel) endTurn() {
+	m.working = false
+	m.taskID = ""
+	if m.cancelTurn != nil {
+		m.cancelTurn()
+		m.cancelTurn = nil
+	}
+}
+
+// stopRunning closes out the rows still in flight when a turn is abandoned, so
+// the transcript stops counting them up and nothing keeps re-rendering.
+func (m *chatModel) stopRunning() {
+	for i := range m.activity {
+		if r := &m.activity[i]; !r.done {
+			r.done, r.stopped, r.elapsed = true, true, time.Since(r.started)
+		}
+	}
+}
+
+// cancelTask asks the service to stop a task we have stopped watching. It is
+// best effort: the turn is already finalized locally, and a service that never
+// hears about it simply finishes the work unobserved.
+func (m *chatModel) cancelTask(id a2a.TaskID) {
+	ctx, cancel := context.WithTimeout(m.baseContext(), cancelTaskTimeout)
+	defer cancel()
+	_, _ = m.client.CancelTask(ctx, &a2a.CancelTaskRequest{ID: id})
+}
+
+// enqueue holds a message typed during a running turn. A full queue leaves the
+// text in the composer instead, so the cap can never swallow a message.
+func (m *chatModel) enqueue(text string) {
+	if len(m.queued) >= maxQueuedMessages {
+		return
+	}
+	m.queued = append(m.queued, text)
+	m.recordHistory(text)
+	m.resetComposer()
+}
+
+// drainQueue starts the oldest queued message as its own turn, so a queue is
+// sent one turn at a time rather than glued into a single prompt.
+func (m *chatModel) drainQueue() tea.Cmd {
+	if len(m.queued) == 0 || m.working {
+		return nil
+	}
+	next := m.queued[0]
+	m.queued = m.queued[1:]
+	return m.submit(next)
+}
+
+// ctrlCExitWindow is how long after a ctrl+c a second press leaves outright,
+// whatever the first one did.
+const ctrlCExitWindow = 2 * time.Second
+
+// ctrlCArmed reports whether a second ctrl+c would leave right now.
+func (m *chatModel) ctrlCArmed() bool {
+	return !m.ctrlCAt.IsZero() && time.Since(m.ctrlCAt) < ctrlCExitWindow
+}
+
+// onCtrlC is the three-way ctrl+c: stop the running turn, else clear an unsent
+// draft, else leave. Anything but leaving arms ctrlCExitWindow, so the plain
+// escape hatch is always one more press away.
+func (m *chatModel) onCtrlC() (tea.Model, tea.Cmd) {
+	if m.ctrlCArmed() {
+		return m, tea.Quit
+	}
+	switch {
+	case m.interruptible():
+		m.ctrlCAt = time.Now()
+		m.queued = nil // one "stop" gesture stops everything pending
+		m.interrupt()
+		return m, nil
+	case m.rsearch || m.ta.Value() != "":
+		m.ctrlCAt = time.Now()
+		m.rsearch = false
+		m.resetComposer()
+		return m, nil
+	}
+	return m, tea.Quit
 }
 
 // compact runs one manual "/compact" request against POST /v1/compact — a
@@ -1639,6 +1918,11 @@ func (m *chatModel) suggestionRows() int {
 	return 1
 }
 
+// composerBarRows is the whole height of the region between the transcript and
+// the input box: one row per queued message, plus the suggestion/search/chip
+// bar's own rows.
+func (m *chatModel) composerBarRows() int { return len(m.queued) + m.suggestionRows() }
+
 // composerRows is how many text rows the input box currently needs: the
 // textarea's own dynamic height, clamped to what the layout budgets for it.
 func (m *chatModel) composerRows() int {
@@ -1655,11 +1939,11 @@ func (m *chatModel) composerRows() int {
 // viewportHeight computes the transcript viewport's height from the last
 // known terminal height, chrome (outer box padding, header, header gap,
 // status line, input border), and the two variable blocks under it: the
-// suggestion/search/chip row and the composer itself.
+// queued/suggestion/search/chip rows and the composer itself.
 func (m *chatModel) viewportHeight() int {
 	// outer box padding (2) + header (1) + header gap (1) + status (1) +
 	// input box border (2 = top/bottom) = 7 rows of fixed chrome.
-	h := m.termHeight - 7 - m.composerRows() - m.suggestionRows()
+	h := m.termHeight - 7 - m.composerRows() - m.composerBarRows()
 	if h < 1 {
 		h = 1
 	}
@@ -1778,6 +2062,8 @@ func (m *chatModel) activityLines(rows []activityRow, folded bool) []string {
 		switch {
 		case !r.done:
 			lines = append(lines, m.st.patch.Render(fmt.Sprintf("• Running %s… %s", r.name, formatElapsed(time.Since(r.started)))))
+		case r.stopped:
+			lines = append(lines, m.st.subtle.Render(fmt.Sprintf("• Stopped %s · %s", r.name, formatElapsed(r.elapsed))))
 		case !r.ok:
 			lines = append(lines, m.st.err.Render(fmt.Sprintf("• Failed %s · %s", r.name, formatElapsed(r.elapsed))))
 		default:

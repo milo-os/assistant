@@ -375,9 +375,16 @@ Options:
                       across turns (Ctrl-D or /quit to leave)
       --tui           Full-screen Bubble Tea chat UI: scrollable transcript
                       (pgup/pgdn or the mouse wheel; esc jumps back to the
-                      latest), live-streamed answers rendered as markdown,
-                      spinner while the assistant works, tab-completion for
-                      slash commands. The composer is multi-line: enter sends,
+                      latest when idle), live-streamed answers rendered as
+                      markdown, spinner while the assistant works,
+                      tab-completion for slash commands. While an answer is
+                      streaming, esc interrupts the turn (keeping what already
+                      arrived) and enter queues your message to be sent as its
+                      own turn once the running one finishes — up to 5, listed
+                      above the composer, and dropped by a first esc.
+                      Ctrl-C interrupts, then clears the draft, then leaves;
+                      twice within two seconds always leaves.
+                      The composer is multi-line: enter sends,
                       shift+enter / ctrl+j / alt+enter (or a trailing
                       backslash before enter) start a new line, and the box
                       grows with the message. ↑/↓ recall past prompts while
@@ -395,13 +402,13 @@ Options:
                       /rename <name> (name this conversation),
                       /export (save the transcript to a file),
                       /status (show project/conversation/turn count), /help
-                      (list commands), /quit or /exit (leave; Ctrl-C also
-                      leaves). "?" on an empty composer shows the key list.
-                      Each finished turn is closed out by a "Worked for 23s ·
-                      3 tools · done 6:05 PM" line and a bell (see
-                      PATCH_NOTIFY); the footer under the composer carries the
-                      state on the left and the conversation, turn count and
-                      scroll position on the right.
+                      (list commands), /quit or /exit (leave; Ctrl-D on an
+                      empty composer leaves too). "?" on an empty composer
+                      shows the key list. Each finished turn is closed out by
+                      a "Worked for 23s · 3 tools · done 6:05 PM" line and a
+                      bell (see PATCH_NOTIFY); the footer under the composer
+                      carries the state on the left and the conversation, turn
+                      count and scroll position on the right.
   --url <url>         Service base URL (overrides PATCH_URL)
   --token <token>     Bearer token (overrides PATCH_TOKEN)
   --kubeconfig <p>    Kubeconfig for the conversations apiserver (overrides
