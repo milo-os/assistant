@@ -22,6 +22,7 @@ import (
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/auth"
 	"github.com/milo-os/assistant/internal/config"
+	"github.com/milo-os/assistant/internal/history"
 	appmetrics "github.com/milo-os/assistant/internal/metrics"
 )
 
@@ -43,6 +44,11 @@ type Deps struct {
 	// Runner that doesn't implement [assistanta2a.Compactor] simply doesn't
 	// offer manual compaction.
 	Compactor assistanta2a.Compactor
+
+	// Renamer drives POST /v1/conversations/rename (the "/rename" command) —
+	// the conversation store the chat path already writes. Nil answers 503 on
+	// that route, matching Compactor's posture.
+	Renamer history.Renamer
 
 	// TaskStore backs the A2A task lifecycle. When nil the server falls back to
 	// the a2a-go in-memory store (dev/tests): tasks are lost on restart. Boot
@@ -131,6 +137,9 @@ func New(deps Deps) http.Handler {
 	// Manual compaction ("/compact"): same bearer-token authn/project authz as
 	// POST /a2a, same underlying agent.Conversation — see compact.go.
 	mux.Handle("POST /v1/compact", compactHandler(deps.Compactor, deps.Authenticator, deps.Authorizer, logger))
+	// Naming a conversation ("/rename"): same auth as POST /v1/compact, and
+	// like it a plain store mutation rather than an A2A method — see rename.go.
+	mux.Handle("POST /v1/conversations/rename", renameHandler(deps.Renamer, deps.Authenticator, deps.Authorizer, logger))
 
 	// Outer-to-inner: tracing → request-id/logging → metrics → routes.
 	// otelhttp is outermost so it extracts an inbound W3C traceparent (or

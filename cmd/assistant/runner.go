@@ -26,17 +26,22 @@ import (
 // conversation/tool/model/compaction/gap-report telemetry lands on the same
 // /metrics endpoint as the HTTP metrics. The returned cleanup releases the
 // conversation store's resources (call it on shutdown; it is never nil).
-func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metrics *appmetrics.Metrics) (assistanta2a.AgentRunner, func(), error) {
+//
+// The conversation store is returned alongside the runner because the HTTP
+// layer needs it directly for POST /v1/conversations/rename — naming a
+// conversation is a row update with no agent in it, so routing it through the
+// runner seam (the way compaction is) would be a category error.
+func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metrics *appmetrics.Metrics) (assistanta2a.AgentRunner, history.Store, func(), error) {
 	model, err := agent.ResolveModel(cfg.Model, log)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	var persona string
 	if cfg.PersonaPromptFile != "" {
 		raw, err := os.ReadFile(cfg.PersonaPromptFile)
 		if err != nil {
-			return nil, nil, fmt.Errorf("read persona prompt file %s: %w", cfg.PersonaPromptFile, err)
+			return nil, nil, nil, fmt.Errorf("read persona prompt file %s: %w", cfg.PersonaPromptFile, err)
 		}
 		persona = string(raw)
 		log.Info("agent.persona.source", "type", "file", "path", cfg.PersonaPromptFile)
@@ -82,7 +87,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 	if cfg.ConversationStoreURL != "" {
 		pg, err := history.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		store, cleanup = pg, pg.Close
 	} else {
@@ -100,7 +105,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 	if cfg.ConversationStoreURL != "" {
 		pg, err := memory.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		mem = pg
 		prevCleanup := cleanup
@@ -120,7 +125,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 	if cfg.ConversationStoreURL != "" {
 		pg, err := gapreport.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		gaps = pg
 		prevCleanup := cleanup
@@ -144,7 +149,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 		Logger:                         log,
 		Metrics:                        metrics,
 	})
-	return conversationRunner{conv: conv}, cleanup, nil
+	return conversationRunner{conv: conv}, store, cleanup, nil
 }
 
 // conversationRunner adapts an [agent.Conversation] to [assistanta2a.AgentRunner]:
