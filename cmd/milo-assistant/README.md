@@ -32,6 +32,14 @@ turn is running. `PATCH_NOTIFY` picks how loud that is — `off`, `bell` (the
 default), or `desktop`, which adds an OSC 9 desktop notification where the
 terminal supports one.
 
+Typing `@` in the composer opens an inline picker over the project's own
+resources, the way `@` picks a file in a coding agent: first the kinds the
+project's control plane serves (`workload`, `httpproxy`, `instance`, …, read
+from API discovery with the same credentials as everything else here), then that
+kind's instances once you have chosen one. Tab or enter inserts `@workload/api-backend`
+into the message, which is sent both as literal text and as structured metadata,
+so the assistant knows what you pointed at and looks it up rather than guessing.
+
 Conversations can be given a name of your own — `conversations rename`, or
 `/rename <name>` in the chat. The name is shown in place of the derived title
 wherever conversations are listed, and the title stays underneath as the

@@ -21,7 +21,9 @@ type LineReader interface {
 // the exit code, the conversation's contextId as reported by the service
 // (so a follow-up turn can continue the conversation), and any stream error.
 func chatTurn(ctx context.Context, client *serviceClient, text, project, contextID string, jsonOut bool, io Io) (int, string, error) {
-	req := &a2a.SendMessageRequest{Message: buildMessage(text, project, contextID)}
+	// The line-based modes have no picker, but "@kind/name" typed by hand (or
+	// piped in) still reaches the service the same way the TUI's does.
+	req := &a2a.SendMessageRequest{Message: buildMessage(text, project, contextID, parseMentions(text))}
 	events := client.SendStreamingMessage(ctx, req)
 	seen := contextID
 	code, err := renderChat(captureContextID(events, &seen), jsonOut, io)
