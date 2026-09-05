@@ -858,11 +858,11 @@ func TestMouseWheelScrolls(t *testing.T) {
 // started/finished build the decoded activity updates the stream goroutine
 // sends, so these tests exercise rendering without any transport.
 func started(id, name, summary string) streamActivityMsg {
-	return streamActivityMsg{toolActivity{Kind: "tool_call", Phase: "started", ID: id, Name: name, Summary: summary}}
+	return streamActivityMsg{act: toolActivity{Kind: "tool_call", Phase: "started", ID: id, Name: name, Summary: summary}}
 }
 
 func finished(id, name string, ok bool, ms int64) streamActivityMsg {
-	return streamActivityMsg{toolActivity{Kind: "tool_call", Phase: "finished", ID: id, Name: name, OK: ok, ElapsedMs: ms}}
+	return streamActivityMsg{act: toolActivity{Kind: "tool_call", Phase: "finished", ID: id, Name: name, OK: ok, ElapsedMs: ms}}
 }
 
 // transcript is the viewport's current text, unstyled.
@@ -1720,5 +1720,276 @@ func TestNotifyOnTurnEnd(t *testing.T) {
 		if got := fmt.Sprint(raw.Msg); got != c.want {
 			t.Errorf("%v wrote %q, want %q", c.mode, got, c.want)
 		}
+	}
+}
+
+// ── interrupting a turn, and queuing input during one ──────────
+
+var (
+	escKey = key(tea.KeyEscape, "")
+	ctrlC  = modKey('c', tea.ModCtrl)
+	ctrlD  = modKey('d', tea.ModCtrl)
+)
+
+// quits reports whether a returned Cmd is tea.Quit, so the three-way ctrl+c
+// can be told apart from a press that only interrupted or cleared.
+func quits(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	_, ok := cmd().(tea.QuitMsg)
+	return ok
+}
+
+// working starts a real turn (so the model has a turn context to cancel) and
+// returns the model mid-answer.
+func workingModel(t *testing.T) *chatModel {
+	t.Helper()
+	m := newSubmitTestModel(t)
+	typeText(t, m, "explain")
+	m.onKey(enterKey)
+	if !m.interruptible() {
+		t.Fatal("setup: the model should have a turn to interrupt")
+	}
+	return m
+}
+
+func TestEscInterruptsAndKeepsThePartialAnswer(t *testing.T) {
+	m := workingModel(t)
+	m.Update(streamChunkMsg{text: "half an answer"})
+
+	m.onKey(escKey)
+	if m.working || m.interruptible() {
+		t.Fatal("esc should have ended the turn")
+	}
+	if got := transcript(m); !containsAll(got, "half an answer", interruptedMarker) {
+		t.Fatalf("an interrupted turn keeps its text and says it was stopped: %q", got)
+	}
+	last := m.raw[len(m.raw)-1]
+	if last.role != "assistant" || !strings.Contains(last.content, interruptedMarker) {
+		t.Fatalf("the exportable transcript should carry the marker too, got %+v", last)
+	}
+}
+
+// Anything the abandoned goroutine still had in flight must not reach the
+// next turn.
+func TestInterruptDropsLateStreamMessages(t *testing.T) {
+	m := workingModel(t)
+	m.Update(streamChunkMsg{text: "half"})
+	m.onKey(escKey)
+	turns := len(m.turns)
+
+	m.Update(streamChunkMsg{text: " and the rest"})
+	m.Update(started("c1", "late_tool", ""))
+	m.Update(streamIDsMsg{contextID: "ctx-late"})
+	m.Update(streamDoneMsg{contextID: "ctx-late"})
+
+	if len(m.turns) != turns {
+		t.Fatalf("late messages added %d turn(s)", len(m.turns)-turns)
+	}
+	if m.working || m.answer.Len() != 0 || len(m.activity) != 0 {
+		t.Fatalf("late messages restarted the turn: working=%v answer=%d activity=%+v",
+			m.working, m.answer.Len(), m.activity)
+	}
+	if strings.Contains(transcript(m), "and the rest") {
+		t.Fatalf("text from the abandoned turn leaked into the transcript: %q", transcript(m))
+	}
+	if m.contextID == "ctx-late" {
+		t.Fatal("a stale done should not thread the conversation forward")
+	}
+}
+
+func TestInterruptKeepsTheContextIDLearnedSoFar(t *testing.T) {
+	m := workingModel(t)
+	m.Update(streamIDsMsg{taskID: "task-1", contextID: "ctx-1"})
+	m.onKey(escKey)
+	if m.contextID != "ctx-1" {
+		t.Fatalf("the conversation an interrupted turn started should survive it, got %q", m.contextID)
+	}
+}
+
+func TestInterruptStopsRunningActivityRows(t *testing.T) {
+	m := workingModel(t)
+	m.Update(started("c1", "list_workloads", ""))
+	m.onKey(escKey)
+
+	rows := m.turnActivity[len(m.turns)-1]
+	if len(rows) != 1 || !rows[0].done || !rows[0].stopped {
+		t.Fatalf("the running row should be closed out as stopped, got %+v", rows)
+	}
+	got := transcript(m)
+	if !strings.Contains(got, "• Stopped list_workloads") || strings.Contains(got, "Running") {
+		t.Fatalf("the transcript should show a stopped row, not a running one: %q", got)
+	}
+}
+
+func TestEnterQueuesWhileWorking(t *testing.T) {
+	m := workingModel(t)
+	typeText(t, m, "and also this")
+	m.onKey(enterKey)
+
+	if len(m.queued) != 1 || m.queued[0] != "and also this" {
+		t.Fatalf("a message typed during a turn should queue, got %v", m.queued)
+	}
+	if m.ta.Value() != "" {
+		t.Fatalf("queuing should clear the composer, got %q", m.ta.Value())
+	}
+	if len(m.raw) != 1 {
+		t.Fatalf("a queued message is not part of the transcript yet, got %+v", m.raw)
+	}
+	if got := plain(m.composerBar()); !strings.Contains(got, "↳ queued: and also this") {
+		t.Fatalf("the queue should be listed above the composer: %q", got)
+	}
+}
+
+func TestQueuedRowsTakeHeightFromTheTranscript(t *testing.T) {
+	m := workingModel(t)
+	base := m.viewportHeight()
+	typeText(t, m, "one more")
+	m.onKey(enterKey)
+
+	if m.composerBarRows() != 2 || m.viewportHeight() != base-1 {
+		t.Fatalf("a queued row should cost the viewport one: bar=%d height=%d (was %d)",
+			m.composerBarRows(), m.viewportHeight(), base)
+	}
+	if got := len(strings.Split(m.composerBar(), "\n")); got != m.composerBarRows() {
+		t.Fatalf("the bar rendered %d lines, but the layout budgeted %d", got, m.composerBarRows())
+	}
+}
+
+func TestQueueDrainsInOrderOneTurnAtATime(t *testing.T) {
+	m := workingModel(t)
+	for _, s := range []string{"second", "third"} {
+		typeText(t, m, s)
+		m.onKey(enterKey)
+	}
+
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+	if len(m.queued) != 1 || m.queued[0] != "third" {
+		t.Fatalf("finishing a turn should send exactly one queued message, got %v", m.queued)
+	}
+	if !m.working {
+		t.Fatal("the drained message should be running as its own turn")
+	}
+	if last := m.raw[len(m.raw)-1]; last.role != "user" || last.content != "second" {
+		t.Fatalf("the oldest queued message goes first, got %+v", last)
+	}
+
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+	if len(m.queued) != 0 {
+		t.Fatalf("the queue should be empty now, got %v", m.queued)
+	}
+	if last := m.raw[len(m.raw)-1]; last.content != "third" {
+		t.Fatalf("the rest of the queue should follow in order, got %+v", last)
+	}
+}
+
+func TestEscDropsTheQueueBeforeInterrupting(t *testing.T) {
+	m := workingModel(t)
+	typeText(t, m, "never mind this")
+	m.onKey(enterKey)
+
+	m.onKey(escKey)
+	if len(m.queued) != 0 {
+		t.Fatalf("the first esc should drop the queue, got %v", m.queued)
+	}
+	if !m.working {
+		t.Fatal("the first esc should leave the running turn alone")
+	}
+	m.onKey(escKey)
+	if m.working {
+		t.Fatal("a second esc should interrupt the turn")
+	}
+}
+
+func TestQueueCapKeepsTheOverflowInTheComposer(t *testing.T) {
+	m := workingModel(t)
+	for i := range maxQueuedMessages {
+		typeText(t, m, fmt.Sprintf("q%d", i))
+		m.onKey(enterKey)
+	}
+	typeText(t, m, "overflow")
+	m.onKey(enterKey)
+
+	if len(m.queued) != maxQueuedMessages {
+		t.Fatalf("the queue should stop at %d, got %d", maxQueuedMessages, len(m.queued))
+	}
+	if m.ta.Value() != "overflow" {
+		t.Fatalf("an over-cap message should stay in the composer, got %q", m.ta.Value())
+	}
+}
+
+// Slash commands act on the session, so they are not held for later either.
+func TestSlashCommandIsNotQueued(t *testing.T) {
+	m := workingModel(t)
+	typeText(t, m, "/help")
+	m.onKey(enterKey)
+	if len(m.queued) != 0 || m.overlay != "" {
+		t.Fatalf("a command typed mid-turn should neither queue nor run: queued=%v overlay=%q", m.queued, m.overlay)
+	}
+}
+
+func TestCtrlCInterruptsThenClearsThenExits(t *testing.T) {
+	m := workingModel(t)
+	typeText(t, m, "queued")
+	m.onKey(enterKey)
+
+	if _, cmd := m.onKey(ctrlC); quits(cmd) {
+		t.Fatal("ctrl+c during a turn should interrupt, not exit")
+	}
+	if m.working || len(m.queued) != 0 {
+		t.Fatalf("ctrl+c should stop the turn and everything behind it: working=%v queued=%v", m.working, m.queued)
+	}
+
+	m.ctrlCAt = time.Time{} // past the double-press window
+	typeText(t, m, "a draft")
+	if _, cmd := m.onKey(ctrlC); quits(cmd) {
+		t.Fatal("ctrl+c with a draft should clear it, not exit")
+	}
+	if m.ta.Value() != "" {
+		t.Fatalf("the draft should be gone, got %q", m.ta.Value())
+	}
+
+	m.ctrlCAt = time.Time{}
+	if _, cmd := m.onKey(ctrlC); !quits(cmd) {
+		t.Fatal("ctrl+c with nothing running and nothing typed should exit")
+	}
+}
+
+func TestSecondCtrlCWithinTheWindowExits(t *testing.T) {
+	m := newSubmitTestModel(t)
+	typeText(t, m, "a draft")
+	if _, cmd := m.onKey(ctrlC); quits(cmd) {
+		t.Fatal("setup: the first ctrl+c should clear the draft")
+	}
+
+	typeText(t, m, "another draft")
+	if _, cmd := m.onKey(ctrlC); !quits(cmd) {
+		t.Fatal("a second ctrl+c inside the window should exit, draft or not")
+	}
+
+	m.ctrlCAt = time.Now().Add(-2 * ctrlCExitWindow)
+	if _, cmd := m.onKey(ctrlC); quits(cmd) {
+		t.Fatal("once the window has passed, ctrl+c should go back to clearing the draft")
+	}
+}
+
+func TestCtrlDLeavesOnlyOnAnEmptyComposer(t *testing.T) {
+	m := newTestModel()
+	typeText(t, m, "draft")
+	if _, cmd := m.onKey(ctrlD); quits(cmd) {
+		t.Fatal("ctrl+d with a draft should not exit")
+	}
+	m.resetComposer()
+	if _, cmd := m.onKey(ctrlD); !quits(cmd) {
+		t.Fatal("ctrl+d on an empty composer should exit")
+	}
+}
+
+func TestHelpOverlayDocumentsTheInterruptKeys(t *testing.T) {
+	m := newTestModel()
+	out := plain(m.helpView().Content)
+	if !containsAll(out, "esc", "interrupt the running turn", "ctrl+c", "ctrl+d") {
+		t.Fatalf("/help should document interrupting and queuing, got:\n%s", out)
 	}
 }
