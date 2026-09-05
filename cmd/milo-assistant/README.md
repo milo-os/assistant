@@ -6,9 +6,11 @@ its own login.
 
 ```
 datumctl assistant                                                  # full-screen chat
+datumctl assistant -c                                               # …continuing the last conversation
 datumctl assistant resume                                           # pick up a past conversation
 datumctl assistant chat "Why is the api-backend workload not available?"   # one-shot, for pipes
 datumctl assistant conversations list
+datumctl assistant conversations rename <context-id> "dfw quota escalation"
 ```
 
 The bare verb is the chat, the way `claude` or `codex` on their own are: the
@@ -20,7 +22,14 @@ line-based session for terminals that cannot run it.
 the style of `claude --resume`: type to search the project's conversations
 (newest first, each shown by its opening message), ↑/↓ to browse, ctrl+t to
 preview a transcript, enter to pick up where it left off. `resume <context-id>`
-skips the picker. The same picker is `/resume` inside `chat --tui`.
+skips the picker, and `--last` (like `-c` on the chat) skips straight to the
+most recently active conversation. The same picker is `/resume` inside
+`chat --tui`.
+
+Conversations can be given a name of your own — `conversations rename`, or
+`/rename <name>` in the chat. The name is shown in place of the derived title
+wherever conversations are listed, and the title stays underneath as the
+fallback for the ones never named.
 
 The binary is named `milo-assistant`, not `datumctl-assistant`. datumctl recognises
 both prefixes on `$PATH` and treats `milo-` as marking *"portable milo-os
