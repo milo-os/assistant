@@ -58,7 +58,7 @@ func newTestServerWithRenamer(t *testing.T, renamer history.Renamer) *httptest.S
 func postRename(t *testing.T, srv *httptest.Server, token string, body map[string]any) *http.Response {
 	t.Helper()
 	raw, _ := json.Marshal(body)
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/conversations/rename", bytes.NewReader(raw))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1alpha1/conversations/rename", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)

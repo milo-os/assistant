@@ -12,8 +12,8 @@ import (
 	"github.com/milo-os/assistant/internal/history"
 )
 
-// renameRequestBody is the POST /v1/conversations/rename body. contextId and
-// projectName mean exactly what they do on POST /v1/compact; name is what the
+// renameRequestBody is the POST /v1alpha1/conversations/rename body. contextId and
+// projectName mean exactly what they do on POST /v1alpha1/compact; name is what the
 // user wants this conversation called.
 type renameRequestBody struct {
 	ContextID   string `json:"contextId"`
@@ -21,8 +21,8 @@ type renameRequestBody struct {
 	Name        string `json:"name"`
 }
 
-// renameHandler serves POST /v1/conversations/rename — the "/rename" command's
-// endpoint, a sibling of POST /v1/compact and shaped like it: a small REST
+// renameHandler serves POST /v1alpha1/conversations/rename — the "/rename" command's
+// endpoint, a sibling of POST /v1alpha1/compact and shaped like it: a small REST
 // route outside the A2A protocol (there is no message to answer, just a store
 // mutation) reusing the same bearer-token authn and project authz POST /a2a
 // applies, so no endpoint here carries a second auth scheme.

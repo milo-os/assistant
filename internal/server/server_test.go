@@ -51,7 +51,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 }
 
 // newTestServerWithCompactor is [newTestServer] plus an injectable
-// [assistanta2a.Compactor], for the POST /v1/compact tests — every other
+// [assistanta2a.Compactor], for the POST /v1alpha1/compact tests — every other
 // caller passes nil (matching production before a Runner implementing
 // Compactor exists) and gets identical behavior to newTestServer.
 func newTestServerWithCompactor(t *testing.T, compactor assistanta2a.Compactor) *httptest.Server {

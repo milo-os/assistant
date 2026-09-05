@@ -39,13 +39,13 @@ type Deps struct {
 	Authorizer    auth.Authorizer
 	Runner        assistanta2a.AgentRunner
 
-	// Compactor drives POST /v1/compact (the manual "/compact" command). Nil
+	// Compactor drives POST /v1alpha1/compact (the manual "/compact" command). Nil
 	// answers 503 on that route rather than failing to build the server — a
 	// Runner that doesn't implement [assistanta2a.Compactor] simply doesn't
 	// offer manual compaction.
 	Compactor assistanta2a.Compactor
 
-	// Renamer drives POST /v1/conversations/rename (the "/rename" command) —
+	// Renamer drives POST /v1alpha1/conversations/rename (the "/rename" command) —
 	// the conversation store the chat path already writes. Nil answers 503 on
 	// that route, matching Compactor's posture.
 	Renamer history.Renamer
@@ -136,10 +136,10 @@ func New(deps Deps) http.Handler {
 	mux.Handle("POST /a2a", mw)
 	// Manual compaction ("/compact"): same bearer-token authn/project authz as
 	// POST /a2a, same underlying agent.Conversation — see compact.go.
-	mux.Handle("POST /v1/compact", compactHandler(deps.Compactor, deps.Authenticator, deps.Authorizer, logger))
-	// Naming a conversation ("/rename"): same auth as POST /v1/compact, and
+	mux.Handle("POST /v1alpha1/compact", compactHandler(deps.Compactor, deps.Authenticator, deps.Authorizer, logger))
+	// Naming a conversation ("/rename"): same auth as POST /v1alpha1/compact, and
 	// like it a plain store mutation rather than an A2A method — see rename.go.
-	mux.Handle("POST /v1/conversations/rename", renameHandler(deps.Renamer, deps.Authenticator, deps.Authorizer, logger))
+	mux.Handle("POST /v1alpha1/conversations/rename", renameHandler(deps.Renamer, deps.Authenticator, deps.Authorizer, logger))
 
 	// Outer-to-inner: tracing → request-id/logging → metrics → routes.
 	// otelhttp is outermost so it extracts an inbound W3C traceparent (or
