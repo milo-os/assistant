@@ -166,6 +166,7 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 		ProjectName: req.ProjectName,
 		ContextID:   req.ContextID,
 		TaskID:      req.TaskID,
+		Mentions:    agentMentions(req.Mentions),
 	})
 	defer stream.Close()
 
@@ -195,6 +196,20 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 		Text:  res.Text,
 		Error: res.Error,
 	}
+}
+
+// agentMentions restates the transport's mention list as the orchestration
+// layer's own type — the two packages deliberately share no types (see
+// assistanta2a.AgentRunner), so this adapter is where they meet.
+func agentMentions(ms []assistanta2a.Mention) []agent.Mention {
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]agent.Mention, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, agent.Mention{Kind: m.Kind, Name: m.Name, APIGroup: m.APIGroup})
+	}
+	return out
 }
 
 // toolActivityTracker turns the run loop's tool-call/tool-result event pair

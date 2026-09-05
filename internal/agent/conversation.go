@@ -195,6 +195,9 @@ type Params struct {
 	ContextID string
 	// TaskID is the A2A task id, used for logging.
 	TaskID string
+	// Mentions are the resources the user referenced with "@kind/name"; they
+	// add one system note to this turn (see mentionNote).
+	Mentions []Mention
 }
 
 // EventKind discriminates streamed [Event]s.
@@ -298,9 +301,16 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	turnCtx, turnSpan := tracer.Start(turnCtx, "conversation.turn")
 	turnStart := time.Now()
 
+	// The mention note is per-turn, so it is appended after the (stable)
+	// system prompt rather than composed into it.
+	system := BuildSystemPrompt(c.deps.Persona, composed.SystemPromptAddendum)
+	if note := mentionNote(params.ProjectName, params.Mentions); note != "" {
+		system += "\n\n" + note
+	}
+
 	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
 		Model:           tracedModel(c.deps.Model, c.deps.Metrics),
-		System:          BuildSystemPrompt(c.deps.Persona, composed.SystemPromptAddendum),
+		System:          system,
 		Messages:        messages,
 		Tools:           tracedTools(composed.Tools, c.deps.Metrics),
 		StepLimit:       c.deps.StepLimit,
