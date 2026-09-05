@@ -328,10 +328,30 @@ tasks:
           go run ./cmd/patch chat --tui --project {{.PROJECT}} {{if .CTX}}--context-id {{.CTX}}{{end}}
         fi
 
+  dev:resume:
+    desc: >-
+      Pick up a past conversation: opens the TUI's searchable picker, or with
+      CTX=<context-id> loads that conversation directly. Auto-forwards like
+      dev:chat; the listing itself reads the cluster via kubectl (KUBECONFIG).
+    silent: true
+    env:
+      KUBECONFIG: '{{.KUBECONFIG_PATH}}'
+      PATCH_URL: '{{.PATCH_URL}}'
+      PATCH_TOKEN: '{{.PATCH_TOKEN}}'
+    cmds:
+      - |
+        if ! curl -sf -m 2 -o /dev/null "$PATCH_URL/healthz" 2>/dev/null; then
+          echo "→ port-forwarding svc/assistant → localhost:1986 …"
+          kubectl -n {{.NS}} port-forward svc/assistant 1986:7820 >/dev/null 2>&1 &
+          for i in $(seq 1 30); do curl -sf -m 2 -o /dev/null "$PATCH_URL/healthz" 2>/dev/null && break; sleep 0.5; done
+        fi
+        go run ./cmd/patch resume {{.CTX}} --project {{.PROJECT}}
+
   dev:chats:
     desc: >-
       List this project's conversations from the aggregated apiserver, then
-      resume one with `task dev:chat CTX=<context-id>`. Show one transcript with
+      resume one with `task dev:resume CTX=<context-id>` (or pick from the
+      searchable list with plain `task dev:resume`). Show one transcript with
       ID=<context-id>. Reads the cluster directly via kubectl (the apiserver
       read view) — no port-forward, uses KUBECONFIG not PATCH_URL/PATCH_TOKEN.
     silent: true

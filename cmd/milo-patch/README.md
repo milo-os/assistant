@@ -7,8 +7,15 @@ its own login.
 ```
 datumctl patch chat "Why is the api-backend workload not available?"
 datumctl patch chat --tui
+datumctl patch resume
 datumctl patch conversations list
 ```
+
+`resume` opens the full-screen chat straight into a conversation picker in
+the style of `claude --resume`: type to search the project's conversations
+(newest first, each shown by its opening message), ↑/↓ to browse, ctrl+t to
+preview a transcript, enter to pick up where it left off. `resume <context-id>`
+skips the picker. The same picker is `/resume` inside `chat --tui`.
 
 The binary is named `milo-patch`, not `datumctl-patch`. datumctl recognises
 both prefixes on `$PATH` and treats `milo-` as marking *"portable milo-os
@@ -23,7 +30,7 @@ only in where three things come from:
 | | `patch` | `datumctl patch` |
 | --- | --- | --- |
 | Project | `--project` | `--project`, defaulted from `DATUM_PROJECT` |
-| Token | `--token` / `PATCH_TOKEN` | `plugin.Token()` → datumctl's credentials helper |
+| Token | `--token` / `PATCH_TOKEN` | `plugin.Token()` → datumctl's credentials helper; `PATCH_TOKEN` overrides it for the dev playground |
 | Endpoint | `--url` / `PATCH_URL` | `--url` / `PATCH_URL` (unchanged — see *Open decisions*) |
 
 ## Build and dev-install
@@ -73,7 +80,15 @@ datumctl injects six variables and never passes a token among them:
 | `DATUM_PLUGIN_API_VERSION` | `1`; the manifest declares the same |
 
 Tokens are resolved **per request**, not once at startup, so a long `--tui`
-session outlives the short-lived token it began with. Each call is bounded by a
+session outlives the short-lived token it began with. Setting `PATCH_TOKEN`
+bypasses the helper entirely — the way to point the plugin at the kind
+playground, whose static dev token datumctl cannot mint (and whose aggregated
+API is only reachable through its kubeconfig, hence `--kubeconfig`):
+
+```bash
+export PATCH_URL=http://localhost:1986 PATCH_TOKEN=pg-demo-token
+datumctl patch resume --project demo-project --kubeconfig .test-infra/kubeconfig
+``` Each call is bounded by a
 10s timeout because `plugin.Token()` takes no context and would otherwise hang
 the plugin on a wedged helper.
 
@@ -84,7 +99,7 @@ reading a Kubernetes API deserves the caller's Kubernetes identity. Milo accepts
 the token datumctl already mints, so that bought no extra identity — only a
 second way to be pointed at the wrong server, since kubectl's current context
 has nothing to do with the datumctl context. `--kubeconfig` still selects the
-kubectl path for anyone who wants it.
+kubectl path for anyone who wants it. `resume` lists and loads conversations the same way.
 
 Exit codes are the standalone CLI's — `0` completed, `1` request/stream failure
 or a task that did not complete, `2` usage or configuration error — plus `130`
