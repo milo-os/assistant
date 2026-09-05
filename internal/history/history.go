@@ -103,6 +103,25 @@ func TitleOf(opening string) string {
 	return string(r[:MaxTitleLen-1]) + "…"
 }
 
+// MaxNameLen caps [Conversation.Name] — the name a user gives a conversation
+// with /rename — in runes. Shorter than MaxTitleLen because a name is meant to
+// be scanned in a list, not read: it competes with the derived title for the
+// same column.
+const MaxNameLen = 80
+
+// NormalizeName folds a user-supplied conversation name into what the stores
+// keep: whitespace (including newlines) collapsed to single spaces and the
+// result cut to MaxNameLen runes. Empty — or all whitespace — means "no name",
+// which clears one that was set.
+func NormalizeName(name string) string {
+	s := strings.Join(strings.Fields(name), " ")
+	r := []rune(s)
+	if len(r) > MaxNameLen {
+		return string(r[:MaxNameLen])
+	}
+	return s
+}
+
 // openingUserText returns the first ordinary (non-summary) turn's UserText,
 // or "" if the conversation holds only a compaction digest.
 func openingUserText(turns []Turn) string {
@@ -168,6 +187,18 @@ type Store interface {
 	// compaction step (internal/agent); never called from the normal chat
 	// Append path.
 	Compact(ctx context.Context, projectName, contextID string, summary Turn, keep []Turn) error
+	Renamer
+}
+
+// Renamer sets a conversation's user-given name. It is spelled as its own
+// interface, the way [Lister] and [Reader] are, so the HTTP layer's rename
+// endpoint can depend on this one method instead of the whole chat-path
+// [Store].
+type Renamer interface {
+	// Rename sets the conversation's name (see [Conversation.Name]), or
+	// clears it when name normalizes to empty. An unknown (project, context)
+	// key yields [ErrConversationNotFound] — a rename creates nothing.
+	Rename(ctx context.Context, projectName, contextID, name string) error
 }
 
 // MemoryStore is an in-process [Store] and [Lister]. History lives for the
@@ -182,6 +213,7 @@ type MemoryStore struct {
 type memoryMeta struct {
 	createdAt    time.Time
 	lastActiveAt time.Time
+	name         string
 }
 
 type storeKey struct {
@@ -190,9 +222,10 @@ type storeKey struct {
 }
 
 var (
-	_ Store  = (*MemoryStore)(nil)
-	_ Lister = (*MemoryStore)(nil)
-	_ Reader = (*MemoryStore)(nil)
+	_ Store   = (*MemoryStore)(nil)
+	_ Lister  = (*MemoryStore)(nil)
+	_ Reader  = (*MemoryStore)(nil)
+	_ Renamer = (*MemoryStore)(nil)
 )
 
 // NewMemoryStore returns an empty in-memory store.
@@ -265,6 +298,20 @@ func (s *MemoryStore) Compact(_ context.Context, projectName, contextID string, 
 	return nil
 }
 
+// Rename implements [Renamer]. It deliberately leaves lastActiveAt alone:
+// naming a conversation says something about it, it is not a turn in it, and
+// reordering the picker under the user's cursor would be a surprise.
+func (s *MemoryStore) Rename(_ context.Context, projectName, contextID, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.meta[storeKey{project: projectName, context: contextID}]
+	if !ok {
+		return ErrConversationNotFound
+	}
+	m.name = NormalizeName(name)
+	return nil
+}
+
 // ListConversations implements [Lister]: the project's conversations, newest
 // activity first. limit <= 0 uses 100.
 func (s *MemoryStore) ListConversations(_ context.Context, projectName string, limit int) ([]Conversation, error) {
@@ -286,6 +333,7 @@ func (s *MemoryStore) ListConversations(_ context.Context, projectName string, l
 			LastActiveAt: m.lastActiveAt,
 			TurnCount:    int64(len(turns)),
 			Title:        TitleOf(openingUserText(turns)),
+			Name:         m.name,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastActiveAt.After(out[j].LastActiveAt) })
@@ -311,6 +359,7 @@ func (s *MemoryStore) GetConversation(_ context.Context, projectName, contextID 
 		LastActiveAt: m.lastActiveAt,
 		TurnCount:    int64(len(s.turns[key])),
 		Title:        TitleOf(openingUserText(s.turns[key])),
+		Name:         m.name,
 	}, nil
 }
 

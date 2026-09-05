@@ -2,11 +2,14 @@ package history
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 // storeConformance runs the behavioral contract every Store+Lister must
@@ -143,6 +146,81 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		got, err = s.GetConversation(ctx, project, contextID)
 		if err != nil || got.Title != "" {
 			t.Fatalf("summary-only title = %q, %v; want empty", got.Title, err)
+		}
+	})
+
+	t.Run("rename sets a name without disturbing the title", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("rename")
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "why is p-1 down?", AssistantText: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Rename(ctx, project, contextID, "  dfw   quota\nescalation "); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetConversation(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Normalized (collapsed, trimmed) — and the derived title is still
+		// there underneath, which is the point of keeping them separate.
+		if got.Name != "dfw quota escalation" {
+			t.Fatalf("name = %q, want the normalized name", got.Name)
+		}
+		if got.Title != "why is p-1 down?" {
+			t.Fatalf("title = %q, want it untouched by the rename", got.Title)
+		}
+		convs, err := s.ListConversations(ctx, project, 10)
+		if err != nil || len(convs) != 1 || convs[0].Name != "dfw quota escalation" {
+			t.Fatalf("list = %+v, %v; want the name on the listed row", convs, err)
+		}
+
+		// Renaming again replaces; an empty name clears back to unnamed.
+		if err := s.Rename(ctx, project, contextID, "second thoughts"); err != nil {
+			t.Fatal(err)
+		}
+		if got, err = s.GetConversation(ctx, project, contextID); err != nil || got.Name != "second thoughts" {
+			t.Fatalf("re-rename = %q, %v", got.Name, err)
+		}
+		if err := s.Rename(ctx, project, contextID, "   "); err != nil {
+			t.Fatal(err)
+		}
+		if got, err = s.GetConversation(ctx, project, contextID); err != nil || got.Name != "" {
+			t.Fatalf("cleared name = %q, %v; want empty", got.Name, err)
+		}
+	})
+
+	t.Run("rename caps the name at MaxNameLen runes", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("renamelong")
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "u", AssistantText: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		// Multi-byte runes, so a byte-wise cut would both truncate wrong and
+		// risk splitting a rune on the way into a text column.
+		long := strings.Repeat("é", MaxNameLen+40)
+		if err := s.Rename(ctx, project, contextID, long); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetConversation(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := utf8.RuneCountInString(got.Name); n != MaxNameLen {
+			t.Fatalf("name is %d runes, want %d", n, MaxNameLen)
+		}
+	})
+
+	t.Run("rename of an unknown conversation is not found", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("renamemissing")
+		err := s.Rename(ctx, project, contextID, "nope")
+		if !errors.Is(err, ErrConversationNotFound) {
+			t.Fatalf("err = %v, want ErrConversationNotFound", err)
+		}
+		// And it must not have created one on the way to failing.
+		if convs, lErr := s.ListConversations(ctx, project, 10); lErr != nil || len(convs) != 0 {
+			t.Fatalf("list = %+v, %v; want empty", convs, lErr)
 		}
 	})
 

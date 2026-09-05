@@ -189,3 +189,18 @@ func TestTitleOfCollapsesAndTruncates(t *testing.T) {
 		t.Fatal("empty in should be empty out")
 	}
 }
+
+func TestNormalizeNameCollapsesAndCaps(t *testing.T) {
+	if got := NormalizeName("  dfw   quota\nescalation  "); got != "dfw quota escalation" {
+		t.Fatalf("collapse: got %q", got)
+	}
+	// Unlike TitleOf, an over-long name is cut without an ellipsis: the user
+	// typed this one, so it is trimmed to fit rather than marked as elided.
+	long := strings.Repeat("é", MaxNameLen+5)
+	if got := []rune(NormalizeName(long)); len(got) != MaxNameLen || got[len(got)-1] != 'é' {
+		t.Fatalf("cap: got %d runes ending %q", len(got), string(got[len(got)-1]))
+	}
+	if NormalizeName("   ") != "" {
+		t.Fatal("all whitespace should normalize to no name")
+	}
+}

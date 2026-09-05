@@ -43,6 +43,10 @@ type ConversationStatus struct {
 	// line and truncated — what the conversation is about, for listings.
 	// +optional
 	Title string `json:"title,omitempty"`
+	// Name is what the user called this conversation, empty until they name
+	// one. Clients show it in place of Title where set.
+	// +optional
+	Name string `json:"name,omitempty"`
 }
 
 // +kubebuilder:object:root=true
