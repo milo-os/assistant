@@ -175,3 +175,17 @@ func TestMessagesAlternatesRoles(t *testing.T) {
 		t.Fatal("Messages(nil) should be nil")
 	}
 }
+
+func TestTitleOfCollapsesAndTruncates(t *testing.T) {
+	if got := TitleOf("  hello\n\tworld  "); got != "hello world" {
+		t.Fatalf("collapse: got %q", got)
+	}
+	long := strings.Repeat("é", MaxTitleLen+5)
+	got := TitleOf(long)
+	if r := []rune(got); len(r) != MaxTitleLen || r[len(r)-1] != '…' {
+		t.Fatalf("truncate: got %d runes ending %q", len(r), string(r[len(r)-1]))
+	}
+	if TitleOf("") != "" {
+		t.Fatal("empty in should be empty out")
+	}
+}

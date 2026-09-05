@@ -55,7 +55,7 @@ func nsCtx(ns string) context.Context {
 func TestConversationGet(t *testing.T) {
 	now := time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)
 	reader := &fakeReader{convs: map[string][]history.Conversation{
-		"demo": {{ProjectName: "demo", ContextID: "ctx-1", CreatedAt: now, LastActiveAt: now.Add(time.Hour), TurnCount: 3}},
+		"demo": {{ProjectName: "demo", ContextID: "ctx-1", CreatedAt: now, LastActiveAt: now.Add(time.Hour), TurnCount: 3, Title: "why is p-1 down?"}},
 	}}
 	rest := NewConversationREST(reader)
 
@@ -69,6 +69,9 @@ func TestConversationGet(t *testing.T) {
 	}
 	if c.Status.MessageCount != 3 {
 		t.Errorf("MessageCount = %d, want 3", c.Status.MessageCount)
+	}
+	if c.Status.Title != "why is p-1 down?" {
+		t.Errorf("Title = %q, want the store's title", c.Status.Title)
 	}
 	if !c.CreationTimestamp.Time.Equal(now) {
 		t.Errorf("CreationTimestamp = %v, want %v", c.CreationTimestamp.Time, now)

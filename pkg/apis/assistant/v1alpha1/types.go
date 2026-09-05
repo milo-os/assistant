@@ -39,6 +39,10 @@ type ConversationStatus struct {
 	// MessageCount is the number of stored messages.
 	// +optional
 	MessageCount int32 `json:"messageCount,omitempty"`
+	// Title is the conversation's opening user message, collapsed to one
+	// line and truncated — what the conversation is about, for listings.
+	// +optional
+	Title string `json:"title,omitempty"`
 }
 
 // +kubebuilder:object:root=true

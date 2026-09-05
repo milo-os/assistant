@@ -50,6 +50,7 @@ func convert_v1alpha1_Conversation_To_assistant(in *Conversation, out *assistant
 	out.Status = assistant.ConversationStatus{
 		LastActiveAt: in.Status.LastActiveAt,
 		MessageCount: in.Status.MessageCount,
+		Title:        in.Status.Title,
 	}
 	return nil
 }
@@ -60,6 +61,7 @@ func convert_assistant_Conversation_To_v1alpha1(in *assistant.Conversation, out 
 	out.Status = ConversationStatus{
 		LastActiveAt: in.Status.LastActiveAt,
 		MessageCount: in.Status.MessageCount,
+		Title:        in.Status.Title,
 	}
 	return nil
 }

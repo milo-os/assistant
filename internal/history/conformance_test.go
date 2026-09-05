@@ -107,6 +107,45 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		}
 	})
 
+	t.Run("title is the opening user message, surviving compaction", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("title")
+		opening := "Why is the  api-backend\nworkload not available?"
+		for _, u := range []string{opening, "and the edge-cache one?", "thanks"} {
+			if err := s.Append(ctx, project, contextID, Turn{UserText: u, AssistantText: "a"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		want := "Why is the api-backend workload not available?"
+		convs, err := s.ListConversations(ctx, project, 10)
+		if err != nil || len(convs) != 1 || convs[0].Title != want {
+			t.Fatalf("list title = %+v, %v; want %q", convs, err, want)
+		}
+		got, err := s.GetConversation(ctx, project, contextID)
+		if err != nil || got.Title != want {
+			t.Fatalf("get title = %q, %v; want %q", got.Title, err, want)
+		}
+		// After compaction the summary turn's synthetic marker sits at the
+		// head of the transcript; the title must skip it and pick the oldest
+		// real user message that survived.
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"),
+			[]Turn{{UserText: "and the edge-cache one?", AssistantText: "a"}}); err != nil {
+			t.Fatal(err)
+		}
+		got, err = s.GetConversation(ctx, project, contextID)
+		if err != nil || got.Title != "and the edge-cache one?" {
+			t.Fatalf("post-compact title = %q, %v", got.Title, err)
+		}
+		// Only a summary left: no title rather than the marker text.
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), nil); err != nil {
+			t.Fatal(err)
+		}
+		got, err = s.GetConversation(ctx, project, contextID)
+		if err != nil || got.Title != "" {
+			t.Fatalf("summary-only title = %q, %v; want empty", got.Title, err)
+		}
+	})
+
 	t.Run("compact replaces stored turns with summary+keep", func(t *testing.T) {
 		s := newStore(t)
 		project, contextID := fresh("compact")
