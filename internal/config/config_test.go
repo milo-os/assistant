@@ -278,3 +278,33 @@ func TestLoad_ExplicitSAREndpoint(t *testing.T) {
 		t.Errorf("SAR verb = %q", cfg.Auth.SARVerb)
 	}
 }
+
+func TestLoad_CapabilityIdentityForwardHosts(t *testing.T) {
+	cfg, err := load(t, map[string]string{
+		"CAPABILITY_IDENTITY_FORWARD_HOSTS": " gateway.svc.cluster.local , ,mcp.datum.test ",
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := []string{"gateway.svc.cluster.local", "mcp.datum.test"}
+	if len(cfg.CapabilityIdentityForwardHosts) != len(want) {
+		t.Fatalf("hosts = %v, want %v", cfg.CapabilityIdentityForwardHosts, want)
+	}
+	for i, h := range want {
+		if cfg.CapabilityIdentityForwardHosts[i] != h {
+			t.Errorf("hosts[%d] = %q, want %q", i, cfg.CapabilityIdentityForwardHosts[i], h)
+		}
+	}
+}
+
+// Unset forwards the caller's credential to nobody — the safe default for a
+// list that decides who may receive it.
+func TestLoad_CapabilityIdentityForwardHostsDefaultEmpty(t *testing.T) {
+	cfg, err := load(t, nil)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.CapabilityIdentityForwardHosts) != 0 {
+		t.Fatalf("hosts = %v, want none", cfg.CapabilityIdentityForwardHosts)
+	}
+}

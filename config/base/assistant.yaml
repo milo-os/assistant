@@ -69,6 +69,14 @@ spec:
             # posture would drop this and use a host allow-list instead.
             - name: CAPABILITY_ALLOW_PRIVATE_NETWORKS
               value: "true"
+            # Provider MCP endpoints that may receive the CALLING USER's own
+            # bearer token (plus the turn's project), so a provider that reads
+            # the customer's resources acts as that user. Only the AI gateway is
+            # sanctioned: it fronts every provider endpoint and enforces the tool
+            # allow-list a second time. A capability document naming some other
+            # endpoint gets no credential.
+            - name: CAPABILITY_IDENTITY_FORWARD_HOSTS
+              value: "patch-ai-gateway.envoy-gateway-system.svc.cluster.local"
             # ── Auth ────────────────────────────────────────────────
             # Nothing to set: identity comes from a TokenReview and project
             # access from a SubjectAccessReview, both against the cluster's own
