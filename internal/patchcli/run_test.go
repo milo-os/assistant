@@ -252,7 +252,7 @@ func firstTaskID(t *testing.T, base string) string {
 		t.Fatalf("client: %v", err)
 	}
 	defer client.Destroy()
-	msg := buildMessage("Diagnose pipeline p-1", "demo-project", "")
+	msg := buildMessage("Diagnose pipeline p-1", "demo-project", "", nil)
 	res, err := client.SendMessage(ctx, &a2a.SendMessageRequest{Message: msg})
 	if err != nil {
 		t.Fatalf("send: %v", err)
