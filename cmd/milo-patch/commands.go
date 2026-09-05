@@ -25,7 +25,8 @@ func newRootCmd() *cobra.Command {
 	// DATUM_* variables datumctl injects.
 	root := plugin.NewRootCmd("patch", "Chat with Patch, the Datum Cloud assistant")
 	root.Long = "Chat with Patch, the Datum Cloud assistant, from the terminal.\n\n" +
-		"Conversations are held by the assistant service and continued with --context-id.\n" +
+		"Conversations are held by the assistant service; pick one back up with\n" +
+		"'resume', or continue it non-interactively with --context-id.\n" +
 		"'conversations' and 'gaps' read the aggregated API for the same project,\n" +
 		"using the same datumctl credentials."
 	root.SilenceUsage = true
@@ -39,6 +40,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(
 		newCardCmd(),
 		newChatCmd(),
+		newResumeCmd(),
 		newCompactCmd(),
 		newConversationsCmd(),
 		newGapsCmd(),
@@ -95,6 +97,33 @@ func newChatCmd() *cobra.Command {
 	cmd.Flags().Bool("tui", false, "Full-screen chat UI with a scrollable, markdown-rendered transcript")
 	cmd.Flags().String("context-id", "", "Continue an existing conversation")
 	return cmd
+}
+
+func newResumeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume [context-id]",
+		Short: "Pick up a past conversation in the full-screen chat",
+		Long: "Open the full-screen chat straight into the conversation picker: type to\n" +
+			"search the project's conversations (newest first, each shown by its\n" +
+			"opening message), ↑/↓ to browse, ctrl+t to preview a transcript, enter\n" +
+			"to resume. With a context id it skips the picker and loads that\n" +
+			"conversation directly.\n\n" +
+			"Listing and loading go through the conversations apiserver with your\n" +
+			"Kubernetes identity (kubeconfig); chatting uses the assistant service.",
+		Args: cobra.MaximumNArgs(1),
+		Example: "  datumctl patch resume\n" +
+			"  datumctl patch resume 01a05ee5-…",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			inv, err := serviceInvocation(cmd, patchcli.KindResume, true)
+			if err != nil {
+				return err
+			}
+			if len(args) > 0 {
+				inv.ContextID = args[0]
+			}
+			return run(cmd, inv)
+		},
+	}
 }
 
 func newCompactCmd() *cobra.Command {
@@ -361,7 +390,15 @@ func jsonOutput(cmd *cobra.Command) (bool, error) {
 // It is resolved per request rather than once at startup because the helper
 // mints short-lived tokens: a `chat --tui` session outlives the token it
 // started with, and asking again is the only way to stay authenticated.
+//
+// PATCH_TOKEN, when set, wins over the helper. It exists for the dev loop:
+// the kind playground authenticates with a static dev token that datumctl
+// cannot mint, and without this the plugin could only ever be tried against
+// a service that validates real Datum Cloud tokens.
 func tokenSource() patchcli.TokenSource {
+	if static := os.Getenv("PATCH_TOKEN"); static != "" {
+		return patchcli.StaticToken(static)
+	}
 	return func() (string, error) {
 		type result struct {
 			token string

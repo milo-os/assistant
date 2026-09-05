@@ -21,12 +21,10 @@ package patchcli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -60,6 +58,7 @@ type (
 	// server had nothing to fold, or any other error on a real failure.
 	compactDoneMsg struct{ err error }
 	// pickerListMsg delivers the picker's conversation listing (or an error).
+	// See chat_picker.go for the picker itself.
 	pickerListMsg struct {
 		items []assistantv1alpha1.Conversation
 		err   error
@@ -89,39 +88,6 @@ type transcriptTurn struct {
 	content string
 }
 
-// pickerState is the chat TUI's conversation picker: a `/resume` overlay that
-// lists the project's conversations (via the conversations apiserver, same
-// kubectl path as `patch conversations list`) and loads the selected one's
-// transcript to resume without leaving the TUI.
-type pickerState struct {
-	open    bool
-	loading bool
-	err     string
-	items   []assistantv1alpha1.Conversation
-	cursor  int
-
-	// preview/previewErr/previewPending back the preview pane: the highlighted
-	// conversation's transcript is fetched lazily as the cursor moves and
-	// cached by contextID (conversation Name) so revisiting an item never
-	// re-fetches. previewPending guards against firing a second fetch for the
-	// same id while one is already in flight.
-	preview        map[string][]assistantv1alpha1.ConversationMessage
-	previewErr     map[string]string
-	previewPending map[string]bool
-}
-
-// newPickerState returns an open, loading picker with its preview caches
-// ready to write to (a zero pickerState's maps are nil).
-func newPickerState() pickerState {
-	return pickerState{
-		open:           true,
-		loading:        true,
-		preview:        map[string][]assistantv1alpha1.ConversationMessage{},
-		previewErr:     map[string]string{},
-		previewPending: map[string]bool{},
-	}
-}
-
 // styles bundles the lipgloss styles that depend on the terminal background, so
 // they can be rebuilt as one unit when the background is learned.
 type styles struct {
@@ -134,6 +100,8 @@ type styles struct {
 	err      lipgloss.Style // error text
 	box      lipgloss.Style // outer padded container
 	inputBox lipgloss.Style // bordered container around the text input
+	rowAlt   lipgloss.Style // picker: every other row's background (zebra)
+	rowSel   lipgloss.Style // picker: the cursor row's background
 }
 
 // newStyles builds a palette readable on the given background. Colors are
@@ -149,6 +117,8 @@ func newStyles(dark bool) styles {
 	red := ld(lipgloss.Color("#C0182B"), lipgloss.Color("#FF6B6B"))
 	border := ld(lipgloss.Color("#C9BFA0"), lipgloss.Color("#4A453B")) // subtle line on cream/dark
 	body := ld(lipgloss.Color("#2A2620"), lipgloss.Color("#EAE6DA"))   // = input text color
+	zebra := ld(lipgloss.Color("#F1EBD8"), lipgloss.Color("#2B2924"))  // one shade off the page
+	selRow := ld(lipgloss.Color("#E4DDC6"), lipgloss.Color("#3A372F")) // two shades off, under the cursor
 
 	return styles{
 		header:   lipgloss.NewStyle().Bold(true).Foreground(violet),
@@ -160,6 +130,8 @@ func newStyles(dark bool) styles {
 		err:      lipgloss.NewStyle().Bold(true).Foreground(red),
 		box:      lipgloss.NewStyle().Padding(1, 2),
 		inputBox: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(border).Padding(0, 1),
+		rowAlt:   lipgloss.NewStyle().Background(zebra),
+		rowSel:   lipgloss.NewStyle().Background(selRow),
 	}
 }
 
@@ -221,6 +193,11 @@ type chatModel struct {
 
 	picker pickerState
 
+	// resumeOnStart opens the picker (resumeOnStart == pickerOnStart) or
+	// loads one conversation's transcript (any other value is a context id)
+	// on the first layout, for `patch resume [<context-id>]`.
+	resumeOnStart string
+
 	// suggestIndex is the highlighted entry in the slash-command suggestion
 	// list (see currentSuggestions). Reset to 0 whenever the input text
 	// changes so a fresh prefix always starts at the top match.
@@ -234,7 +211,10 @@ type chatModel struct {
 	width        int // full terminal width; content width subtracts padding
 }
 
-func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, firstMessage, baseURL string, token TokenSource, view ReadView) int {
+// pickerOnStart is the resumeOnStart sentinel meaning "open the picker".
+const pickerOnStart = "\x00picker"
+
+func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, firstMessage, baseURL string, token TokenSource, view ReadView, resumeOnStart string) int {
 	st := newStyles(false) // provisional (light) until the background is learned
 
 	sp := spin.New(spin.WithSpinner(spin.Dot), spin.WithStyle(st.patch))
@@ -245,19 +225,20 @@ func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, 
 	ti.SetStyles(newInputStyles(false)) // provisional (light) until bg is learned
 
 	m := &chatModel{
-		ctx:          ctx,
-		client:       client,
-		project:      project,
-		view:         view,
-		baseURL:      baseURL,
-		token:        token,
-		contextID:    contextID,
-		vp:           viewport.New(),
-		ti:           ti,
-		sp:           sp,
-		st:           st,
-		firstMessage: firstMessage,
-		follow:       true,
+		ctx:           ctx,
+		client:        client,
+		project:       project,
+		view:          view,
+		baseURL:       baseURL,
+		token:         token,
+		contextID:     contextID,
+		vp:            viewport.New(),
+		ti:            ti,
+		sp:            sp,
+		st:            st,
+		firstMessage:  firstMessage,
+		resumeOnStart: resumeOnStart,
+		follow:        true,
 	}
 
 	p := tea.NewProgram(m, tea.WithContext(ctx))
@@ -304,6 +285,9 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dark = msg.IsDark()
 		m.st = newStyles(m.dark)
 		m.ti.SetStyles(newInputStyles(m.dark))
+		if m.picker.open {
+			m.picker.search.SetStyles(newInputStyles(m.dark))
+		}
 		if !m.working {
 			m.sp = spin.New(spin.WithSpinner(spin.Dot), spin.WithStyle(m.st.patch))
 		}
@@ -399,7 +383,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.picker.items = msg.items
-		m.picker.cursor = 0
+		m.picker.refilter()
 		return m, m.maybeLoadPreview()
 
 	case pickerPreviewMsg:
@@ -483,8 +467,7 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "/resume":
 			m.ti.Reset()
-			m.picker = newPickerState()
-			return m, tea.Batch(m.loadPickerList(), m.sp.Tick)
+			return m, m.openPicker()
 		case "/clear":
 			m.ti.Reset()
 			m.contextID = ""
@@ -592,36 +575,6 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// onPickerKey handles input while the /resume conversation picker is open. It
-// swallows every key (nothing reaches the text input) so typing while
-// browsing can't leak into the message field.
-func (m *chatModel) onPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.picker = pickerState{}
-		return m, nil
-	case "up", "k":
-		if m.picker.cursor > 0 {
-			m.picker.cursor--
-		}
-		return m, m.maybeLoadPreview()
-	case "down", "j":
-		if m.picker.cursor < len(m.picker.items)-1 {
-			m.picker.cursor++
-		}
-		return m, m.maybeLoadPreview()
-	case "enter":
-		if m.picker.loading || len(m.picker.items) == 0 {
-			return m, nil
-		}
-		id := m.picker.items[m.picker.cursor].Name
-		m.picker.loading = true
-		m.picker.err = ""
-		return m, tea.Batch(m.loadPickerTranscript(id), m.sp.Tick)
-	}
-	return m, nil
-}
-
 // isEditingKey reports whether a non-printable key (empty .Text) is still a
 // legitimate line-editing key the text input should handle.
 func isEditingKey(s string) bool {
@@ -635,207 +588,11 @@ func isEditingKey(s string) bool {
 	return false
 }
 
-// loadPickerList fetches the project's conversation listing in the background
-// (the same kubectl path as `patch conversations list`), newest activity
-// first. It captures ctx/view/project by value at call time rather than
-// reading m inside the closure — like stream(), this runs off the Update
-// goroutine, so it must never touch mutable model state directly; only the
-// returned Msg, handled in Update, may.
-func (m *chatModel) loadPickerList() tea.Cmd {
-	ctx, view, project := m.ctx, m.view, m.project
-	return func() tea.Msg {
-		out, err := view.get(ctx, project, conversationsPath(project))
-		if err != nil {
-			return pickerListMsg{err: errors.New(readViewErrorText(view, err))}
-		}
-		var list assistantv1alpha1.ConversationList
-		if err := json.Unmarshal(out, &list); err != nil {
-			return pickerListMsg{err: err}
-		}
-		sort.SliceStable(list.Items, func(i, j int) bool {
-			return list.Items[i].Status.LastActiveAt.After(list.Items[j].Status.LastActiveAt.Time)
-		})
-		return pickerListMsg{items: list.Items}
-	}
-}
-
-// fetchTranscript fetches one conversation's full transcript (the messages
-// subresource). Shared by loadPickerTranscript (resume) and loadPickerPreview
-// (the picker's preview pane) — same data, different destination Msg.
-func fetchTranscript(ctx context.Context, view ReadView, project, contextID string) ([]assistantv1alpha1.ConversationMessage, error) {
-	out, err := view.get(ctx, project, messagesPath(project, contextID))
-	if err != nil {
-		return nil, errors.New(readViewErrorText(view, err))
-	}
-	var msgs assistantv1alpha1.ConversationMessages
-	if err := json.Unmarshal(out, &msgs); err != nil {
-		return nil, err
-	}
-	return msgs.Items, nil
-}
-
-// loadPickerTranscript fetches one conversation's full transcript in the
-// background, for Update to fold into m.turns on arrival (resuming it as the
-// active chat). Same off-goroutine caveat as loadPickerList.
-func (m *chatModel) loadPickerTranscript(contextID string) tea.Cmd {
-	ctx, view, project := m.ctx, m.view, m.project
-	return func() tea.Msg {
-		items, err := fetchTranscript(ctx, view, project, contextID)
-		if err != nil {
-			return pickerTranscriptMsg{err: err}
-		}
-		return pickerTranscriptMsg{contextID: contextID, items: items}
-	}
-}
-
-// loadPickerPreview fetches one conversation's transcript in the background
-// for the preview pane — the result is cached in m.picker.preview, never
-// resumed into the main chat. Same off-goroutine caveat as loadPickerList.
-func (m *chatModel) loadPickerPreview(contextID string) tea.Cmd {
-	ctx, view, project := m.ctx, m.view, m.project
-	return func() tea.Msg {
-		items, err := fetchTranscript(ctx, view, project, contextID)
-		if err != nil {
-			return pickerPreviewMsg{contextID: contextID, err: err}
-		}
-		return pickerPreviewMsg{contextID: contextID, items: items}
-	}
-}
-
-// maybeLoadPreview kicks off a background fetch for the currently
-// highlighted conversation's preview, unless it is already cached or already
-// in flight. Called whenever the cursor moves and when the list first loads.
-func (m *chatModel) maybeLoadPreview() tea.Cmd {
-	if len(m.picker.items) == 0 {
-		return nil
-	}
-	id := m.picker.items[m.picker.cursor].Name
-	if _, ok := m.picker.preview[id]; ok {
-		return nil
-	}
-	if _, ok := m.picker.previewErr[id]; ok {
-		return nil
-	}
-	if m.picker.previewPending[id] {
-		return nil
-	}
-	m.picker.previewPending[id] = true
-	return m.loadPickerPreview(id)
-}
-
-// pickerListWidth is the fixed width of the picker's left-hand conversation
-// list column when a preview pane is shown alongside it.
-const pickerListWidth = 44
-
-// pickerView renders the /resume conversation picker as a full-screen
-// overlay: a loading spinner, an error, "no conversations", or a
-// cursor-navigable list with a live preview of the highlighted conversation.
-func (m *chatModel) pickerView() tea.View {
-	var b strings.Builder
-	b.WriteString(m.st.header.Render("resume a conversation") + m.st.subtle.Render("  ·  project "+m.project))
-	b.WriteString("\n\n")
-	switch {
-	case m.picker.loading:
-		b.WriteString(m.sp.View() + " " + m.st.subtle.Render("loading…"))
-	case m.picker.err != "":
-		b.WriteString(m.st.err.Render("⚠ " + m.picker.err))
-	case len(m.picker.items) == 0:
-		b.WriteString(m.st.subtle.Render("no conversations in project " + m.project))
-	default:
-		for i, c := range m.picker.items {
-			line := fmt.Sprintf("%s   %-4s  %d msgs", c.Name, ago(c.Status.LastActiveAt.Time), c.Status.MessageCount)
-			line = lipgloss.NewStyle().MaxWidth(pickerListWidth).Render(line)
-			if i == m.picker.cursor {
-				b.WriteString(m.st.you.Render("> " + line))
-			} else {
-				b.WriteString("  " + m.st.subtle.Render(line))
-			}
-			b.WriteString("\n")
-		}
-	}
-	b.WriteString("\n" + m.st.hint.Render("↑/↓ select · enter resume · esc cancel"))
-
-	body := b.String()
-	if !m.picker.loading && m.picker.err == "" && len(m.picker.items) > 0 {
-		body = lipgloss.JoinHorizontal(lipgloss.Top, b.String(), "    ", m.previewPane())
-	}
-
-	return m.newView(m.st.box.Render(body))
-}
-
-// pickerPreviewMaxLines caps how many messages the preview pane shows: the
-// conversation's opening message (what it was about) plus its most recent
-// exchange (where it left off) — the two most useful signals for "do I want
-// to resume this one," without needing the full transcript.
-const pickerPreviewMaxLines = 6
-
-// previewPane renders the highlighted conversation's transcript preview —
-// answering "what's in this conversation" directly in the picker instead of
-// forcing a resume-and-look. Truncated to pickerPreviewMaxLines messages: the
-// opening message plus the most recent tail.
-func (m *chatModel) previewPane() string {
-	var b strings.Builder
-	b.WriteString(m.st.header.Render("preview"))
-	b.WriteString("\n\n")
-	if len(m.picker.items) == 0 {
-		return b.String()
-	}
-	id := m.picker.items[m.picker.cursor].Name
-	switch {
-	case m.picker.previewErr[id] != "":
-		b.WriteString(m.st.err.Render("⚠ " + m.picker.previewErr[id]))
-	// preview[id] == nil while pending means the fetch (kicked off by
-	// maybeLoadPreview, which marks pending before returning its Cmd) is
-	// still in flight; once it lands, either preview[id] or previewErr[id]
-	// above is populated and pending is cleared, so this is never confused
-	// with a legitimately empty conversation.
-	case m.picker.preview[id] == nil && m.picker.previewPending[id]:
-		b.WriteString(m.st.subtle.Render("loading preview…"))
-	default:
-		items := m.picker.preview[id]
-		if len(items) == 0 {
-			b.WriteString(m.st.subtle.Render("(no messages)"))
-			break
-		}
-		shown := items
-		if len(shown) > pickerPreviewMaxLines {
-			tail := append([]assistantv1alpha1.ConversationMessage{}, items[0])
-			tail = append(tail, items[len(items)-(pickerPreviewMaxLines-1):]...)
-			shown = tail
-		}
-		for i, mm := range shown {
-			label, style := m.st.you.Render("You"), m.st.userText
-			switch mm.Role {
-			case "assistant":
-				label, style = m.st.patch.Render("Patch"), m.st.subtle
-			case "summary":
-				label, style = m.st.subtle.Render("Summary"), m.st.subtle
-			}
-			b.WriteString(label + ": " + style.Render(previewLine(mm.Content, 64)) + "\n")
-			if i == 0 && len(items) > pickerPreviewMaxLines {
-				b.WriteString(m.st.subtle.Render("⋮") + "\n")
-			}
-		}
-	}
-	return b.String()
-}
-
-// previewLine collapses a message to one line and truncates it to maxRunes,
-// so a multi-paragraph message doesn't blow out the preview pane's height.
-func previewLine(s string, maxRunes int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	r := []rune(s)
-	if len(r) <= maxRunes {
-		return s
-	}
-	return string(r[:maxRunes]) + "…"
-}
-
 // helpText lists every slash command; shared by /help's overlay and the
 // --help usage text (args.go) so the two can't drift out of sync in spirit,
 // though they're rendered differently (plain vs styled).
 var helpText = []struct{ cmd, desc string }{
-	{"/resume", "browse and resume a past conversation (with a live preview)"},
+	{"/resume", "search and resume a past conversation (with a live preview)"},
 	{"/clear", "start a fresh conversation, clearing this transcript"},
 	{"/compact", "compact this conversation's history now"},
 	{"/export", "save this transcript to a file"},
@@ -853,7 +610,7 @@ var commandNames = []string{"/resume", "/clear", "/compact", "/export", "/status
 // (see suggestionBar); unlike helpText it keys /quit and /exit separately
 // since they're independently completable here.
 var commandDescriptions = map[string]string{
-	"/resume":  "browse and resume a past conversation (with a live preview)",
+	"/resume":  "search and resume a past conversation (with a live preview)",
 	"/clear":   "start a fresh conversation, clearing this transcript",
 	"/compact": "compact this conversation's history now",
 	"/export":  "save this transcript to a file",
@@ -1207,6 +964,13 @@ func (m *chatModel) layout(width, height int) tea.Cmd {
 	if !m.sentFirst && m.firstMessage != "" {
 		m.sentFirst = true
 		return m.submit(m.firstMessage)
+	}
+	if r := m.resumeOnStart; r != "" {
+		m.resumeOnStart = ""
+		if r == pickerOnStart {
+			return m.openPicker()
+		}
+		return m.resumeDirect(r)
 	}
 	return nil
 }

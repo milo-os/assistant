@@ -31,6 +31,10 @@ const (
 	KindConvShow
 	// KindGapList lists a provider project's capability-gap reports.
 	KindGapList
+	// KindResume opens the full-screen chat straight into the conversation
+	// picker, or — with ContextID set — into that conversation with its
+	// transcript loaded.
+	KindResume
 	// KindTaskGet fetches one task.
 	KindTaskGet
 	// KindTaskCancel cancels one task.
@@ -60,7 +64,8 @@ type Invocation struct {
 	// Project is the Milo project the task runs against — for the gaps read
 	// view, the PROVIDER's own project.
 	Project string
-	// ContextID continues an existing conversation.
+	// ContextID continues an existing conversation (KindChat, KindCompact);
+	// for KindResume it is optional and skips the picker.
 	ContextID string
 	// Interactive selects the line-based REPL, TUI the full-screen chat UI.
 	Interactive bool
@@ -166,7 +171,7 @@ func (inv Invocation) Execute(ctx context.Context, io Io) int {
 		}
 		defer client.Destroy()
 		if inv.TUI {
-			return runChatTUI(ctx, client, inv.Project, inv.ContextID, inv.Message, inv.BaseURL, inv.Token, ReadViewFor(inv))
+			return runChatTUI(ctx, client, inv.Project, inv.ContextID, inv.Message, inv.BaseURL, inv.Token, ReadViewFor(inv), "")
 		}
 		if inv.Interactive {
 			return runRepl(ctx, client, inv.Project, inv.ContextID, inv.Message, io)
@@ -181,6 +186,18 @@ func (inv Invocation) Execute(ctx context.Context, io Io) int {
 			io.Err("context: " + contextID + "  (continue with --context-id)\n")
 		}
 		return code
+
+	case KindResume:
+		client, err := newClient(ctx, inv.BaseURL, inv.Token)
+		if err != nil {
+			return fail(io, err, nil)
+		}
+		defer client.Destroy()
+		start := pickerOnStart
+		if inv.ContextID != "" {
+			start = inv.ContextID
+		}
+		return runChatTUI(ctx, client, inv.Project, inv.ContextID, "", inv.BaseURL, inv.Token, ReadViewFor(inv), start)
 
 	case KindCompact:
 		err := requestCompact(ctx, inv.BaseURL, inv.Token, inv.Project, inv.ContextID)

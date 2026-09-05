@@ -7,7 +7,7 @@
 // which prefers datumctl's own identity and falls back to kubectl — see
 // readview.go for why that order, and why neither transport uses client-side
 // discovery. Once you have a context id, resume it with
-// `patch chat --context-id <id>`.
+// `patch resume <id>` (or non-interactively, `patch chat --context-id <id>`).
 package patchcli
 
 import (
@@ -24,8 +24,13 @@ import (
 	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
 )
 
+// listTitleWidth caps the TITLE column so a long opening message doesn't push
+// the table past a normal terminal; the picker and `show` have the full text.
+const listTitleWidth = 60
+
 // runConversationsList prints a table of the caller's conversations in a
-// project (id, created, last-active, message count), newest activity first.
+// project (id, created, last-active, message count, title), newest activity
+// first.
 func runConversationsList(ctx context.Context, inv Invocation, io Io) int {
 	view := ReadViewFor(inv)
 	out, err := view.get(ctx, inv.Project, conversationsPath(inv.Project))
@@ -59,18 +64,19 @@ func runConversationsList(ctx context.Context, inv Invocation, io Io) int {
 
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "CONTEXT-ID\tCREATED\tLAST-ACTIVE\tMESSAGES")
+	fmt.Fprintln(tw, "CONTEXT-ID\tCREATED\tLAST-ACTIVE\tMESSAGES\tTITLE")
 	for _, c := range list.Items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n",
 			c.Name,
 			ago(c.CreationTimestamp.Time),
 			ago(c.Status.LastActiveAt.Time),
 			c.Status.MessageCount,
+			previewLine(c.Status.Title, listTitleWidth),
 		)
 	}
 	_ = tw.Flush()
 	io.Out(b.String())
-	io.Err("\nresume one with:  patch chat --context-id <context-id> --project " + inv.Project + "\n")
+	io.Err("\nresume one with:  patch resume <context-id> --project " + inv.Project + "\n")
 	return 0
 }
 
@@ -103,7 +109,7 @@ func runConversationsShow(ctx context.Context, inv Invocation, io Io) int {
 	for _, m := range msgs.Items {
 		io.Out(fmt.Sprintf("[%d] %s:\n%s\n\n", m.Seq, m.Role, strings.TrimRight(m.Content, "\n")))
 	}
-	io.Err("resume with:  patch chat --context-id " + inv.ContextID + " --project " + inv.Project + "\n")
+	io.Err("resume with:  patch resume " + inv.ContextID + " --project " + inv.Project + "\n")
 	return 0
 }
 
