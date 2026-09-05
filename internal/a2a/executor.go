@@ -80,6 +80,7 @@ func (e *Executor) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter
 			ProjectName: projectName,
 			ContextID:   ec.ContextID,
 			TaskID:      string(ec.TaskID),
+			Mentions:    Mentions(ec.Message, ec.Metadata),
 		}, sink)
 		if sink.stopped {
 			return
