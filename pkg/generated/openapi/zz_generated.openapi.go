@@ -17,14 +17,17 @@ import (
 
 func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
 	return map[string]common.OpenAPIDefinition{
+		v1alpha1.AssistantEndpoint{}.OpenAPIModelName():         schema_pkg_apis_assistant_v1alpha1_AssistantEndpoint(ref),
+		v1alpha1.AssistantEndpointList{}.OpenAPIModelName():     schema_pkg_apis_assistant_v1alpha1_AssistantEndpointList(ref),
+		v1alpha1.AssistantEndpointSpec{}.OpenAPIModelName():     schema_pkg_apis_assistant_v1alpha1_AssistantEndpointSpec(ref),
+		v1alpha1.CapabilityGapReport{}.OpenAPIModelName():       schema_pkg_apis_assistant_v1alpha1_CapabilityGapReport(ref),
+		v1alpha1.CapabilityGapReportList{}.OpenAPIModelName():   schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportList(ref),
+		v1alpha1.CapabilityGapReportStatus{}.OpenAPIModelName(): schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref),
 		v1alpha1.Conversation{}.OpenAPIModelName():              schema_pkg_apis_assistant_v1alpha1_Conversation(ref),
 		v1alpha1.ConversationList{}.OpenAPIModelName():          schema_pkg_apis_assistant_v1alpha1_ConversationList(ref),
 		v1alpha1.ConversationMessage{}.OpenAPIModelName():       schema_pkg_apis_assistant_v1alpha1_ConversationMessage(ref),
 		v1alpha1.ConversationMessages{}.OpenAPIModelName():      schema_pkg_apis_assistant_v1alpha1_ConversationMessages(ref),
 		v1alpha1.ConversationStatus{}.OpenAPIModelName():        schema_pkg_apis_assistant_v1alpha1_ConversationStatus(ref),
-		v1alpha1.CapabilityGapReport{}.OpenAPIModelName():       schema_pkg_apis_assistant_v1alpha1_CapabilityGapReport(ref),
-		v1alpha1.CapabilityGapReportList{}.OpenAPIModelName():   schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportList(ref),
-		v1alpha1.CapabilityGapReportStatus{}.OpenAPIModelName(): schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref),
 		resource.Quantity{}.OpenAPIModelName():                  schema_apimachinery_pkg_api_resource_Quantity(ref),
 		v1.APIGroup{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_APIGroup(ref),
 		v1.APIGroupList{}.OpenAPIModelName():                    schema_pkg_apis_meta_v1_APIGroupList(ref),
@@ -83,11 +86,11 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 	}
 }
 
-func schema_pkg_apis_assistant_v1alpha1_Conversation(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_assistant_v1alpha1_AssistantEndpoint(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "Conversation is one durable chat conversation. name == the A2A context id; namespace == the milo project. Read-only in v1 (populated by the chat flow, surfaced here for list/get).",
+				Description: "AssistantEndpoint advertises where clients should send A2A traffic.\n\nIt exists so a client that already reaches this aggregated API — with the caller's own Kubernetes identity and no extra credential — can find the service without being told a hostname out of band. Before it, `datumctl patch` required PATCH_URL: the control-plane address names Milo, not the assistant, and nothing else advertised the assistant's address.\n\nRead-only and not stored. The service reports the address it was configured to advertise (PUBLIC_BASE_URL) — the same value it puts in its agent card, so the card and this resource cannot disagree.\n\nCluster-scoped: one assistant serves every project on a control plane, so the endpoint is not a per-project fact. Named [AssistantEndpointName].",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"kind": {
@@ -106,22 +109,96 @@ func schema_pkg_apis_assistant_v1alpha1_Conversation(ref common.ReferenceCallbac
 					},
 					"metadata": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Name = context_id, Namespace = project, CreationTimestamp = created_at.",
-							Default:     map[string]interface{}{},
-							Ref:         ref(v1.ObjectMeta{}.OpenAPIModelName()),
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ObjectMeta{}.OpenAPIModelName()),
 						},
 					},
-					"status": {
+					"spec": {
 						SchemaProps: spec.SchemaProps{
 							Default: map[string]interface{}{},
-							Ref:     ref(v1alpha1.ConversationStatus{}.OpenAPIModelName()),
+							Ref:     ref(v1alpha1.AssistantEndpointSpec{}.OpenAPIModelName()),
 						},
 					},
 				},
 			},
 		},
 		Dependencies: []string{
-			v1alpha1.ConversationStatus{}.OpenAPIModelName(), v1.ObjectMeta{}.OpenAPIModelName()},
+			v1alpha1.AssistantEndpointSpec{}.OpenAPIModelName(), v1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_pkg_apis_assistant_v1alpha1_AssistantEndpointList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref(v1alpha1.AssistantEndpoint{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			v1alpha1.AssistantEndpoint{}.OpenAPIModelName(), v1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_pkg_apis_assistant_v1alpha1_AssistantEndpointSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AssistantEndpointSpec describes how to reach the service.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"url": {
+						SchemaProps: spec.SchemaProps{
+							Description: "URL is the assistant's public base URL, e.g. \"https://patch.staging.env.datum.net\". Clients append the A2A path, or fetch the agent card and use the endpoint the card advertises.\n\nEmpty when the service has no PUBLIC_BASE_URL configured: an operator has not told it its own address. Empty is reported rather than guessed — a wrong URL here would silently point clients at another service.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"agentCardPath": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AgentCardPath is where the A2A agent card is served, relative to URL.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -260,6 +337,48 @@ func schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref common.Ref
 				},
 			},
 		},
+	}
+}
+
+func schema_pkg_apis_assistant_v1alpha1_Conversation(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "Conversation is one durable chat conversation. name == the A2A context id; namespace == the milo project. Read-only in v1 (populated by the chat flow, surfaced here for list/get).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name = context_id, Namespace = project, CreationTimestamp = created_at.",
+							Default:     map[string]interface{}{},
+							Ref:         ref(v1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1alpha1.ConversationStatus{}.OpenAPIModelName()),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			v1alpha1.ConversationStatus{}.OpenAPIModelName(), v1.ObjectMeta{}.OpenAPIModelName()},
 	}
 }
 

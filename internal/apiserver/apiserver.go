@@ -15,6 +15,7 @@ import (
 
 	"github.com/milo-os/assistant/internal/apiserver/registry/capabilitygapreport"
 	"github.com/milo-os/assistant/internal/apiserver/registry/conversation"
+	"github.com/milo-os/assistant/internal/apiserver/registry/endpoint"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/pkg/apis/assistant/install"
@@ -47,6 +48,11 @@ func init() {
 type ExtraConfig struct {
 	Reader     history.Reader
 	GapReports gapreport.Store
+	// PublicBaseURL is the address the service advertises to clients
+	// (PUBLIC_BASE_URL), served through the assistantendpoints resource so a
+	// client can discover where to send A2A traffic. Empty is reported as
+	// empty, never guessed.
+	PublicBaseURL string
 }
 
 // Config is the conversations apiserver config: the generic recommended config
@@ -96,6 +102,7 @@ func (c completedConfig) New() (*ConversationServer, error) {
 		"conversations":          conversation.NewConversationREST(c.ExtraConfig.Reader),
 		"conversations/messages": conversation.NewMessagesREST(c.ExtraConfig.Reader),
 		"capabilitygapreports":   capabilitygapreport.NewCapabilityGapReportREST(c.ExtraConfig.GapReports),
+		"assistantendpoints":     endpoint.NewAssistantEndpointREST(c.ExtraConfig.PublicBaseURL),
 	}
 	apiGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = v1alpha1Storage
 
