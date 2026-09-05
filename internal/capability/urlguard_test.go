@@ -267,10 +267,13 @@ func TestComposeSkill_AllowPrivateNetworksPermitsLoopback(t *testing.T) {
 // connector touches the network.
 func TestGuardedConnector_RefusesPrivateEndpointBeforeConnecting(t *testing.T) {
 	called := false
-	inner := func(context.Context, string) (mcpSession, error) { called = true; return newFakeSession(), nil }
+	inner := func(context.Context, string, map[string]string) (mcpSession, error) {
+		called = true
+		return newFakeSession(), nil
+	}
 
 	guard := newIPGuard(false, staticResolver(map[string][]string{"internal-mcp": {"10.1.2.3"}}))
-	if _, err := guardedConnector(inner, guard)(context.Background(), "http://internal-mcp/mcp"); err == nil {
+	if _, err := guardedConnector(inner, guard)(context.Background(), "http://internal-mcp/mcp", nil); err == nil {
 		t.Fatal("private MCP endpoint should be refused")
 	}
 	if called {
@@ -278,7 +281,7 @@ func TestGuardedConnector_RefusesPrivateEndpointBeforeConnecting(t *testing.T) {
 	}
 
 	guardPub := newIPGuard(false, staticResolver(map[string][]string{"public-mcp": {"93.184.216.34"}}))
-	if _, err := guardedConnector(inner, guardPub)(context.Background(), "http://public-mcp/mcp"); err != nil {
+	if _, err := guardedConnector(inner, guardPub)(context.Background(), "http://public-mcp/mcp", nil); err != nil {
 		t.Fatalf("public MCP endpoint should connect: %v", err)
 	}
 	if !called {
