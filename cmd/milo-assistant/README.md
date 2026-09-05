@@ -26,6 +26,12 @@ skips the picker, and `--last` (like `-c` on the chat) skips straight to the
 most recently active conversation. The same picker is `/resume` inside
 `chat --tui`.
 
+A finished turn says so: a `✻ Worked for 23s · 3 tools · done 6:05 PM` line
+under the answer, the terminal bell, and a window title that tracks whether a
+turn is running. `PATCH_NOTIFY` picks how loud that is — `off`, `bell` (the
+default), or `desktop`, which adds an OSC 9 desktop notification where the
+terminal supports one.
+
 Conversations can be given a name of your own — `conversations rename`, or
 `/rename <name>` in the chat. The name is shown in place of the derived title
 wherever conversations are listed, and the title stays underneath as the
