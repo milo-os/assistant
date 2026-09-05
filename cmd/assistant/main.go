@@ -99,7 +99,7 @@ func run() error {
 	// same /metrics registry — see internal/metrics's package doc.
 	metrics := appmetrics.New()
 
-	runner, runnerCleanup, err := newAgentRunner(ctx, cfg, log, metrics)
+	runner, convStore, runnerCleanup, err := newAgentRunner(ctx, cfg, log, metrics)
 	if err != nil {
 		return fmt.Errorf("failed to initialize agent runner: %w", err)
 	}
@@ -122,6 +122,7 @@ func run() error {
 		Authorizer:    authorizer,
 		Runner:        runner,
 		Compactor:     compactor,
+		Renamer:       convStore,
 		ReadyCheck:    readyCheck(cfg, durableTasks, log),
 		Metrics:       metrics,
 	}

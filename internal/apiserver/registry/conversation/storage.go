@@ -121,6 +121,7 @@ func newConversation(c history.Conversation) *assistant.Conversation {
 			LastActiveAt: metav1.NewTime(c.LastActiveAt),
 			MessageCount: int32(c.TurnCount),
 			Title:        c.Title,
+			Name:         c.Name,
 		},
 	}
 }

@@ -81,6 +81,46 @@ func TestConversationGet(t *testing.T) {
 	}
 }
 
+// The name is a separate field from the title, not a replacement for it: a
+// client that shows the name still needs the derived title as its fallback,
+// and a listing that dropped the title on rename could never fall back.
+func TestConversationNameAndTitleAreBothSurfaced(t *testing.T) {
+	reader := &fakeReader{convs: map[string][]history.Conversation{
+		"demo": {
+			{ProjectName: "demo", ContextID: "named", Title: "why is p-1 down?", Name: "dfw quota escalation"},
+			{ProjectName: "demo", ContextID: "unnamed", Title: "why is p-2 down?"},
+		},
+	}}
+	rest := NewConversationREST(reader)
+
+	obj, err := rest.Get(nsCtx("demo"), "named", &metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	c := obj.(*assistant.Conversation)
+	if c.Status.Name != "dfw quota escalation" {
+		t.Errorf("Name = %q, want the store's name", c.Status.Name)
+	}
+	if c.Status.Title != "why is p-1 down?" {
+		t.Errorf("Title = %q, want it kept alongside the name", c.Status.Title)
+	}
+
+	listObj, err := rest.List(nsCtx("demo"), &metainternalversion.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	items := listObj.(*assistant.ConversationList).Items
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	if items[0].Status.Name != "dfw quota escalation" {
+		t.Errorf("list[0].Name = %q", items[0].Status.Name)
+	}
+	if items[1].Status.Name != "" {
+		t.Errorf("list[1].Name = %q, want empty for a conversation never named", items[1].Status.Name)
+	}
+}
+
 func TestConversationGetNotFound(t *testing.T) {
 	rest := NewConversationREST(&fakeReader{convs: map[string][]history.Conversation{}})
 	_, err := rest.Get(nsCtx("demo"), "missing", &metav1.GetOptions{})

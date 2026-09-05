@@ -67,6 +67,7 @@ in-memory and a PostgreSQL implementation. See
 |---|---|
 | `POST /a2a` | The A2A JSON-RPC surface |
 | `POST /v1/compact` | Manual conversation compaction |
+| `POST /v1/conversations/rename` | Give a conversation a user-chosen name |
 | `GET /.well-known/agent-card.json` | Capability discovery for A2A clients |
 | `GET /healthz` | Liveness |
 | `GET /readyz` | Readiness, including dependency reachability |

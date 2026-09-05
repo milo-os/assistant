@@ -75,6 +75,11 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS conversations_by_project_activity
 		ON conversations (project_name, last_active_at DESC)`,
+	// The user-given name (Rename). Added as an ALTER rather than a column in
+	// the CREATE above so databases created before it get it too — the same
+	// migrate-on-open, idempotent posture as the rest of this list. Nullable:
+	// NULL is "never named", which is not the same as named the empty string.
+	`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS name text`,
 }
 
 // Conversation is the stored metadata of one conversation, for per-project
@@ -89,6 +94,11 @@ type Conversation struct {
 	// collapsed to one line and cut to MaxTitleLen runes. Empty when the
 	// conversation has no ordinary user turn (only a compaction summary).
 	Title string
+	// Name is what the user called this conversation (see [Renamer]), empty
+	// until they name one. It is kept alongside Title rather than replacing
+	// it so a rename never destroys the derived label underneath — clients
+	// show the name when set and fall back to the title.
+	Name string
 }
 
 // Lister lists a project's conversations. It is a separate interface from
@@ -121,9 +131,10 @@ type PostgresStore struct {
 }
 
 var (
-	_ Store  = (*PostgresStore)(nil)
-	_ Lister = (*PostgresStore)(nil)
-	_ Reader = (*PostgresStore)(nil)
+	_ Store   = (*PostgresStore)(nil)
+	_ Lister  = (*PostgresStore)(nil)
+	_ Reader  = (*PostgresStore)(nil)
+	_ Renamer = (*PostgresStore)(nil)
 )
 
 // NewPostgresStore connects to databaseURL (a postgres:// URL), verifies the
@@ -250,9 +261,9 @@ func (s *PostgresStore) GetConversation(ctx context.Context, projectName, contex
 	var opening string
 	err := s.pool.QueryRow(ctx,
 		`SELECT c.project_name, c.context_id, c.created_at, c.last_active_at, c.turn_count,
-		        `+firstUserMessageSQL+`
+		        `+firstUserMessageSQL+`, COALESCE(c.name, '')
 		 FROM conversations c WHERE c.project_name = $1 AND c.context_id = $2`,
-		projectName, contextID).Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening)
+		projectName, contextID).Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening, &c.Name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Conversation{}, ErrConversationNotFound
 	}
@@ -463,6 +474,33 @@ func (s *PostgresStore) Compact(ctx context.Context, projectName, contextID stri
 	return nil
 }
 
+// Rename implements [Renamer]: a single UPDATE of the conversation row, which
+// must already exist (0 rows affected is [ErrConversationNotFound] — a rename
+// never conjures a conversation the way Append's upsert does). A name that
+// normalizes to empty is stored as NULL, so "never named" and "named, then
+// cleared" read back identically. last_active_at is deliberately untouched:
+// naming a conversation is not activity in it, and bumping it would reshuffle
+// the newest-first listing under the user's cursor.
+func (s *PostgresStore) Rename(ctx context.Context, projectName, contextID, name string) error {
+	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
+	defer cancel()
+	var value *string
+	if normalized := NormalizeName(name); normalized != "" {
+		value = &normalized
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE conversations SET name = $3
+		 WHERE project_name = $1 AND context_id = $2`,
+		projectName, contextID, value)
+	if err != nil {
+		return fmt.Errorf("conversation store: rename conversation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConversationNotFound
+	}
+	return nil
+}
+
 // ListConversations implements [Lister]: the project's conversations, newest
 // activity first. limit <= 0 uses 100.
 func (s *PostgresStore) ListConversations(ctx context.Context, projectName string, limit int) ([]Conversation, error) {
@@ -473,7 +511,7 @@ func (s *PostgresStore) ListConversations(ctx context.Context, projectName strin
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.project_name, c.context_id, c.created_at, c.last_active_at, c.turn_count,
-		        `+firstUserMessageSQL+`
+		        `+firstUserMessageSQL+`, COALESCE(c.name, '')
 		 FROM conversations c WHERE c.project_name = $1
 		 ORDER BY c.last_active_at DESC LIMIT $2`,
 		projectName, limit)
@@ -486,7 +524,7 @@ func (s *PostgresStore) ListConversations(ctx context.Context, projectName strin
 	for rows.Next() {
 		var c Conversation
 		var opening string
-		if err := rows.Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening); err != nil {
+		if err := rows.Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening, &c.Name); err != nil {
 			return nil, fmt.Errorf("conversation store: scan conversation: %w", err)
 		}
 		c.Title = TitleOf(opening)

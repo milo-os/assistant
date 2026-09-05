@@ -29,6 +29,9 @@ type ConversationStatus struct {
 	// Title is the conversation's opening user message, collapsed to one
 	// line and truncated — what the conversation is about, for listings.
 	Title string
+	// Name is what the user called this conversation, empty until they name
+	// one. Clients show it in place of Title where set.
+	Name string
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
