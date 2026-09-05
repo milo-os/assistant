@@ -9,10 +9,13 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	spin "charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
 )
@@ -1385,5 +1388,337 @@ func TestHelpOverlayDocumentsTheComposerKeys(t *testing.T) {
 	if !containsAll(out, "shift+enter", "ctrl+j", "alt+enter", "ctrl+r", "recall past prompts",
 		"scroll the transcript when there is no history left to recall") {
 		t.Fatalf("/help should document the composer, got:\n%s", out)
+	}
+}
+
+// ── turn and session feedback ─────────────────────────────────
+
+// workingSince puts the model in a turn that started d ago, the way submit would
+// have, so the end-of-turn line and the footer have something to measure.
+func workingSince(m *chatModel, d time.Duration) {
+	m.working = true
+	m.turnStart = time.Now().Add(-d)
+}
+
+func TestEndOfTurnLineSummarizesTheTurn(t *testing.T) {
+	m := newTestModel()
+	workingSince(m, 23*time.Second)
+	for _, id := range []string{"c1", "c2", "c3"} {
+		m.Update(started(id, "tool_"+id, ""))
+		m.Update(finished(id, "tool_"+id, true, 1000))
+	}
+	m.Update(streamChunkMsg{text: "all done"})
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+
+	got := transcript(m)
+	if !strings.Contains(got, "✻ Worked for 23s · 3 tools · done ") {
+		t.Fatalf("the finished turn should be closed out by its summary: %q", got)
+	}
+	if !regexp.MustCompile(`done \d{1,2}:\d{2} [AP]M`).MatchString(got) {
+		t.Fatalf("the summary should end with a wall-clock time: %q", got)
+	}
+	// It belongs under the answer, as that turn's footer, not as a block of
+	// its own.
+	if strings.Index(got, "all done") > strings.Index(got, "Worked for") {
+		t.Errorf("the summary belongs under the answer: %q", got)
+	}
+	last := m.raw[len(m.raw)-1]
+	if last.role != "system" || !strings.Contains(last.content, "Worked for 23s · 3 tools") {
+		t.Fatalf("the summary should be recorded for /export, got %+v", last)
+	}
+}
+
+func TestEndOfTurnLineDropsTheToolsSegmentAtZero(t *testing.T) {
+	m := newTestModel()
+	workingSince(m, 2*time.Second)
+	m.Update(streamChunkMsg{text: "answered directly"})
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+	got := transcript(m)
+	if strings.Contains(got, "tools") {
+		t.Fatalf("a tool-less turn should not mention tools: %q", got)
+	}
+	if !strings.Contains(got, "✻ Worked for 2s · done ") {
+		t.Fatalf("summary = %q, want the elapsed and finish time only", got)
+	}
+}
+
+func TestEndOfTurnLineSingularTool(t *testing.T) {
+	m := newTestModel()
+	workingSince(m, time.Second)
+	m.Update(started("c1", "list_workloads", ""))
+	m.Update(finished("c1", "list_workloads", true, 100))
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+	if got := transcript(m); !strings.Contains(got, "· 1 tool ·") {
+		t.Fatalf("one call should read as '1 tool': %q", got)
+	}
+}
+
+// A failed turn is still a finished turn — it gets the same closing line.
+func TestEndOfTurnLineOnStreamError(t *testing.T) {
+	m := newTestModel()
+	m.client = &serviceClient{}
+	workingSince(m, 5*time.Second)
+	m.Update(streamErrMsg{err: errors.New("connection reset")})
+	if got := transcript(m); !containsAll(got, "connection reset", "✻ Worked for 5s · done ") {
+		t.Fatalf("a broken stream should still be closed out: %q", got)
+	}
+}
+
+func TestFormatWorkedFor(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{-time.Second, "0s"},
+		{23 * time.Second, "23s"},
+		{59500 * time.Millisecond, "59s"},
+		{66 * time.Second, "1m 06s"},
+		{150 * time.Second, "2m 30s"},
+	}
+	for _, c := range cases {
+		if got := formatWorkedFor(c.d); got != c.want {
+			t.Errorf("formatWorkedFor(%v) = %q, want %q", c.d, got, c.want)
+		}
+	}
+}
+
+// ── footer ────────────────────────────────────────────────────
+
+func TestFooterRightAlignsSessionBadges(t *testing.T) {
+	m := newTestModel()
+	m.contextID = "019f7293-3579-7d8e-8233-4da8bc900405"
+	m.raw = []transcriptTurn{
+		{role: "user", content: "one"}, {role: "assistant", content: "…"},
+		{role: "user", content: "two"}, {role: "assistant", content: "…"},
+	}
+	got := plain(m.footer())
+	if strings.Contains(got, "\n") {
+		t.Fatalf("the footer must stay one line (viewportHeight budgets one): %q", got)
+	}
+	if lipgloss.Width(got) != m.contentWidth() {
+		t.Fatalf("the badges should be flush right within %d columns, got %d: %q", m.contentWidth(), lipgloss.Width(got), got)
+	}
+	if !strings.HasPrefix(got, "enter send · / commands · ? keys") {
+		t.Fatalf("the idle hint belongs on the left: %q", got)
+	}
+	if !strings.HasSuffix(got, "019f7293 · 2 turns") {
+		t.Fatalf("footer should end with the short id and turn count, got %q", got)
+	}
+}
+
+// A named conversation is named in the footer rather than shown as an id.
+func TestFooterPrefersTheConversationName(t *testing.T) {
+	m := newTestModel()
+	m.contextID = "019f7293-3579-7d8e"
+	m.convName = "dfw quota escalation"
+	got := plain(m.footer())
+	if !strings.Contains(got, "dfw quota escalation") || strings.Contains(got, "019f7293") {
+		t.Fatalf("a named conversation should show its name, got %q", got)
+	}
+}
+
+func TestFooterShowsSpinnerAndElapsedWhileWorking(t *testing.T) {
+	m := newTestModel()
+	workingSince(m, 12*time.Second)
+	got := plain(m.footer())
+	if !strings.Contains(got, "thinking… 12s") {
+		t.Fatalf("a running turn should count up in the footer, got %q", got)
+	}
+	if strings.Contains(got, "enter send") {
+		t.Fatalf("the hint is replaced by the working state, got %q", got)
+	}
+}
+
+func TestFooterShowsScrolledBadgeWhenNotFollowing(t *testing.T) {
+	m := newTestModel()
+	fillTranscript(m, 40)
+	m.scrollBy(func() { m.vp.ScrollUp(5) })
+	if m.follow {
+		t.Fatal("setup: scrolling up should have stopped following")
+	}
+	got := plain(m.footer())
+	if !containsAll(got, "scrolled ·", "% · esc for the latest") {
+		t.Fatalf("scrolled-off-the-bottom should be a badge with the way out, got %q", got)
+	}
+	m.scrollBy(func() { m.vp.GotoBottom() })
+	if got := plain(m.footer()); strings.Contains(got, "scrolled") {
+		t.Fatalf("back at the bottom the badge should be gone, got %q", got)
+	}
+}
+
+// Too narrow for both halves: the state survives, the badges are dropped
+// rather than wrapping onto a row the height budget hasn't allowed for.
+func TestFooterDropsBadgesWhenTooNarrow(t *testing.T) {
+	m := newTestModel()
+	m.width = 24
+	m.contextID = "019f7293-3579-7d8e"
+	got := plain(m.footer())
+	if strings.Contains(got, "\n") {
+		t.Fatalf("the footer must stay one line at any width: %q", got)
+	}
+	if strings.Contains(got, "019f7293") {
+		t.Fatalf("badges should be dropped rather than wrapped, got %q", got)
+	}
+	if lipgloss.Width(got) > m.contentWidth() {
+		t.Fatalf("the footer overflows %d columns: %q", m.contentWidth(), got)
+	}
+}
+
+func TestQuestionMarkOnEmptyComposerOpensHelp(t *testing.T) {
+	m := newTestModel()
+	m.onKey(key('?', "?"))
+	if m.overlay != "help" {
+		t.Fatalf("'?' on an empty composer should open the help overlay, got %q", m.overlay)
+	}
+	// Any key dismisses an overlay, so a second '?' toggles it back off.
+	m.onKey(key('?', "?"))
+	if m.overlay != "" {
+		t.Fatalf("a second '?' should dismiss the overlay, got %q", m.overlay)
+	}
+	// With a draft in the composer it is just a character.
+	typeText(t, m, "why")
+	m.onKey(key('?', "?"))
+	if m.overlay != "" || m.ta.Value() != "why?" {
+		t.Fatalf("'?' in a draft should be typed, got overlay=%q value=%q", m.overlay, m.ta.Value())
+	}
+}
+
+func TestHelpOverlayDocumentsTheQuestionMark(t *testing.T) {
+	m := newTestModel()
+	if out := plain(m.helpView().Content); !strings.Contains(out, "on an empty composer") {
+		t.Fatalf("/help should document the '?' key, got:\n%s", out)
+	}
+}
+
+func TestWindowTitleTracksTheTurn(t *testing.T) {
+	m := newTestModel()
+	if got := m.windowTitle(); got != "patch · demo-project" {
+		t.Fatalf("idle title = %q", got)
+	}
+	m.working = true
+	if got := m.windowTitle(); got != "patch · working…" {
+		t.Fatalf("working title = %q", got)
+	}
+}
+
+// ── compaction marker ─────────────────────────────────────────
+
+func TestCompactDoneDrawsTheRule(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(compactDoneMsg{err: nil})
+	rule := plain(m.turns[0])
+	if !strings.Contains(rule, "─ history compacted ─") {
+		t.Fatalf("a successful /compact should draw the divider, got %q", rule)
+	}
+	if lipgloss.Width(rule) != m.contentWidth() {
+		t.Fatalf("the rule should span %d columns, got %d: %q", m.contentWidth(), lipgloss.Width(rule), rule)
+	}
+}
+
+func TestResumedSummaryCarriesTheRule(t *testing.T) {
+	m := newTestModel()
+	m.Update(pickerTranscriptMsg{
+		contextID: "conv-a",
+		items: []assistantv1alpha1.ConversationMessage{
+			{Role: "summary", Content: "compacted digest of earlier turns"},
+			{Role: "user", Content: "what's next"},
+		},
+	})
+	got := plain(m.turns[0])
+	if !containsAll(got, "─ history compacted ─", "Summary", "compacted digest of earlier turns") {
+		t.Fatalf("a resumed summary should sit under the same divider, got:\n%s", got)
+	}
+}
+
+// ── resume recap ──────────────────────────────────────────────
+
+func TestResumeAppendsARecapLine(t *testing.T) {
+	m := newTestModel()
+	m.Update(pickerTranscriptMsg{
+		contextID: "019f7293-3579-7d8e-8233-4da8bc900405",
+		items: []assistantv1alpha1.ConversationMessage{
+			{Role: "user", Content: "earlier question"},
+			{Role: "assistant", Content: "earlier answer", CreatedAt: metav1.NewTime(time.Now().Add(-3 * time.Hour))},
+		},
+	})
+	recap := plain(m.turns[len(m.turns)-1])
+	if recap != "resumed 019f7293 · 2 messages · last active 3h ago" {
+		t.Fatalf("recap = %q", recap)
+	}
+	// It is session state, not conversation content: /export and the turn
+	// count keep describing the conversation itself.
+	if len(m.raw) != 2 {
+		t.Fatalf("the recap must stay out of the transcript, raw = %+v", m.raw)
+	}
+}
+
+func TestResumeRecapUsesTheNameAndOmitsAnUnknownAge(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	named := titledConversation("conv-a", "api-backend not available")
+	named.Status.Name = "dfw quota escalation"
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{named}})
+	m.Update(pickerTranscriptMsg{
+		contextID: "conv-a",
+		items:     []assistantv1alpha1.ConversationMessage{{Role: "user", Content: "hi"}},
+	})
+	recap := plain(m.turns[len(m.turns)-1])
+	if recap != "resumed dfw quota escalation · 1 message" {
+		t.Fatalf("recap = %q, want the name and no age for an undated message", recap)
+	}
+}
+
+// ── notifications ─────────────────────────────────────────────
+
+func TestParseNotifyMode(t *testing.T) {
+	cases := map[string]notifyMode{
+		"":         notifyBell,
+		"bell":     notifyBell,
+		"  BELL  ": notifyBell,
+		"nonsense": notifyBell,
+		"off":      notifyOff,
+		"None":     notifyOff,
+		"desktop":  notifyDesktop,
+		"DESKTOP":  notifyDesktop,
+	}
+	for in, want := range cases {
+		if got := parseNotifyMode(in); got != want {
+			t.Errorf("parseNotifyMode(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestNotifyOnTurnEnd(t *testing.T) {
+	cases := []struct {
+		mode notifyMode
+		want string // "" means no command at all
+	}{
+		{notifyBell, "\a"},
+		{notifyOff, ""},
+		{notifyDesktop, "\a\x1b]9;Patch finished\x07"},
+	}
+	for _, c := range cases {
+		m := newTestModel()
+		m.notify = c.mode
+		m.working = true
+		_, cmd := m.Update(streamDoneMsg{contextID: "ctx-1"})
+		if c.want == "" {
+			if cmd != nil {
+				t.Errorf("%v should stay silent, got a command", c.mode)
+			}
+			continue
+		}
+		if cmd == nil {
+			t.Fatalf("%v should emit a notification", c.mode)
+		}
+		raw, ok := cmd().(tea.RawMsg)
+		if !ok {
+			t.Fatalf("%v should write through the program's output, got %T", c.mode, cmd())
+		}
+		if got := fmt.Sprint(raw.Msg); got != c.want {
+			t.Errorf("%v wrote %q, want %q", c.mode, got, c.want)
+		}
 	}
 }

@@ -396,7 +396,12 @@ Options:
                       /export (save the transcript to a file),
                       /status (show project/conversation/turn count), /help
                       (list commands), /quit or /exit (leave; Ctrl-C also
-                      leaves)
+                      leaves). "?" on an empty composer shows the key list.
+                      Each finished turn is closed out by a "Worked for 23s ·
+                      3 tools · done 6:05 PM" line and a bell (see
+                      PATCH_NOTIFY); the footer under the composer carries the
+                      state on the left and the conversation, turn count and
+                      scroll position on the right.
   --url <url>         Service base URL (overrides PATCH_URL)
   --token <token>     Bearer token (overrides PATCH_TOKEN)
   --kubeconfig <p>    Kubeconfig for the conversations apiserver (overrides
@@ -409,6 +414,11 @@ Environment:
   PATCH_URL          Service base URL, e.g. http://localhost:7820
   PATCH_TOKEN        Bearer token for the service
   KUBECONFIG         Kubeconfig used by 'conversations' (the apiserver read view)
+  PATCH_NOTIFY       How a finished turn announces itself in the full-screen
+                     chat: 'off', 'bell' (the default — the terminal bell), or
+                     'desktop' (the bell plus an OSC 9 desktop notification,
+                     ignored by terminals that don't implement it). Anything
+                     else is the default.
 
 Resume:
   'resume' opens the full-screen chat straight into the conversation picker:
