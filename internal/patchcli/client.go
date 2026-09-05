@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
@@ -79,6 +80,63 @@ func buildMessage(text, project, contextID string) *a2a.Message {
 	msg.SetMeta("projectName", project)
 	msg.ContextID = contextID
 	return msg
+}
+
+// toolActivity is one decoded tool-activity event: the service reports what
+// the assistant is doing as working-state status updates whose message carries
+// a data part of kind "tool_call" (see internal/a2a/activity.go). Field names
+// mirror that payload.
+type toolActivity struct {
+	Kind      string `json:"kind"`
+	Phase     string `json:"phase"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Summary   string `json:"summary"`
+	OK        bool   `json:"ok"`
+	ElapsedMs int64  `json:"elapsedMs"`
+}
+
+// The data part's discriminator and its in-flight phase, matching the
+// service's payload ("finished" is the only other phase).
+const (
+	toolActivityKind = "tool_call"
+	toolPhaseStarted = "started"
+)
+
+// started reports whether the call is still running.
+func (a toolActivity) started() bool { return a.Phase == toolPhaseStarted }
+
+// elapsed is the call's duration (finished events only).
+func (a toolActivity) elapsed() time.Duration {
+	return time.Duration(a.ElapsedMs) * time.Millisecond
+}
+
+// toolActivityFrom pulls the tool-activity payload out of a status-update
+// message, if it carries one. A data part arrives as decoded JSON (map[string]any
+// over the wire, the struct itself in-process), so it is re-marshaled rather
+// than type-asserted.
+func toolActivityFrom(msg *a2a.Message) (toolActivity, bool) {
+	if msg == nil {
+		return toolActivity{}, false
+	}
+	for _, p := range msg.Parts {
+		data := p.Data()
+		if data == nil {
+			continue
+		}
+		raw, err := json.Marshal(data)
+		if err != nil {
+			continue
+		}
+		var act toolActivity
+		if err := json.Unmarshal(raw, &act); err != nil {
+			continue
+		}
+		if act.Kind == toolActivityKind && act.Name != "" {
+			return act, true
+		}
+	}
+	return toolActivity{}, false
 }
 
 // ErrNothingToCompact is returned by [requestCompact] when the server ran the
