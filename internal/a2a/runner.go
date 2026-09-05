@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // RunState is the terminal outcome of an agent run.
@@ -35,12 +36,37 @@ type RunResult struct {
 	Error string
 }
 
+// ToolActivity is one tool invocation as the client should see it: enough to
+// render an activity row, and nothing else. Summary is already redacted and
+// capped by [SummarizeToolInput] — raw tool arguments never reach this struct,
+// because everything in it is streamed to the client.
+type ToolActivity struct {
+	// ID correlates the started and finished halves of one call. Empty when
+	// the provider assigned no tool-call id.
+	ID string
+	// Name is the model-facing tool name (a provider tool, or a built-in such
+	// as load_skill).
+	Name string
+	// Summary is a short human-readable argument line, e.g. "project=demo".
+	Summary string
+	// OK reports success; meaningful on the finished half only.
+	OK bool
+	// Elapsed is how long the call took; meaningful on the finished half only.
+	Elapsed time.Duration
+}
+
 // RunSink receives incremental output while an agent run is in progress. The
 // executor's sink implementation translates each delta into an A2A artifact
-// event.
+// event and each tool lifecycle callback into a working status update.
 type RunSink interface {
 	// OnTextDelta is called for each chunk of generated assistant text.
 	OnTextDelta(text string)
+	// OnToolStart is called when the model asks for a tool (including the
+	// built-in load_skill, which is how a skill load becomes visible).
+	OnToolStart(act ToolActivity)
+	// OnToolFinish is called once the call has run, with its outcome and
+	// elapsed time.
+	OnToolFinish(act ToolActivity)
 }
 
 // AgentRunner drives one conversation turn: it composes capabilities, runs the

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 
@@ -22,13 +23,22 @@ import (
 
 // fakeRunner is a scriptable [assistanta2a.AgentRunner] standing in for the
 // model/tool loop: it streams its reply as two text deltas and echoes a
-// findings marker when asked to diagnose, mirroring the e2e mock model.
+// findings marker when asked to diagnose, mirroring the e2e mock model. The
+// diagnose branch also reports one tool call, so the activity events have a
+// path through the real server stack.
 type fakeRunner struct{}
+
+// diagnoseTool is the tool fakeRunner reports running on the diagnose branch.
+const diagnoseTool = "streamco__pipeline_diagnose"
 
 func (fakeRunner) Run(_ context.Context, req assistanta2a.RunRequest, sink assistanta2a.RunSink) assistanta2a.RunResult {
 	var text string
 	if strings.Contains(strings.ToLower(req.UserText), "diagnose") {
 		text = "Pipeline p-1 findings: CONSUMER_LAG detected."
+		sink.OnToolStart(assistanta2a.ToolActivity{ID: "call-1", Name: diagnoseTool, Summary: "pipeline=p-1"})
+		sink.OnToolFinish(assistanta2a.ToolActivity{
+			ID: "call-1", Name: diagnoseTool, OK: true, Elapsed: 1200 * time.Millisecond,
+		})
 	} else {
 		text = "Patch here — how can I help with this project?"
 	}
@@ -495,6 +505,51 @@ func TestSendStreamingMessage(t *testing.T) {
 	// v1.0 wire uses TASK_STATE_* enums, not lowercase states.
 	if !strings.HasPrefix(string(terminalState), "TASK_STATE_") {
 		t.Errorf("state %q is not a v1.0 TASK_STATE_* enum", terminalState)
+	}
+}
+
+// Tool activity must survive the whole server stack — executor, task store,
+// SSE framing — as working status updates carrying a structured data part.
+func TestSendStreamingMessage_ToolActivity(t *testing.T) {
+	srv := newTestServer(t)
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": "stream-tools", "method": "SendStreamingMessage",
+		"params": sendMessageParams(project, "Diagnose pipeline p-1"),
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/a2a", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+goodToken)
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	var activity []map[string]any
+	for _, e := range readSSE(t, res.Body) {
+		ev, ok := e.Event.(*a2a.TaskStatusUpdateEvent)
+		if !ok || ev.Status.Message == nil {
+			continue
+		}
+		for _, p := range ev.Status.Message.Parts {
+			data, ok := p.Data().(map[string]any)
+			if !ok || data["kind"] != "tool_call" {
+				continue
+			}
+			if ev.Status.State != a2a.TaskStateWorking {
+				t.Errorf("activity event state = %q, want working", ev.Status.State)
+			}
+			activity = append(activity, data)
+		}
+	}
+	if len(activity) != 2 {
+		t.Fatalf("tool-activity events = %d, want 2 (started + finished): %v", len(activity), activity)
+	}
+	if activity[0]["phase"] != "started" || activity[0]["name"] != diagnoseTool || activity[0]["summary"] != "pipeline=p-1" {
+		t.Errorf("started event = %v", activity[0])
+	}
+	if activity[1]["phase"] != "finished" || activity[1]["ok"] != true || activity[1]["elapsedMs"] != float64(1200) {
+		t.Errorf("finished event = %v", activity[1])
 	}
 }
 

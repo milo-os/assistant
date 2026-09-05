@@ -106,14 +106,31 @@ func TestFullMockToolPath(t *testing.T) {
 	if result.State != StateCompleted {
 		t.Fatalf("state = %s (err=%s)", result.State, result.Error)
 	}
-	var sawToolCall bool
+	// The call and its result both surface, correlated by tool-call id, so the
+	// A2A layer can show the tool running and then close the row out.
+	var call, toolResult Event
 	for _, e := range events {
-		if e.Kind == EventToolCall && e.ToolName == "streamco__pipeline_diagnose" {
-			sawToolCall = true
+		switch {
+		case e.Kind == EventToolCall && e.ToolName == "streamco__pipeline_diagnose":
+			call = e
+		case e.Kind == EventToolResult && e.ToolName == "streamco__pipeline_diagnose":
+			toolResult = e
 		}
 	}
-	if !sawToolCall {
+	if call.Kind != EventToolCall {
 		t.Fatal("expected a tool-call event for the namespaced tool")
+	}
+	if len(call.ToolInput) == 0 {
+		t.Errorf("tool-call event should carry the call's arguments, got %q", call.ToolInput)
+	}
+	if toolResult.Kind != EventToolResult {
+		t.Fatal("expected a tool-result event for the namespaced tool")
+	}
+	if toolResult.ToolCallID != call.ToolCallID {
+		t.Errorf("tool-result id = %q, want the call's %q", toolResult.ToolCallID, call.ToolCallID)
+	}
+	if toolResult.ToolFailed {
+		t.Error("a successful tool result must not be marked failed")
 	}
 	if !strings.Contains(result.Text, "CONSUMER_LAG") {
 		t.Fatalf("final answer should quote the tool findings, got: %q", result.Text)
