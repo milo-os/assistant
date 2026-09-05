@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
@@ -52,6 +53,16 @@ func renderChat(events iter.Seq2[a2a.Event, error], jsonOut bool, io Io) (int, e
 			}
 			finalState = e.Status.State
 		case *a2a.TaskStatusUpdateEvent:
+			// Tool activity rides on working-state updates: it is progress
+			// within a state, not a transition, so it prints an activity row
+			// instead of another "» working" line. Stderr keeps piped stdout
+			// to just the answer.
+			if act, ok := toolActivityFrom(e.Status.Message); ok {
+				if !jsonOut {
+					io.Err(activityLine(act))
+				}
+				continue
+			}
 			if !jsonOut {
 				io.Err(fmt.Sprintf("» %s\n", friendlyState(e.Status.State)))
 			}
@@ -86,6 +97,28 @@ func renderChat(events iter.Seq2[a2a.Event, error], jsonOut bool, io Io) (int, e
 		return 0, nil
 	}
 	return 1, nil
+}
+
+// activityLine renders one tool-activity row for the plain (non-TUI) modes:
+// a line when the call starts and a line when it ends, so a long turn shows
+// progress in a log or a piped terminal without any cursor tricks.
+func activityLine(act toolActivity) string {
+	if act.started() {
+		return "• " + act.Name + " …\n"
+	}
+	if !act.OK {
+		return "• " + act.Name + " … failed · " + formatElapsed(act.elapsed()) + "\n"
+	}
+	return "• " + act.Name + " … " + formatElapsed(act.elapsed()) + "\n"
+}
+
+// formatElapsed renders a tool call's duration at glance precision: tenths of
+// a second under a minute, minutes and whole seconds beyond it.
+func formatElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
 // renderCompactResult prints the outcome of `patch compact` (POST

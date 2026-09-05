@@ -850,6 +850,151 @@ func TestMouseWheelScrolls(t *testing.T) {
 	}
 }
 
+// ── tool activity ──────────────────────────────
+
+// started/finished build the decoded activity updates the stream goroutine
+// sends, so these tests exercise rendering without any transport.
+func started(id, name, summary string) streamActivityMsg {
+	return streamActivityMsg{toolActivity{Kind: "tool_call", Phase: "started", ID: id, Name: name, Summary: summary}}
+}
+
+func finished(id, name string, ok bool, ms int64) streamActivityMsg {
+	return streamActivityMsg{toolActivity{Kind: "tool_call", Phase: "finished", ID: id, Name: name, OK: ok, ElapsedMs: ms}}
+}
+
+// transcript is the viewport's current text, unstyled.
+func transcript(m *chatModel) string { return plain(m.vp.View()) }
+
+func TestActivityRowShowsRunningToolThenResult(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "list_workloads", "project=demo"))
+	if !strings.Contains(transcript(m), "• Running list_workloads…") {
+		t.Fatalf("an in-flight tool should show a running row: %q", transcript(m))
+	}
+
+	m.Update(finished("c1", "list_workloads", true, 1200))
+	got := transcript(m)
+	if !strings.Contains(got, "• Ran list_workloads · 1.2s") {
+		t.Fatalf("a completed tool should show its name and elapsed time: %q", got)
+	}
+	if strings.Contains(got, "Running") {
+		t.Errorf("the running row should have been replaced: %q", got)
+	}
+	if len(m.activity) != 1 || !m.activity[0].done {
+		t.Fatalf("activity = %+v, want one closed-out row", m.activity)
+	}
+}
+
+func TestActivityRowFailedUsesFailedVerb(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "load_skill", "skill=lag-triage"))
+	m.Update(finished("c1", "load_skill", false, 400))
+	if !strings.Contains(transcript(m), "• Failed load_skill · 0.4s") {
+		t.Fatalf("a failed tool should read as failed: %q", transcript(m))
+	}
+}
+
+// Rows stay expanded while the tools ARE the progress, and fold once the
+// answer starts arriving.
+func TestActivityFoldsWhenAnswerBegins(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	for _, id := range []string{"c1", "c2", "c3"} {
+		m.Update(started(id, "tool_"+id, ""))
+		m.Update(finished(id, "tool_"+id, true, 1000))
+	}
+	if !containsAll(transcript(m), "tool_c1", "tool_c2", "tool_c3") {
+		t.Fatalf("before the answer, every call should be listed: %q", transcript(m))
+	}
+
+	m.Update(streamChunkMsg{text: "here is the answer"})
+	got := transcript(m)
+	if !strings.Contains(got, "• Called 3 tools · 3.0s") {
+		t.Fatalf("completed calls should fold once the answer begins: %q", got)
+	}
+	if strings.Contains(got, "tool_c1") {
+		t.Errorf("folded rows should not list each call: %q", got)
+	}
+}
+
+func TestCtrlOExpandsAndCollapsesActivity(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "list_workloads", "project=demo"))
+	m.Update(finished("c1", "list_workloads", true, 1200))
+	m.Update(started("c2", "get_workload", "name=web"))
+	m.Update(finished("c2", "get_workload", true, 300))
+	m.Update(streamChunkMsg{text: "done"})
+
+	m.onKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if !m.expandActivity {
+		t.Fatal("ctrl+o should expand the activity rows")
+	}
+	got := transcript(m)
+	if !containsAll(got, "• Ran list_workloads · 1.2s", "project=demo", "• Ran get_workload · 0.3s", "name=web") {
+		t.Fatalf("expanded rows should show every call with its summary: %q", got)
+	}
+
+	m.onKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if m.expandActivity {
+		t.Fatal("ctrl+o should collapse again")
+	}
+	if !strings.Contains(transcript(m), "• Called 2 tools") {
+		t.Fatalf("collapsing should restore the folded line: %q", transcript(m))
+	}
+}
+
+// The finished turn keeps its rows, so the transcript still says what happened.
+func TestActivitySurvivesIntoTheFinishedTurn(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "list_workloads", "project=demo"))
+	m.Update(finished("c1", "list_workloads", true, 1200))
+	m.Update(streamChunkMsg{text: "all good"})
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+
+	if len(m.activity) != 0 {
+		t.Errorf("the in-progress rows should have moved onto the turn, got %+v", m.activity)
+	}
+	if rows := m.turnActivity[len(m.turns)-1]; len(rows) != 1 {
+		t.Fatalf("finished turn activity = %+v, want the one call", rows)
+	}
+	got := transcript(m)
+	if !containsAll(got, "Patch", "• Ran list_workloads · 1.2s", "all good") {
+		t.Fatalf("the finalized turn should keep its activity row above the answer: %q", got)
+	}
+	if strings.Index(got, "list_workloads") > strings.Index(got, "all good") {
+		t.Errorf("activity rows belong above the answer: %q", got)
+	}
+}
+
+// A finish with no matching start (a dropped or duplicated event) still shows.
+func TestActivityUnmatchedFinishStillRenders(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(finished("c9", "orphan_tool", true, 500))
+	if !strings.Contains(transcript(m), "• Ran orphan_tool · 0.5s") {
+		t.Fatalf("an unmatched finish should still be shown: %q", transcript(m))
+	}
+}
+
+// /clear wipes the transcript's activity along with its turns.
+func TestActivityClearedWithTheTranscript(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "list_workloads", ""))
+	m.Update(finished("c1", "list_workloads", true, 100))
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+
+	typeText(t, m, "/clear")
+	m.onKey(key(tea.KeyEnter, ""))
+	if m.turnActivity != nil {
+		t.Fatalf("/clear should drop the transcript's activity, got %+v", m.turnActivity)
+	}
+}
+
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if !strings.Contains(s, sub) {
