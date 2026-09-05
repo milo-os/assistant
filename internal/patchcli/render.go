@@ -9,7 +9,7 @@
 // The wire is real A2A v1.0 (a2a-go types): task states arrive as the
 // TASK_STATE_* enum values, which friendlyState maps back to the lowercase
 // words the TS CLI printed (submitted, working, completed, …).
-package main
+package patchcli
 
 import (
 	"encoding/json"

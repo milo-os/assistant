@@ -8,7 +8,7 @@
 // caller only ever sees reports attributed to a provider they have access
 // to. Same read-path shape as `conversations`: shells out to kubectl using
 // the caller's normal k8s identity, no PATCH_TOKEN.
-package main
+package patchcli
 
 import (
 	"context"
@@ -23,9 +23,9 @@ import (
 
 // runGapsList prints a table of a provider project's capability-gap reports
 // (service, capability, summary, consumer project, age), newest first.
-func runGapsList(ctx context.Context, cmd command, io Io) int {
-	out, err := kubectlJSON(ctx, cmd.kubeconfig,
-		"get", "capabilitygapreports", "-n", cmd.project, "-o", "json")
+func runGapsList(ctx context.Context, inv Invocation, io Io) int {
+	out, err := kubectlJSON(ctx, inv.Kubeconfig,
+		"get", "capabilitygapreports", "-n", inv.Project, "-o", "json")
 	if err != nil {
 		return failKubectl(io, err, out)
 	}
@@ -36,7 +36,7 @@ func runGapsList(ctx context.Context, cmd command, io Io) int {
 		return 1
 	}
 
-	if cmd.json {
+	if inv.JSON {
 		io.Out(string(out))
 		if !strings.HasSuffix(string(out), "\n") {
 			io.Out("\n")
@@ -45,7 +45,7 @@ func runGapsList(ctx context.Context, cmd command, io Io) int {
 	}
 
 	if len(list.Items) == 0 {
-		io.Err("no capability-gap reports for provider project " + cmd.project + "\n")
+		io.Err("no capability-gap reports for provider project " + inv.Project + "\n")
 		return 0
 	}
 

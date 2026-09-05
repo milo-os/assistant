@@ -182,10 +182,10 @@ set `insecureSkipTLSVerify: true` and rely on in-cluster authn/authz (kind).
 
 ## CLI / portal integration (list + resume) — DONE (Phase 4)
 
-- `patch conversations list --project <p>` — table (context-id, created, last-active, message count). `patch conversations show <context-id> --project <p>` — full transcript. Both **shell out to `kubectl`** (`get conversations` / raw `messages` subresource GET) rather than embedding client-go: `cmd/patch` is a deliberately thin `a2a-go` client with no k8s client dep, and kubectl already carries the kubeconfig + serving-cert TLS trust for the aggregated apiserver (the verified Phase 3 path). The command deserializes into the local `pkg/apis/assistant/v1alpha1` types (pure apimachinery, already a dep). Auth is the caller's **k8s identity via `KUBECONFIG`/`--kubeconfig`**, not `PATCH_TOKEN` — consistent with decision #7 (an apiserver is not a chat transport). Code: `cmd/patch/conversations.go`.
+- `patch conversations list --project <p>` — table (context-id, created, last-active, message count). `patch conversations show <context-id> --project <p>` — full transcript. Both **shell out to `kubectl`** (`get conversations` / raw `messages` subresource GET) rather than embedding client-go: `cmd/patch` is a deliberately thin `a2a-go` client with no k8s client dep, and kubectl already carries the kubeconfig + serving-cert TLS trust for the aggregated apiserver (the verified Phase 3 path). The command deserializes into the local `pkg/apis/assistant/v1alpha1` types (pure apimachinery, already a dep). Auth is the caller's **k8s identity via `KUBECONFIG`/`--kubeconfig`**, not `PATCH_TOKEN` — consistent with decision #7 (an apiserver is not a chat transport). Code: `internal/patchcli/conversations.go`.
 - Resume: `patch chat --context-id <id>` (or `task dev:chat CTX=<id>` / the TUI's `--context-id`).
 - `task dev:chats` helper added (list; `ID=<id>` shows one transcript). Reads the cluster directly via `KUBECONFIG` — no port-forward (unlike `dev:chat`), since conversations come from the apiserver, not the A2A service.
-- Deferred: the **Bubble Tea TUI conversation picker** (`cmd/patch/chat_tui.go`) — a nice-to-have that adds an interactive selection state hard to test headlessly; the list/show commands cover the discovery deliverable.
+- Deferred: the **Bubble Tea TUI conversation picker** (`internal/patchcli/chat_tui.go`) — a nice-to-have that adds an interactive selection state hard to test headlessly; the list/show commands cover the discovery deliverable.
 
 ---
 
