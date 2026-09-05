@@ -1,4 +1,4 @@
-// The cobra command tree for `datumctl patch`, and the three seams where it
+// The cobra command tree for `datumctl assistant`, and the three seams where it
 // differs from the standalone CLI: the project comes from datumctl's injected
 // environment, the token from datumctl's credentials helper, and the service
 // URL from --url/PATCH_URL.
@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.datum.net/datumctl/plugin"
+	"golang.org/x/term"
 
 	"github.com/milo-os/assistant/internal/patchcli"
 )
@@ -23,14 +24,32 @@ const tokenTimeout = 10 * time.Second
 func newRootCmd() *cobra.Command {
 	// --org, --project and -o/--output come from the SDK, defaulted from the
 	// DATUM_* variables datumctl injects.
-	root := plugin.NewRootCmd("patch", "Chat with Patch, the Datum Cloud assistant")
+	root := plugin.NewRootCmd("assistant", "Chat with Patch, the Datum Cloud assistant")
 	root.Long = "Chat with Patch, the Datum Cloud assistant, from the terminal.\n\n" +
-		"Conversations are held by the assistant service; pick one back up with\n" +
-		"'resume', or continue it non-interactively with --context-id.\n" +
+		"On its own, 'datumctl assistant' opens the full-screen chat. Conversations are\n" +
+		"held by the assistant service; pick one back up with 'resume', or continue\n" +
+		"it non-interactively with 'chat --context-id'.\n" +
 		"'conversations' and 'gaps' read the aggregated API for the same project,\n" +
 		"using the same datumctl credentials."
+	root.Example = "  datumctl assistant\n" +
+		"  datumctl assistant chat \"Why is the api-backend workload not available?\"\n" +
+		"  datumctl assistant resume"
 	root.SilenceUsage = true
 	root.SilenceErrors = true
+	// The bare verb is the chat, the way `claude` or `codex` on their own are:
+	// the full-screen UI is the primary experience, not a flag on a subcommand.
+	root.Args = cobra.NoArgs
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		if !onTerminal() {
+			return fmt.Errorf("the full-screen chat needs a terminal; pipe a message through 'datumctl assistant chat \"…\"' instead")
+		}
+		inv, err := serviceInvocation(cmd, patchcli.KindChat, true)
+		if err != nil {
+			return err
+		}
+		inv.TUI = true
+		return run(cmd, inv)
+	}
 
 	root.PersistentFlags().String("url", "",
 		"Assistant service base URL (defaults to PATCH_URL)")
@@ -68,14 +87,16 @@ func newChatCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "chat [message]",
 		Short: "Send a message to the assistant",
-		Long: "Send one message and stream the answer, or hold a session with\n" +
-			"--interactive (line-based) or --tui (full-screen).\n\n" +
+		Long: "With a message, send it and stream the answer — the one-shot form for\n" +
+			"scripts and pipes. Without one, open the full-screen chat (the same UI\n" +
+			"as bare 'datumctl assistant'); --interactive keeps the line-based session\n" +
+			"for terminals that cannot run it.\n\n" +
 			"The conversation id is reported on stderr; pass it back with\n" +
 			"--context-id to continue that conversation.",
 		Args: cobra.MaximumNArgs(1),
-		Example: "  datumctl patch chat \"Why is the api-backend workload not available?\"\n" +
-			"  datumctl patch chat --tui\n" +
-			"  datumctl patch chat \"and the edge-cache one?\" --context-id 01a05ee5-…",
+		Example: "  datumctl assistant chat \"Why is the api-backend workload not available?\"\n" +
+			"  datumctl assistant chat\n" +
+			"  datumctl assistant chat \"and the edge-cache one?\" --context-id 01a05ee5-…",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			inv, err := serviceInvocation(cmd, patchcli.KindChat, true)
 			if err != nil {
@@ -88,13 +109,17 @@ func newChatCmd() *cobra.Command {
 			inv.TUI, _ = cmd.Flags().GetBool("tui")
 			inv.ContextID, _ = cmd.Flags().GetString("context-id")
 			if inv.Message == "" && !inv.Interactive && !inv.TUI {
-				return fmt.Errorf("chat: missing message argument (or use --interactive / --tui)")
+				if !onTerminal() {
+					return fmt.Errorf("chat: missing message argument (the full-screen chat needs a terminal; -i for a line-based session)")
+				}
+				inv.TUI = true
 			}
 			return run(cmd, inv)
 		},
 	}
-	cmd.Flags().BoolP("interactive", "i", false, "Hold a multi-turn session on one conversation")
-	cmd.Flags().Bool("tui", false, "Full-screen chat UI with a scrollable, markdown-rendered transcript")
+	cmd.Flags().BoolP("interactive", "i", false, "Hold a line-based multi-turn session instead of the full-screen chat")
+	cmd.Flags().Bool("tui", false, "Open the full-screen chat (the default without a message; kept for scripts that passed it)")
+	_ = cmd.Flags().MarkHidden("tui")
 	cmd.Flags().String("context-id", "", "Continue an existing conversation")
 	return cmd
 }
@@ -111,8 +136,8 @@ func newResumeCmd() *cobra.Command {
 			"Listing and loading go through the conversations apiserver with your\n" +
 			"Kubernetes identity (kubeconfig); chatting uses the assistant service.",
 		Args: cobra.MaximumNArgs(1),
-		Example: "  datumctl patch resume\n" +
-			"  datumctl patch resume 01a05ee5-…",
+		Example: "  datumctl assistant resume\n" +
+			"  datumctl assistant resume 01a05ee5-…",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			inv, err := serviceInvocation(cmd, patchcli.KindResume, true)
 			if err != nil {
@@ -248,6 +273,13 @@ func newTaskCmd() *cobra.Command {
 	}
 	cmd.AddCommand(get, cancel)
 	return cmd
+}
+
+// onTerminal reports whether stdin and stdout are a terminal — the full-screen
+// chat cannot run otherwise, and Bubble Tea's own error for that case does not
+// say what to do instead.
+func onTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 // run executes a resolved invocation and folds its exit code into an error

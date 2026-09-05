@@ -61,28 +61,28 @@ tasks:
 
   build:plugin:
     desc: >-
-      Build the datumctl plugin (cmd/milo-patch) into ./bin, then dev-install
-      it with INSTALL=1 so `datumctl patch` works. VERSION= stamps the manifest.
+      Build the datumctl plugin (cmd/milo-assistant) into ./bin, then dev-install
+      it with INSTALL=1 so `datumctl assistant` works. VERSION= stamps the manifest.
     vars:
       VERSION: '{{.VERSION | default "v0.0.0-dev"}}'
-      PLUGIN_BIN: '{{.ROOT_DIR}}/bin/milo-patch'
+      PLUGIN_BIN: '{{.ROOT_DIR}}/bin/milo-assistant'
     cmds:
       - mkdir -p {{.ROOT_DIR}}/bin
-      - go build -ldflags="-X main.version={{.VERSION}}" -o {{.PLUGIN_BIN}} ./cmd/milo-patch
+      - go build -ldflags="-X main.version={{.VERSION}}" -o {{.PLUGIN_BIN}} ./cmd/milo-assistant
       - '{{.PLUGIN_BIN}} --plugin-manifest'
       - |
         if [ -n "{{.INSTALL}}" ]; then
           # The installed filename is deliberately not the binary's own name.
-          # datumctl resolves the verb "patch" in its managed dir by trying
-          # "patch" then "datumctl-patch" only — never "milo-patch", which is
-          # a PATH-only prefix. A generic "patch" additionally needs a
+          # datumctl resolves the verb "assistant" in its managed dir by trying
+          # "assistant" then "datumctl-assistant" only — never "milo-assistant",
+          # a PATH-only prefix. A generic "assistant" additionally needs a
           # plugins.json record with a matching SHA256 that only
           # `datumctl plugin install` writes, so the legacy datumctl-<name>
           # filename is the one layout a local build can use unaided.
-          # For the PATH route instead, see cmd/milo-patch/README.md.
+          # For the PATH route instead, see cmd/milo-assistant/README.md.
           mkdir -p "$HOME/.datumctl/plugins"
-          cp {{.PLUGIN_BIN}} "$HOME/.datumctl/plugins/datumctl-patch"
-          echo "→ installed to ~/.datumctl/plugins/datumctl-patch — try: datumctl patch --help"
+          cp {{.PLUGIN_BIN}} "$HOME/.datumctl/plugins/datumctl-assistant"
+          echo "→ installed to ~/.datumctl/plugins/datumctl-assistant — try: datumctl assistant --help"
         else
           echo "→ built {{.PLUGIN_BIN}} (INSTALL=1 to dev-install it for datumctl)"
         fi
