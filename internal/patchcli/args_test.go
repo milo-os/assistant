@@ -34,6 +34,21 @@ func TestParseArgs(t *testing.T) {
 			want: command{kind: KindChat, project: "demo", tui: true, kubeconfig: "/kc"},
 		},
 		{
+			name: "resume opens the picker",
+			argv: []string{"resume", "--project", "demo", "--kubeconfig", "/kc"},
+			want: command{kind: KindResume, project: "demo", kubeconfig: "/kc"},
+		},
+		{
+			name: "resume with a context id",
+			argv: []string{"resume", "01a05ee5", "--project", "demo"},
+			want: command{kind: KindResume, project: "demo", contextID: "01a05ee5"},
+		},
+		{
+			name: "resume requires a project",
+			argv: []string{"resume"},
+			want: command{kind: kindError, errMsg: "resume: --project <name> is required"},
+		},
+		{
 			name: "chat missing message",
 			argv: []string{"chat", "--project", "demo"},
 			want: command{kind: kindError, errMsg: "chat: missing message argument (or use --interactive / --tui)"},

@@ -21,6 +21,7 @@
 //	patch card [--json]
 //	patch chat "<message>" --project <p> [--context-id <c>] [--json]
 //	patch chat -i --project <p> [--context-id <c>]
+//	patch resume [<context-id>] --project <p> [--kubeconfig <k>]
 //	patch compact --project <p> --context-id <c> [--json]
 //	patch conversations list --project <p> [--json]
 //	patch conversations show <context-id> --project <p> [--json]
@@ -103,6 +104,24 @@ func parseArgs(argv []string) command {
 		common.interactive = flags.interactive
 		common.tui = flags.tui
 		common.kubeconfig = flags.kubeconfig
+		return common
+
+	case "resume":
+		// The full-screen chat, opened straight into the conversation
+		// picker — or, with a context id, into that conversation with its
+		// transcript loaded. Needs both the service (to chat) and the
+		// apiserver read view (to list/load), like chat --tui's /resume.
+		if flags.project == "" {
+			return command{kind: kindError, errMsg: "resume: --project <name> is required"}
+		}
+		common.kind = KindResume
+		common.project = flags.project
+		common.kubeconfig = flags.kubeconfig
+		if len(rest) > 0 {
+			common.contextID = rest[0]
+		} else {
+			common.contextID = flags.contextID
+		}
 		return common
 
 	case "compact":
@@ -299,6 +318,7 @@ Usage:
   patch chat "<message>" --project <name> [--context-id <c>] [--json]
   patch chat -i --project <name> [--context-id <c>]
   patch chat --tui --project <name> [--context-id <c>] ["<message>"]
+  patch resume [<context-id>] --project <name>
   patch compact --project <name> --context-id <c> [--json]
   patch conversations list --project <name> [--json]
   patch conversations show <context-id> --project <name> [--json]
@@ -318,9 +338,9 @@ Options:
                       (↑/↓, pgup/pgdn, or the mouse wheel; esc jumps back to
                       the latest), live-streamed answers rendered as markdown,
                       spinner while the assistant works, tab-completion for
-                      slash commands. Slash commands: /resume (browse/resume a past
-                      conversation, with a live preview of each one's
-                      transcript as you move the cursor), /clear (start a
+                      slash commands. Slash commands: /resume (search and
+                      resume a past conversation, with a live preview of each
+                      one's transcript as you move the cursor), /clear (start a
                       fresh one), /compact (force history compaction now,
                       instead of waiting for the automatic threshold),
                       /export (save the transcript to a file),
@@ -339,6 +359,15 @@ Environment:
   PATCH_URL          Service base URL, e.g. http://localhost:7820
   PATCH_TOKEN        Bearer token for the service
   KUBECONFIG         Kubeconfig used by 'conversations' (the apiserver read view)
+
+Resume:
+  'resume' opens the full-screen chat straight into the conversation picker:
+  a search box over the project's conversations, newest first, each shown by
+  its opening message with a live preview of the highlighted one; enter
+  resumes it, esc cancels into a fresh chat. With a <context-id> it skips the
+  picker and loads that conversation's transcript directly. Needs PATCH_URL/
+  PATCH_TOKEN (to chat) and KUBECONFIG (to list and load, like
+  'conversations'); the chat --tui has the same picker as /resume.
 
 Compact:
   'compact' forces the assistant to summarize an existing conversation's older
@@ -367,6 +396,7 @@ Examples:
   PATCH_URL=http://localhost:7820 PATCH_TOKEN=dev-token \
     patch chat "Diagnose pipeline p-1 for StreamCo" --project demo-project
   patch chat -i --project demo-project
+  patch resume --project demo-project
   patch card --url http://localhost:7820
   patch conversations list --project demo-project
   patch conversations show 019f7293-3579-7d8e-8233-4da8bc900405 --project demo-project
