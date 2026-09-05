@@ -185,7 +185,7 @@ posture:
 - **Transport: a plain REST endpoint, not the A2A `/a2a` JSON-RPC surface.**
   `/a2a` is a message-turn protocol (`SendMessage`/`SendStreamingMessage`
   expect a task and an answer); compaction produces no answer, just a store
-  mutation. `POST /v1/compact` (`internal/server/compact.go`) takes
+  mutation. `POST /v1alpha1/compact` (`internal/server/compact.go`) takes
   `{"contextId", "projectName"}` and reuses `/a2a`'s exact bearer-token authn
   and per-project authz (`authenticateBearer`, `Authorizer.AuthorizeProject`
   in `internal/server/middleware.go`) rather than inventing a second auth
@@ -203,7 +203,7 @@ posture:
   compact"/failure as a transcript line). Both go through a shared
   `requestCompact` HTTP client helper (`internal/patchcli/client.go`) using the same
   `bearerTransport`/`PATCH_URL`/`PATCH_TOKEN` plumbing every other `patch`
-  command already uses — `/v1/compact` needed a plain `http.Client` call
+  command already uses — `/v1alpha1/compact` needed a plain `http.Client` call
   since it isn't reachable through the a2a-go client used for `/a2a`.
 
 ## Non-goals
@@ -303,7 +303,7 @@ for where each lands:
   `agent.Conversation.Compact` to `assistanta2a.Compactor`).
 - `cmd/assistant/main.go` — type-asserts the existing runner into
   `server.Deps.Compactor`.
-- `internal/server/compact.go` — `POST /v1/compact` handler.
+- `internal/server/compact.go` — `POST /v1alpha1/compact` handler.
 - `internal/server/middleware.go` — `authenticateBearer`/`writeAuthErrWith`
   extracted for reuse by `compact.go`.
 - `internal/server/server.go` — `Deps.Compactor`, route registration.

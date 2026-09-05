@@ -10,7 +10,7 @@ import (
 	"github.com/milo-os/assistant/internal/auth"
 )
 
-// compactRequestBody is the POST /v1/compact body. contextId identifies the
+// compactRequestBody is the POST /v1alpha1/compact body. contextId identifies the
 // conversation (same meaning as the A2A contextId); projectName is required
 // for the same reason SendMessage requires it — it is both the authorization
 // key and (via History) part of the storage key.
@@ -19,7 +19,7 @@ type compactRequestBody struct {
 	ProjectName string `json:"projectName"`
 }
 
-// compactHandler serves POST /v1/compact, the manual, user-triggered analog
+// compactHandler serves POST /v1alpha1/compact, the manual, user-triggered analog
 // of "/compact": unlike a normal turn it doesn't go through POST /a2a because
 // there is no message to answer, just a store mutation to perform. It reuses
 // the exact bearer-token authn/project authz POST /a2a applies (via

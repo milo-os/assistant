@@ -165,7 +165,7 @@ Behaviour:
 - **`patch conversations rename <context-id> "<name>" --project <p>`** — gives
   a conversation a name of your own (at most 80 characters), shown in place of
   the derived title wherever conversations are listed. It is a write, so it
-  goes to the **service** (`POST /v1/conversations/rename`, `PATCH_URL`/
+  goes to the **service** (`POST /v1alpha1/conversations/rename`, `PATCH_URL`/
   `PATCH_TOKEN`) rather than the read-only aggregated API; `/rename <name>`
   in the chat is the same thing.
 - **`patch task get|cancel <id>`** — the corresponding A2A methods.

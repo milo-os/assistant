@@ -28,7 +28,7 @@ import (
 // conversation store's resources (call it on shutdown; it is never nil).
 //
 // The conversation store is returned alongside the runner because the HTTP
-// layer needs it directly for POST /v1/conversations/rename — naming a
+// layer needs it directly for POST /v1alpha1/conversations/rename — naming a
 // conversation is a row update with no agent in it, so routing it through the
 // runner seam (the way compaction is) would be a category error.
 func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metrics *appmetrics.Metrics) (assistanta2a.AgentRunner, history.Store, func(), error) {
