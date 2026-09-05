@@ -75,9 +75,18 @@ func newClient(ctx context.Context, baseURL string, token TokenSource) (*service
 // plus the projectName metadata extension the service uses to select the Milo
 // project. A non-empty contextID continues that conversation — the service
 // replays its history into the turn's prompt.
-func buildMessage(text, project, contextID string) *a2a.Message {
+//
+// Mentions ride alongside projectName as structured metadata rather than being
+// re-parsed server-side: the text keeps its literal "@kind/name" so the stored
+// transcript reads as the user wrote it, while the service gets the resolved
+// list (with API groups where the client knew them) without a second parser to
+// keep in sync.
+func buildMessage(text, project, contextID string, mentions []mention) *a2a.Message {
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(text))
 	msg.SetMeta("projectName", project)
+	if len(mentions) > 0 {
+		msg.SetMeta("mentions", mentions)
+	}
 	msg.ContextID = contextID
 	return msg
 }
