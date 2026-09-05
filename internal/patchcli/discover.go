@@ -9,7 +9,7 @@ import (
 
 // DiscoverBaseURL asks the aggregated apiserver where the assistant lives.
 //
-// This is why `datumctl patch` needs no PATCH_URL. The control-plane address
+// This is why `datumctl assistant` needs no PATCH_URL. The control-plane address
 // names Milo, not the assistant, and nothing else advertises the service's
 // address — so the service publishes it as a resource in its own API group,
 // which the CLI already reads with the caller's datumctl credentials for

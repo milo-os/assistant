@@ -1,7 +1,9 @@
-// Command milo-patch is the datumctl plugin form of the `patch` CLI: it
-// makes the Datum Cloud assistant reachable as `datumctl patch`, sharing every
-// line of client code with the standalone binary (internal/patchcli) and
-// differing only in where the project and the bearer token come from.
+// Command milo-assistant is the datumctl plugin form of the `patch` CLI: it
+// makes Patch, the Datum Cloud assistant, reachable as `datumctl assistant`,
+// sharing every line of client code with the standalone binary
+// (internal/patchcli) and differing only in where the project and the bearer
+// token come from. The verb is `assistant` rather than `patch` because datumctl
+// carries kubectl's resource verbs and a built-in `patch` would shadow this.
 //
 // datumctl dispatches plugins with syscall.Exec on Unix — the plugin replaces
 // the datumctl process image and inherits its stdio and controlling terminal —
@@ -31,7 +33,7 @@ func main() {
 	// the temp dirs only) under a short timeout, and treats a non-zero exit or
 	// any leading output as "this binary has no manifest".
 	plugin.ServeManifest(plugin.Manifest{
-		Name:          "patch",
+		Name:          "assistant",
 		Version:       version,
 		Description:   "Chat with Patch, the Datum Cloud assistant",
 		APIVersion:    1,
