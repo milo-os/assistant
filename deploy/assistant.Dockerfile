@@ -43,9 +43,8 @@ ENTRYPOINT ["/usr/local/bin/assistant"]
 # ── Builder: compile ./cmd/assistant statically ────────────────────────
 # Pinned to the `go` directive in go.mod — bump both together.
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
-# Build natively and cross-compile: under `--platform linux/amd64` on an arm64
-# host the whole Go toolchain would otherwise run under QEMU, where `go mod
-# download` dies with heap corruption.
+# Build natively, cross-compile to TARGETARCH: emulating the whole Go toolchain
+# under QEMU makes `go mod download` die with heap corruption.
 ARG TARGETARCH
 WORKDIR /src
 
