@@ -293,6 +293,29 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 	})
 
+	// The report_capability_gap TOOL requires a key, because a keyless report
+	// cannot group and leaves the next conversation with an empty list to
+	// recognise from. The STORE must not: four rows in the live staging
+	// database predate keys, and a required tool field is not a required
+	// column. Anything that tightened this would delete them from the
+	// provider's view on the next read.
+	t.Run("an empty capability key is accepted by the store", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("nokey")
+		r, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "s"})
+		if err != nil {
+			t.Fatalf("Insert with no key = %v; the store must stay tolerant of keyless rows", err)
+		}
+		if r.CapabilityKey != "" {
+			t.Errorf("CapabilityKey = %q; want empty", r.CapabilityKey)
+		}
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 1 || groups[0].Key != r.ID {
+			t.Fatalf("Aggregate = %+v, %v; want the keyless row as its own entry", groups, err)
+		}
+	})
+
 	t.Run("capability key over its bound is rejected", func(t *testing.T) {
 		s := newStore(t)
 		provider := fresh("bigkey")

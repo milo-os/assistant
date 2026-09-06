@@ -24,7 +24,8 @@ func (m *gapReportCallingModel) Stream(_ context.Context, req agentcore.Request)
 			{Kind: agentcore.StreamPartStepFinish, FinishReason: agentcore.FinishStop, Usage: agentcore.Usage{Input: 10, Output: 5}},
 		}}, nil
 	}
-	input, _ := json.Marshal(map[string]string{"capability": "list pipelines", "summary": "user needed a pipeline id"})
+	input, _ := json.Marshal(map[string]string{
+		"capabilityKey": "list-pipelines", "capability": "list pipelines", "summary": "user needed a pipeline id"})
 	return &partReader{parts: []agentcore.StreamPart{
 		{Kind: agentcore.StreamPartToolCall, ToolCall: &agentcore.ToolCall{ID: "call-0", Name: m.toolName, Input: input}},
 		{Kind: agentcore.StreamPartStepFinish, FinishReason: agentcore.FinishToolCalls, Usage: agentcore.Usage{Input: 10, Output: 5}},
@@ -93,6 +94,11 @@ func TestGapReportDepsSetComposesToolAndWritesToProviderProject(t *testing.T) {
 	}
 	if providerReports[0].ConsumerProject != "demo-project" || providerReports[0].ContextID != "conv-1" {
 		t.Fatalf("unexpected provenance: %+v", providerReports[0])
+	}
+	// The key survives the whole wiring, which is what lets the next
+	// conversation be shown it and reuse it.
+	if providerReports[0].CapabilityKey != "list-pipelines" {
+		t.Fatalf("CapabilityKey = %q; want it carried end to end", providerReports[0].CapabilityKey)
 	}
 
 	consumerReports, err := store.List(context.Background(), "demo-project")

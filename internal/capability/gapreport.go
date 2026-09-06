@@ -117,7 +117,16 @@ func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
 				},
 			},
 		},
-		"required": []string{"capability", "summary"},
+		// capabilityKey is required, unlike kind and evidence. An omitted
+		// evidence block yields a thinner report; an omitted key yields one
+		// that cannot do the single job the field exists for, and — worse —
+		// a service whose first report is keyless shows the next
+		// conversation an empty list, so de-duplication never starts. Only
+		// PRESENCE and SHAPE are required, never membership in the injected
+		// list: forcing a genuinely new gap into an existing bucket would be
+		// the real compliance theatre. The worst case here is a fresh
+		// synonym, which the injected list corrects from occurrence two on.
+		"required": []string{"capabilityKey", "capability", "summary"},
 	})
 	return agentcore.ToolDefinition{
 		Name:        t.name,
@@ -136,14 +145,22 @@ func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
 // be able to coin one — but the sentence asking for reuse is dropped rather
 // than left dangling with an empty list.
 func (t *reportCapabilityGapTool) capabilityKeyDescription() string {
-	base := "A short, stable key naming the capability at fault: lowercase words joined by single dashes, " +
-		"at most " + strconv.Itoa(gapreport.MaxCapabilityKeyLen) + " characters, e.g. \"workload-metrics\". " +
-		"This, not the prose in `capability`, is what groups repeat reports of the SAME gap into one entry " +
-		"for " + t.serviceName + "'s team, so it is the field worth getting right."
+	return "REQUIRED. A short, stable key naming the capability at fault: lowercase words joined by single " +
+		"dashes, at most " + strconv.Itoa(gapreport.MaxCapabilityKeyLen) + " characters, e.g. " +
+		"\"workload-metrics\". This, not the prose in `capability`, is what groups repeat reports of the SAME " +
+		"gap into one entry for " + t.serviceName + "'s team, so it is the field worth getting right. " +
+		t.capabilityKeyHint()
+}
+
+// capabilityKeyHint is the half of the guidance that depends on what has
+// already been filed. It is shared by the field description and by the
+// rejection the model gets when it omits the key, so the correction it is
+// handed carries the same list the schema offered.
+func (t *reportCapabilityGapTool) capabilityKeyHint() string {
 	if len(t.knownKeys) == 0 {
-		return base + " No keys have been filed against " + t.serviceName + " yet, so coin one."
+		return "No keys have been filed against " + t.serviceName + " yet, so coin one."
 	}
-	return base + " REUSE one of the keys already filed against " + t.serviceName +
+	return "REUSE one of the keys already filed against " + t.serviceName +
 		" whenever this is the same underlying gap, even if you would have worded it differently: " +
 		strings.Join(t.knownKeys, ", ") + ". Coin a new key only when none of those names this gap."
 }
@@ -160,7 +177,7 @@ func gapReportToolDescription(service string) string {
 			"not for gaps unrelated to any single provider. This does not help the current user answer their "+
 			"question; it only helps %[1]s fix its tooling. Still answer the user as best you can (e.g. point them "+
 			"to a manual workaround) in addition to filing this report.\n"+
-			"KEY — set capabilityKey, and prefer a key %[1]s already has over a new one that means the same "+
+			"KEY — capabilityKey is REQUIRED, and prefer a key %[1]s already has over a new one meaning the same "+
 			"thing: it is what collapses repeat reports of one gap into a single prioritisable entry, and the "+
 			"same gap described in three different sentences is three items on %[1]s's list unless the key "+
 			"matches. See the capabilityKey field for the keys already filed.\n"+
@@ -226,7 +243,14 @@ func (t *reportCapabilityGapTool) Execute(ctx context.Context, input json.RawMes
 		} `json:"evidence"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil || args.Capability == "" || args.Summary == "" {
-		return "", fmt.Errorf("%s: input must be {\"capability\": \"...\", \"summary\": \"...\"}", t.name)
+		return "", fmt.Errorf("%s: input must be {\"capabilityKey\": \"...\", \"capability\": \"...\", \"summary\": \"...\"}", t.name)
+	}
+
+	if args.CapabilityKey == "" {
+		// Rejected rather than filed-and-nudged: the model can add a key and
+		// call again in the same turn, and a keyless row is unusable for
+		// grouping AND poisons the next conversation's key list.
+		return "", fmt.Errorf("%s: capabilityKey is required — %s", t.name, t.capabilityKeyHint())
 	}
 
 	kind, err := gapreport.ParseKind(args.Kind)
@@ -276,13 +300,7 @@ func (t *reportCapabilityGapTool) Execute(ctx context.Context, input json.RawMes
 	// A kind that wants evidence but arrived without it is still stored —
 	// dropping the report would lose the signal entirely — so the nudge goes
 	// back to the model, which is the only party that can still fix it.
-	msg := fmt.Sprintf("Reported to %s (%s): %s", t.serviceName, kind, args.Capability)
-	// Same reasoning as the evidence nudge: a keyless report is still worth
-	// storing, but it will sit on its own in the provider's view rather than
-	// joining the gap it belongs to, and only the model can fix that.
-	if args.CapabilityKey == "" {
-		msg += " — filed without a capabilityKey, so it will not group with other reports of the same gap. Include one next time."
-	}
+	msg := fmt.Sprintf("Reported to %s (%s/%s): %s", t.serviceName, args.CapabilityKey, kind, args.Capability)
 	if gapreport.NeedsEvidence(kind) && evidence.IsZero() {
 		msg += fmt.Sprintf(" — filed without evidence; a %s report is hard for %s's team to act on without "+
 			"evidence.tool/observed/contradictedBy. Include them next time.", kind, t.serviceName)

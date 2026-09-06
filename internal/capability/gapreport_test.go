@@ -80,7 +80,7 @@ func TestGapReportWritesToProviderProjectNotConsumerProject(t *testing.T) {
 	defer composed.Close()
 
 	tool := composed.Tools[GapReportToolName("streamco")]
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"capability":"list pipelines for StreamCo","summary":"user needed a pipeline id"}`))
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"capabilityKey":"list-pipelines","capability":"list pipelines for StreamCo","summary":"user needed a pipeline id"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestGapReportBoundsSurfaceAsToolErrors(t *testing.T) {
 
 	tool := composed.Tools[GapReportToolName("streamco")]
 	tooLong := strings.Repeat("x", gapreport.MaxCapabilityLen+1)
-	_, err = tool.Execute(context.Background(), json.RawMessage(`{"capability":"`+tooLong+`","summary":"s"}`))
+	_, err = tool.Execute(context.Background(), json.RawMessage(`{"capabilityKey":"cap","capability":"`+tooLong+`","summary":"s"}`))
 	if err == nil || !strings.Contains(err.Error(), "too long") {
 		t.Fatalf("want a too-long error, got %v", err)
 	}
@@ -254,6 +254,7 @@ func TestGapReportToolStoresKindAndEvidence(t *testing.T) {
 
 	tool := composed.Tools[GapReportToolName("streamco")]
 	_, err = tool.Execute(context.Background(), json.RawMessage(`{
+		"capabilityKey":"workload-stall-duration",
 		"capability":"workload stall duration",
 		"summary":"user was diagnosing a stalled workload",
 		"kind":"MisleadingOutput",
@@ -295,7 +296,7 @@ func TestGapReportToolOmittedKindDefaultsAndDoesNotWarn(t *testing.T) {
 	defer composed.Close()
 
 	out, err := composed.Tools[GapReportToolName("streamco")].Execute(context.Background(),
-		json.RawMessage(`{"capability":"list pipelines","summary":"user needed a pipeline id"}`))
+		json.RawMessage(`{"capabilityKey":"list-pipelines","capability":"list pipelines","summary":"user needed a pipeline id"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +324,7 @@ func TestGapReportToolWarnsButStoresWhenEvidenceIsMissing(t *testing.T) {
 	defer composed.Close()
 
 	out, err := composed.Tools[GapReportToolName("streamco")].Execute(context.Background(),
-		json.RawMessage(`{"capability":"workload stall duration","summary":"diagnosing a stalled workload","kind":"MisleadingOutput"}`))
+		json.RawMessage(`{"capabilityKey":"workload-stall-duration","capability":"workload stall duration","summary":"diagnosing a stalled workload","kind":"MisleadingOutput"}`))
 	if err != nil {
 		t.Fatalf("Execute = %v; a report with no evidence must still be filed", err)
 	}
@@ -349,7 +350,7 @@ func TestGapReportToolRejectsUnknownKind(t *testing.T) {
 	defer composed.Close()
 
 	_, err = composed.Tools[GapReportToolName("streamco")].Execute(context.Background(),
-		json.RawMessage(`{"capability":"cap","summary":"s","kind":"SlightlyOff"}`))
+		json.RawMessage(`{"capabilityKey":"cap","capability":"cap","summary":"s","kind":"SlightlyOff"}`))
 	if err == nil || !strings.Contains(err.Error(), "unknown kind") {
 		t.Fatalf("Execute = %v; want an unknown-kind error", err)
 	}
@@ -375,7 +376,7 @@ func TestGapReportEvidenceBoundsSurfaceAsToolErrors(t *testing.T) {
 
 	tooLong := strings.Repeat("x", gapreport.MaxEvidenceTextLen+1)
 	_, err = composed.Tools[GapReportToolName("streamco")].Execute(context.Background(),
-		json.RawMessage(`{"capability":"cap","summary":"s","kind":"MisleadingOutput","evidence":{"observed":"`+tooLong+`"}}`))
+		json.RawMessage(`{"capabilityKey":"cap","capability":"cap","summary":"s","kind":"MisleadingOutput","evidence":{"observed":"`+tooLong+`"}}`))
 	if err == nil || !strings.Contains(err.Error(), "too long") {
 		t.Fatalf("want a too-long error, got %v", err)
 	}
@@ -489,11 +490,18 @@ func TestGapReportSchemaInjectsExistingKeys(t *testing.T) {
 	if strings.Index(desc, "workload-metrics") > strings.Index(desc, "rare-gap") {
 		t.Errorf("keys are not ordered most-hit first:\n%s", desc)
 	}
-	// A gap can always be a new one, so the key is offered, never demanded.
+	// Required — but only its presence and shape, never membership in the
+	// list above: a genuinely new gap must still be reportable, and forcing
+	// one into an existing bucket would corrupt the taxonomy the list exists
+	// to build.
+	var found bool
 	for _, req := range required {
 		if req == "capabilityKey" {
-			t.Error("capabilityKey must not be required — a service's first gap has to be able to coin one")
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("capabilityKey must be required; required = %v", required)
 	}
 }
 
@@ -613,9 +621,15 @@ func TestGapReportToolStoresCapabilityKey(t *testing.T) {
 	}
 }
 
-// A keyless report is still stored — losing the signal is worse — but the
-// model is told what it cost, since it is the only party that can fix it.
-func TestGapReportToolNudgesWhenKeyIsOmitted(t *testing.T) {
+// A keyless report was accepted with a nudge until a live staging
+// conversation showed what that costs: the model simply omitted the key, and
+// because that service had none filed, the NEXT conversation was shown an
+// empty list and had nothing to recognise either. De-duplication could never
+// bootstrap. The analogy to missing evidence does not hold — an
+// under-evidenced report is thinner, a keyless one is unusable for the only
+// job the field has — so the key is required and its absence is rejected,
+// which the model can fix by calling again in the same turn.
+func TestGapReportToolRejectsMissingCapabilityKey(t *testing.T) {
 	store := gapreport.NewMemoryStore()
 	composed, err := Compose(context.Background(), []CapabilityDocument{gapReportDoc("streamco-platform")}, ComposeOptions{
 		GapReports: store, ExpectedProject: "demo-project", ContextID: "ctx-1",
@@ -624,17 +638,72 @@ func TestGapReportToolNudgesWhenKeyIsOmitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer composed.Close()
+	tool := composed.Tools[GapReportToolName("streamco")]
 
-	out, err := composed.Tools[GapReportToolName("streamco")].Execute(context.Background(),
-		json.RawMessage(`{"capability":"cap","summary":"s"}`))
+	// The schema says so...
+	var schema struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(tool.Definition().InputSchema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	var required bool
+	for _, r := range schema.Required {
+		if r == "capabilityKey" {
+			required = true
+		}
+	}
+	if !required {
+		t.Errorf("schema required = %v; want capabilityKey among them", schema.Required)
+	}
+
+	// ...and so does the tool, because a schema's "required" is a hint some
+	// model providers do not enforce.
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"capability":"cap","summary":"s"}`))
+	if err == nil {
+		t.Fatalf("Execute(no key) = %q, nil; want a rejection", out)
+	}
+	if !strings.Contains(err.Error(), "capabilityKey is required") {
+		t.Errorf("error = %v; want it to name the missing field", err)
+	}
+	// The correction carries the same guidance the schema offered, so the
+	// retry has what it needs.
+	if !strings.Contains(err.Error(), "coin one") {
+		t.Errorf("error = %v; want the key guidance for a service with no keys yet", err)
+	}
+	if reports, _ := store.List(context.Background(), "streamco-platform"); len(reports) != 0 {
+		t.Fatalf("a rejected report must not be written: %+v", reports)
+	}
+
+	// The retry the rejection is designed to produce.
+	if _, err := tool.Execute(context.Background(),
+		json.RawMessage(`{"capabilityKey":"workload-metrics","capability":"cap","summary":"s"}`)); err != nil {
+		t.Fatalf("retry with a key = %v", err)
+	}
+	reports, _ := store.List(context.Background(), "streamco-platform")
+	if len(reports) != 1 || reports[0].CapabilityKey != "workload-metrics" {
+		t.Fatalf("stored = %+v; want the retried report keyed", reports)
+	}
+}
+
+// The rejection must hand back the keys this service already has, so a model
+// that omitted the field is corrected toward reuse rather than toward coining.
+func TestGapReportMissingKeyRejectionOffersExistingKeys(t *testing.T) {
+	store := gapreport.NewMemoryStore()
+	fileGap(t, store, "streaming.streamco.example", "workload-metrics", "ctx-0")
+
+	composed, err := Compose(context.Background(), []CapabilityDocument{gapReportDoc("streamco-platform")}, ComposeOptions{
+		GapReports: store, ExpectedProject: "demo-project", ContextID: "ctx-1",
+	})
 	if err != nil {
-		t.Fatalf("Execute = %v; a keyless report must still be filed", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "capabilityKey") {
-		t.Errorf("tool result = %q; want a nudge naming capabilityKey", out)
-	}
-	if reports, _ := store.List(context.Background(), "streamco-platform"); len(reports) != 1 {
-		t.Fatalf("keyless report was not stored: %+v", reports)
+	defer composed.Close()
+
+	_, err = composed.Tools[GapReportToolName("streamco")].Execute(context.Background(),
+		json.RawMessage(`{"capability":"cap","summary":"s"}`))
+	if err == nil || !strings.Contains(err.Error(), "workload-metrics") {
+		t.Fatalf("error = %v; want the existing keys offered in the correction", err)
 	}
 }
 
