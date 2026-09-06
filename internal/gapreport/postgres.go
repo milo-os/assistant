@@ -38,6 +38,19 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS capability_gap_report_provider_project_idx
 		ON capability_gap_report (provider_project, created_at DESC)`,
+	// Kind and evidence were added after the table shipped, so they arrive as
+	// ADD COLUMN IF NOT EXISTS with defaults rather than a new table: this
+	// runs against a shared database on every open, and every row written
+	// before kinds existed must keep reading back as MissingCapability.
+	// NOT NULL DEFAULT is metadata-only on PostgreSQL 11+ — no table rewrite.
+	`ALTER TABLE capability_gap_report
+		ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'MissingCapability'`,
+	`ALTER TABLE capability_gap_report
+		ADD COLUMN IF NOT EXISTS evidence_tool text NOT NULL DEFAULT ''`,
+	`ALTER TABLE capability_gap_report
+		ADD COLUMN IF NOT EXISTS evidence_observed text NOT NULL DEFAULT ''`,
+	`ALTER TABLE capability_gap_report
+		ADD COLUMN IF NOT EXISTS evidence_contradicted_by text NOT NULL DEFAULT ''`,
 }
 
 // PostgresStore is a durable [Store] on PostgreSQL. Safe for concurrent use.
@@ -100,7 +113,8 @@ func (s *PostgresStore) List(ctx context.Context, providerProject string) ([]Rep
 	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, provider_project, service_name, consumer_project, context_id, capability, summary, created_at
+		`SELECT id, provider_project, service_name, consumer_project, context_id, capability, summary,
+		        kind, evidence_tool, evidence_observed, evidence_contradicted_by, created_at
 		 FROM capability_gap_report WHERE provider_project = $1 ORDER BY created_at DESC`,
 		providerProject)
 	if err != nil {
@@ -111,9 +125,18 @@ func (s *PostgresStore) List(ctx context.Context, providerProject string) ([]Rep
 	var out []Report
 	for rows.Next() {
 		var r Report
+		var kind string
 		if err := rows.Scan(&r.ID, &r.ProviderProject, &r.ServiceName, &r.ConsumerProject,
-			&r.ContextID, &r.Capability, &r.Summary, &r.CreatedAt); err != nil {
+			&r.ContextID, &r.Capability, &r.Summary, &kind,
+			&r.Evidence.Tool, &r.Evidence.Observed, &r.Evidence.ContradictedBy, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("gapreport store: scan report: %w", err)
+		}
+		// A row written before the kind column existed carries the column
+		// default; read anything empty as the documented default rather than
+		// surfacing "" to callers.
+		r.Kind = Kind(kind)
+		if r.Kind == "" {
+			r.Kind = KindMissingCapability
 		}
 		out = append(out, r)
 	}
@@ -126,12 +149,10 @@ func (s *PostgresStore) List(ctx context.Context, providerProject string) ([]Rep
 // Insert implements [Store]. The project report-count bound is enforced
 // inside the same transaction as the write, so concurrent inserts cannot
 // race past MaxReportsPerProject.
-func (s *PostgresStore) Insert(ctx context.Context, providerProject, serviceName, consumerProject, contextID, capability, summary string) (Report, error) {
-	if len(capability) > MaxCapabilityLen {
-		return Report{}, ErrCapabilityTooLong
-	}
-	if len(summary) > MaxSummaryLen {
-		return Report{}, ErrSummaryTooLong
+func (s *PostgresStore) Insert(ctx context.Context, params InsertParams) (Report, error) {
+	p, err := normalize(params)
+	if err != nil {
+		return Report{}, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
 	defer cancel()
@@ -144,7 +165,7 @@ func (s *PostgresStore) Insert(ctx context.Context, providerProject, serviceName
 	var count int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FROM capability_gap_report WHERE provider_project = $1`,
-		providerProject).Scan(&count); err != nil {
+		p.ProviderProject).Scan(&count); err != nil {
 		return Report{}, fmt.Errorf("gapreport store: count reports: %w", err)
 	}
 	if count >= MaxReportsPerProject {
@@ -153,19 +174,23 @@ func (s *PostgresStore) Insert(ctx context.Context, providerProject, serviceName
 
 	r := Report{
 		ID:              newReportID(),
-		ProviderProject: providerProject,
-		ServiceName:     serviceName,
-		ConsumerProject: consumerProject,
-		ContextID:       contextID,
-		Capability:      capability,
-		Summary:         summary,
+		ProviderProject: p.ProviderProject,
+		ServiceName:     p.ServiceName,
+		ConsumerProject: p.ConsumerProject,
+		ContextID:       p.ContextID,
+		Capability:      p.Capability,
+		Summary:         p.Summary,
+		Kind:            p.Kind,
+		Evidence:        p.Evidence,
 	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO capability_gap_report
-		   (id, provider_project, service_name, consumer_project, context_id, capability, summary)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		   (id, provider_project, service_name, consumer_project, context_id, capability, summary,
+		    kind, evidence_tool, evidence_observed, evidence_contradicted_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING created_at`,
 		r.ID, r.ProviderProject, r.ServiceName, r.ConsumerProject, r.ContextID, r.Capability, r.Summary,
+		string(r.Kind), r.Evidence.Tool, r.Evidence.Observed, r.Evidence.ContradictedBy,
 	).Scan(&r.CreatedAt); err != nil {
 		return Report{}, fmt.Errorf("gapreport store: insert: %w", err)
 	}
