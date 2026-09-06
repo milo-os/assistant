@@ -4,14 +4,12 @@ import "context"
 
 type callerTokenKey struct{}
 
-// ContextWithBearerToken stashes the caller's RAW bearer token on ctx.
+// ContextWithBearerToken stashes the caller's RAW bearer token on ctx. Only an
+// already-authenticated request should have one attached.
 //
-// It is deliberately not a field on [Principal]: a Principal is passed around,
+// Deliberately not a field on [Principal]: a Principal is passed around,
 // compared, and logged, and a credential must never ride along with an
-// identity. The token is carried separately for the one consumer that needs
-// the credential itself rather than the identity it resolved to — forwarding
-// it to a provider endpoint that acts as the caller (internal/capability).
-// Only an already-authenticated request should have one attached.
+// identity.
 func ContextWithBearerToken(ctx context.Context, token string) context.Context {
 	if token == "" {
 		return ctx

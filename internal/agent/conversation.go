@@ -134,11 +134,9 @@ type Deps struct {
 	// feature entirely.
 	GapReports gapreport.Store
 	// CapabilityIdentityForwardHosts is the operator-sanctioned set of MCP
-	// endpoint hosts that may receive the CALLER's own bearer token (plus the
-	// turn's project) so a provider can read the customer's resources as that
-	// user. Empty (the default) forwards to nobody — see
-	// internal/capability/identity.go for why a capability document naming an
-	// endpoint is never enough on its own.
+	// endpoint hosts that may receive the caller's own bearer token and the
+	// turn's project. Empty (the default) forwards to nobody; a capability
+	// document naming an endpoint never sanctions it. See internal/capability.
 	CapabilityIdentityForwardHosts []string
 	// AllowPrivateCapabilityNetworks relaxes the capability SSRF guard's
 	// loopback/RFC1918 block (link-local/metadata stay blocked either way). The
@@ -269,9 +267,8 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		mu          sync.Mutex
 		invocations []capability.ProviderToolInvocation
 	)
-	// The caller's own credential, read off the request context the HTTP layer
-	// authenticated (auth.ContextWithBearerToken). It reaches only sanctioned
-	// MCP endpoints; composition decides which, and forwards nothing without it.
+	// The caller's own credential, off the context the HTTP layer
+	// authenticated. Composition decides which endpoints, if any, may see it.
 	caller := capability.CallerIdentity{BearerToken: auth.BearerTokenFromContext(ctx)}
 
 	composed, _ := capability.Compose(ctx, docs, capability.ComposeOptions{

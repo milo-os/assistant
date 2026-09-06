@@ -15,7 +15,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -40,6 +42,11 @@ type Options struct {
 	ClientName string
 	// ClientVersion is the announced client version. Empty uses "0".
 	ClientVersion string
+	// Headers are set on every request of this session, but only on requests
+	// to Endpoint's own host, so a redirect off the endpoint cannot carry a
+	// credential meant for it. Which headers an endpoint deserves is
+	// internal/capability's policy, not this package's.
+	Headers map[string]string
 	// EnableStandaloneSSE opts into the server-initiated SSE stream. It is off
 	// by default because the per-request, request/response usage here needs no
 	// server-initiated notifications, and some stateless servers reject the
@@ -77,6 +84,19 @@ func Connect(ctx context.Context, opts Options) (*Session, error) {
 		// tracer provider is the no-op implementation, i.e. tracing is
 		// unconfigured — see internal/tracing.
 		httpClient = &http.Client{Transport: &acceptRoundTripper{next: otelhttp.NewTransport(http.DefaultTransport)}}
+	}
+	if len(opts.Headers) > 0 {
+		host, err := endpointHost(opts.Endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("mcptool: connect %s: %w", opts.Endpoint, err)
+		}
+		next := httpClient.Transport
+		if next == nil {
+			next = http.DefaultTransport
+		}
+		scoped := *httpClient
+		scoped.Transport = &headerRoundTripper{next: next, host: host, headers: maps.Clone(opts.Headers)}
+		httpClient = &scoped
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: name, Version: version}, nil)
@@ -184,4 +204,36 @@ func (rt *acceptRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		req.Header.Set("Accept", "application/json, text/event-stream")
 	}
 	return rt.next.RoundTrip(req)
+}
+
+// headerRoundTripper stamps [Options.Headers] only on the session's own
+// endpoint host: a round-tripper runs per redirect hop, so without the host
+// check a hostile redirect would harvest the credential.
+type headerRoundTripper struct {
+	next    http.RoundTripper
+	host    string
+	headers map[string]string
+}
+
+func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !strings.EqualFold(req.URL.Host, rt.host) {
+		return rt.next.RoundTrip(req)
+	}
+	req = req.Clone(req.Context())
+	for k, v := range rt.headers {
+		req.Header.Set(k, v)
+	}
+	return rt.next.RoundTrip(req)
+}
+
+// endpointHost returns the host:port of an endpoint URL.
+func endpointHost(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("endpoint %q has no host", endpoint)
+	}
+	return u.Host, nil
 }

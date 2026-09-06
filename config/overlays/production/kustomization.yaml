@@ -91,11 +91,9 @@ patches:
           - name: CAPABILITY_ALLOW_PRIVATE_NETWORKS
             value: "true"
           # Hosts sanctioned to receive the CALLING USER's bearer token and the
-          # turn's project, so a provider reading the customer's own resources
-          # acts as that user. Unset ⇒ forwarded to nobody, and provider tools
-          # that read as the caller will fail; set it to the AI gateway that
-          # fronts the provider endpoints. Never widen it to a host a capability
-          # document merely names.
+          # turn's project. Unset ⇒ forwarded to nobody. Set it to the AI gateway
+          # fronting the provider endpoints; never widen it to a host a
+          # capability document merely names.
           - name: CAPABILITY_IDENTITY_FORWARD_HOSTS
             value: "REPLACE_WITH_AI_GATEWAY_HOST"
           # ── Capabilities: the service catalog's provider API (NOT a fixture) ──
