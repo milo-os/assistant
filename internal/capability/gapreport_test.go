@@ -3,6 +3,8 @@ package capability
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -400,5 +402,249 @@ func TestGapReportMultipleProvidersGetDistinctTools(t *testing.T) {
 	}
 	if _, ok := composed.Tools[GapReportToolName("other-provider")]; !ok {
 		t.Fatal("missing other-provider gap-report tool")
+	}
+}
+
+// gapKeyStore is a MemoryStore whose CapabilityKeys read fails. Everything
+// else works, which is the point: the key list is an optimisation, and losing
+// it must not cost the conversation the tool.
+type gapKeyStore struct {
+	gapreport.Store
+	err error
+}
+
+func (s gapKeyStore) CapabilityKeys(context.Context, string, string, int) ([]string, error) {
+	return nil, s.err
+}
+
+// gapKeySchema extracts the capabilityKey field's description from a composed
+// tool, which is where the key list is injected.
+func gapKeySchema(t *testing.T, store gapreport.Store) (description string, required []string) {
+	t.Helper()
+	composed, err := Compose(context.Background(), []CapabilityDocument{gapReportDoc("streamco-platform")}, ComposeOptions{
+		GapReports:      store,
+		ExpectedProject: "demo-project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = composed.Close() })
+
+	tool, ok := composed.Tools[GapReportToolName("streamco")]
+	if !ok {
+		t.Fatal("gap-report tool was not composed")
+	}
+	var schema struct {
+		Properties struct {
+			CapabilityKey struct {
+				Type        string `json:"type"`
+				Description string `json:"description"`
+			} `json:"capabilityKey"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(tool.Definition().InputSchema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Properties.CapabilityKey.Type != "string" {
+		t.Fatalf("capabilityKey type = %q; want string", schema.Properties.CapabilityKey.Type)
+	}
+	return schema.Properties.CapabilityKey.Description, schema.Required
+}
+
+func fileGap(t *testing.T, store gapreport.Store, service, key, contextID string) {
+	t.Helper()
+	if _, err := store.Insert(context.Background(), gapreport.InsertParams{
+		ProviderProject: "streamco-platform", ServiceName: service,
+		ConsumerProject: "demo-project", ContextID: contextID,
+		CapabilityKey: key, Capability: "cap", Summary: "s",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The core of the de-duplication approach: the second conversation SEES that
+// workload-metrics already exists, so it reuses it instead of coining a
+// synonym for the same gap.
+func TestGapReportSchemaInjectsExistingKeys(t *testing.T) {
+	store := gapreport.NewMemoryStore()
+	fileGap(t, store, "streaming.streamco.example", "rare-gap", "ctx-1")
+	fileGap(t, store, "streaming.streamco.example", "workload-metrics", "ctx-2")
+	fileGap(t, store, "streaming.streamco.example", "workload-metrics", "ctx-3")
+	// Another service's key must not leak into this service's tool: keys are
+	// per-service vocabulary, and reusing one across services would merge two
+	// unrelated gaps.
+	fileGap(t, store, "other.example", "someone-elses-key", "ctx-4")
+
+	desc, required := gapKeySchema(t, store)
+	for _, key := range []string{"workload-metrics", "rare-gap"} {
+		if !strings.Contains(desc, key) {
+			t.Errorf("capabilityKey description does not offer %q:\n%s", key, desc)
+		}
+	}
+	if strings.Contains(desc, "someone-elses-key") {
+		t.Errorf("another service's key leaked into this tool:\n%s", desc)
+	}
+	// Most-hit first, so a cap can only ever drop the least likely to recur.
+	if strings.Index(desc, "workload-metrics") > strings.Index(desc, "rare-gap") {
+		t.Errorf("keys are not ordered most-hit first:\n%s", desc)
+	}
+	// A gap can always be a new one, so the key is offered, never demanded.
+	for _, req := range required {
+		if req == "capabilityKey" {
+			t.Error("capabilityKey must not be required — a service's first gap has to be able to coin one")
+		}
+	}
+}
+
+// A service with more keys than the prompt can carry: the list is capped, and
+// what survives is the most-hit end.
+func TestGapReportSchemaCapsInjectedKeys(t *testing.T) {
+	store := gapreport.NewMemoryStore()
+	const extra = 5
+	for i := range MaxInjectedCapabilityKeys + extra {
+		key := fmt.Sprintf("gap-%03d", i)
+		// The first MaxInjectedCapabilityKeys keys were hit by two
+		// conversations each; the last `extra` by one. Only the two-hit keys
+		// may survive the cap.
+		hits := 1
+		if i < MaxInjectedCapabilityKeys {
+			hits = 2
+		}
+		for h := range hits {
+			fileGap(t, store, "streaming.streamco.example", key, fmt.Sprintf("ctx-%d-%d", i, h))
+		}
+	}
+
+	desc, _ := gapKeySchema(t, store)
+	var listed int
+	for i := range MaxInjectedCapabilityKeys + extra {
+		if strings.Contains(desc, fmt.Sprintf("gap-%03d", i)) {
+			listed++
+		}
+	}
+	if listed != MaxInjectedCapabilityKeys {
+		t.Fatalf("listed %d keys; want exactly MaxInjectedCapabilityKeys (%d)", listed, MaxInjectedCapabilityKeys)
+	}
+	// The five dropped keys are the least-hit ones, not an arbitrary five.
+	for i := MaxInjectedCapabilityKeys; i < MaxInjectedCapabilityKeys+extra; i++ {
+		if strings.Contains(desc, fmt.Sprintf("gap-%03d", i)) {
+			t.Errorf("gap-%03d survived the cap ahead of a more-hit key", i)
+		}
+	}
+}
+
+// A service that has never had a gap filed: the field still exists (its first
+// gap has to coin a key), and the description must not trail off into an
+// empty list.
+func TestGapReportSchemaWithNoKeysIsStillUsable(t *testing.T) {
+	desc, _ := gapKeySchema(t, gapreport.NewMemoryStore())
+	if desc == "" {
+		t.Fatal("capabilityKey must still be offered when a service has no keys yet")
+	}
+	if strings.Contains(desc, "REUSE") {
+		t.Errorf("description asks for reuse with nothing to reuse:\n%s", desc)
+	}
+	if !strings.Contains(desc, "coin one") {
+		t.Errorf("description does not tell the model to coin a key:\n%s", desc)
+	}
+}
+
+// Composition gained a store read; a store read can fail. It must cost the
+// key list and nothing else — the same way the memory index degrades.
+func TestGapReportComposeDegradesWhenKeyLookupFails(t *testing.T) {
+	store := gapKeyStore{Store: gapreport.NewMemoryStore(), err: errors.New("connection refused")}
+	desc, _ := gapKeySchema(t, store)
+	if strings.Contains(desc, "REUSE") {
+		t.Errorf("a failed key read must degrade to no list, not a partial one:\n%s", desc)
+	}
+
+	// And the tool still works: a gap hit during the outage is still filed.
+	composed, err := Compose(context.Background(), []CapabilityDocument{gapReportDoc("streamco-platform")}, ComposeOptions{
+		GapReports: store, ExpectedProject: "demo-project", ContextID: "ctx-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer composed.Close()
+	if _, err := composed.Tools[GapReportToolName("streamco")].Execute(context.Background(),
+		json.RawMessage(`{"capabilityKey":"workload-metrics","capability":"cap","summary":"s"}`)); err != nil {
+		t.Fatalf("Execute = %v; the tool must keep working when the key lookup failed", err)
+	}
+	reports, err := store.List(context.Background(), "streamco-platform")
+	if err != nil || len(reports) != 1 || reports[0].CapabilityKey != "workload-metrics" {
+		t.Fatalf("List = %+v, %v; want the report filed with its key", reports, err)
+	}
+}
+
+func TestGapReportToolStoresCapabilityKey(t *testing.T) {
+	store := gapreport.NewMemoryStore()
+	composed, err := Compose(context.Background(), []CapabilityDocument{gapReportDoc("streamco-platform")}, ComposeOptions{
+		GapReports: store, ExpectedProject: "demo-project", ContextID: "ctx-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer composed.Close()
+	tool := composed.Tools[GapReportToolName("streamco")]
+
+	out, err := tool.Execute(context.Background(),
+		json.RawMessage(`{"capabilityKey":"workload-metrics","capability":"CPU/memory metrics","summary":"s"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "capabilityKey") {
+		t.Errorf("a report filed WITH a key must not be nudged about one: %q", out)
+	}
+	reports, _ := store.List(context.Background(), "streamco-platform")
+	if len(reports) != 1 || reports[0].CapabilityKey != "workload-metrics" {
+		t.Fatalf("stored = %+v; want the key preserved", reports)
+	}
+
+	// Junk is rejected with the rule, so the model can reshape and retry in
+	// the same turn rather than the key being silently dropped.
+	_, err = tool.Execute(context.Background(),
+		json.RawMessage(`{"capabilityKey":"Workload Metrics","capability":"cap","summary":"s"}`))
+	if err == nil || !strings.Contains(err.Error(), "dashes") {
+		t.Fatalf("Execute(junk key) = %v; want an error naming the key format", err)
+	}
+	if reports, _ := store.List(context.Background(), "streamco-platform"); len(reports) != 1 {
+		t.Fatalf("a rejected key must not write a report: %+v", reports)
+	}
+}
+
+// A keyless report is still stored — losing the signal is worse — but the
+// model is told what it cost, since it is the only party that can fix it.
+func TestGapReportToolNudgesWhenKeyIsOmitted(t *testing.T) {
+	store := gapreport.NewMemoryStore()
+	composed, err := Compose(context.Background(), []CapabilityDocument{gapReportDoc("streamco-platform")}, ComposeOptions{
+		GapReports: store, ExpectedProject: "demo-project", ContextID: "ctx-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer composed.Close()
+
+	out, err := composed.Tools[GapReportToolName("streamco")].Execute(context.Background(),
+		json.RawMessage(`{"capability":"cap","summary":"s"}`))
+	if err != nil {
+		t.Fatalf("Execute = %v; a keyless report must still be filed", err)
+	}
+	if !strings.Contains(out, "capabilityKey") {
+		t.Errorf("tool result = %q; want a nudge naming capabilityKey", out)
+	}
+	if reports, _ := store.List(context.Background(), "streamco-platform"); len(reports) != 1 {
+		t.Fatalf("keyless report was not stored: %+v", reports)
+	}
+}
+
+// The tool description is what the model reads first, so the key has to be
+// argued for there, not only in the field.
+func TestGapReportDescriptionAsksForKeyReuse(t *testing.T) {
+	desc := gapReportToolDescription("StreamCo")
+	for _, want := range []string{"capabilityKey", "KEY —"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("description does not mention %q:\n%s", want, desc)
+		}
 	}
 }
