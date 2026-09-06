@@ -28,6 +28,7 @@
 //	patch conversations show <context-id> --project <p> [--json]
 //	patch conversations rename <context-id> <name> --project <p> [--json]
 //	patch gaps list --project <p> [--json]
+//	patch gaps reports --project <p> [--json]
 //	patch task get <id> [--json]
 //	patch task cancel <id> [--json]
 //
@@ -198,13 +199,20 @@ func parseArgs(argv []string) command {
 		if len(rest) > 0 {
 			sub = rest[0]
 		}
-		if sub != "list" {
-			return command{kind: kindError, errMsg: `gaps: expected "list", got "` + sub + `"`}
+		// "list" is the aggregate — one row per distinct gap, which is what a
+		// provider prioritises from. "reports" is the occurrence log behind
+		// it, where the per-report evidence lives.
+		switch sub {
+		case "list":
+			common.kind = KindGapList
+		case "reports":
+			common.kind = KindGapReports
+		default:
+			return command{kind: kindError, errMsg: `gaps: expected "list" or "reports", got "` + sub + `"`}
 		}
 		if flags.project == "" {
-			return command{kind: kindError, errMsg: "gaps list: --project <name> is required"}
+			return command{kind: kindError, errMsg: "gaps " + sub + ": --project <name> is required"}
 		}
-		common.kind = KindGapList
 		common.project = flags.project
 		common.kubeconfig = flags.kubeconfig
 		return common
@@ -357,6 +365,7 @@ Usage:
   patch conversations show <context-id> --project <name> [--json]
   patch conversations rename <context-id> "<name>" --project <name> [--json]
   patch gaps list --project <name> [--json]
+  patch gaps reports --project <name> [--json]
   patch task get <id> [--json]
   patch task cancel <id> [--json]
 
@@ -476,4 +485,5 @@ Examples:
   patch conversations list --project demo-project
   patch conversations show 019f7293-3579-7d8e-8233-4da8bc900405 --project demo-project
   patch gaps list --project streamco-platform
+  patch gaps reports --project streamco-platform
 `

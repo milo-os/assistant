@@ -22,14 +22,86 @@ import (
 )
 
 // gapReportsPath builds the group-relative path for a provider project's
-// capability-gap reports.
+// capability-gap reports (the occurrence log).
 func gapReportsPath(project string) string {
 	return fmt.Sprintf("/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/capabilitygapreports", project)
 }
 
-// runGapsList prints a table of a provider project's capability-gap reports
-// (service, capability, summary, consumer project, age), newest first.
+// gapsPath builds the group-relative path for a provider project's distinct
+// capability gaps (the aggregate).
+func gapsPath(project string) string {
+	return fmt.Sprintf("/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/capabilitygaps", project)
+}
+
+// runGapsList prints one row per DISTINCT gap, most-hit first, with how many
+// conversations hit it — the number that decides what a provider's team works
+// on. `patch gaps reports` prints the individual reports behind these rows.
 func runGapsList(ctx context.Context, inv Invocation, io Io) int {
+	view := ReadViewFor(inv)
+	out, err := view.get(ctx, inv.Project, gapsPath(inv.Project))
+	if err != nil {
+		io.Err("patch: " + readViewErrorText(view, err) + "\n")
+		return 1
+	}
+
+	var list assistantv1alpha1.CapabilityGapList
+	if err := json.Unmarshal(out, &list); err != nil {
+		io.Err("patch: could not parse capability gaps response: " + err.Error() + "\n")
+		return 1
+	}
+
+	if inv.JSON {
+		return emitRaw(out, io)
+	}
+
+	if len(list.Items) == 0 {
+		io.Err("no capability gaps for provider project " + inv.Project + "\n")
+		return 0
+	}
+
+	var b strings.Builder
+	tw := tabwriter.NewWriter(&b, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "CONVERSATIONS\tOCCURRENCES\tLAST-SEEN\tSERVICE\tKEY\tKIND\tCAPABILITY")
+	for _, g := range list.Items {
+		fmt.Fprintf(tw, "%d\t%d\t%s\t%s\t%s\t%s\t%s\n",
+			g.Status.Conversations,
+			g.Status.Occurrences,
+			ago(g.Status.LastSeen.Time),
+			g.Status.ServiceName,
+			gapKeyText(g.Status.CapabilityKey),
+			gapKindText(g.Status.Kind),
+			previewText(g.Status.Capability, 60),
+		)
+	}
+	_ = tw.Flush()
+	io.Out(b.String())
+	return 0
+}
+
+// gapKeyText renders a gap's key. A gap filed before keys existed has none
+// and stands alone, so say that rather than leaving the column blank and
+// letting it read as a rendering bug.
+func gapKeyText(key string) string {
+	if key == "" {
+		return "(unkeyed)"
+	}
+	return key
+}
+
+// emitRaw passes an API response through unchanged for --json.
+func emitRaw(out []byte, io Io) int {
+	io.Out(string(out))
+	if !strings.HasSuffix(string(out), "\n") {
+		io.Out("\n")
+	}
+	return 0
+}
+
+// runGapReportsList prints the occurrence log: one row per report filed
+// (service, capability, summary, consumer project, age), newest first. This
+// is the drill-down behind `patch gaps list`, and the only view that shows
+// which consumer project each report came from.
+func runGapReportsList(ctx context.Context, inv Invocation, io Io) int {
 	view := ReadViewFor(inv)
 	out, err := view.get(ctx, inv.Project, gapReportsPath(inv.Project))
 	if err != nil {
@@ -44,11 +116,7 @@ func runGapsList(ctx context.Context, inv Invocation, io Io) int {
 	}
 
 	if inv.JSON {
-		io.Out(string(out))
-		if !strings.HasSuffix(string(out), "\n") {
-			io.Out("\n")
-		}
-		return 0
+		return emitRaw(out, io)
 	}
 
 	if len(list.Items) == 0 {
@@ -62,11 +130,12 @@ func runGapsList(ctx context.Context, inv Invocation, io Io) int {
 
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "AGE\tSERVICE\tKIND\tCAPABILITY\tCONSUMER-PROJECT\tSUMMARY")
+	fmt.Fprintln(tw, "AGE\tSERVICE\tKEY\tKIND\tCAPABILITY\tCONSUMER-PROJECT\tSUMMARY")
 	for _, r := range list.Items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			ago(r.CreationTimestamp.Time),
 			r.Status.ServiceName,
+			gapKeyText(r.Status.CapabilityKey),
 			gapKindText(r.Status.Kind),
 			r.Status.Capability,
 			r.Status.ConsumerProject,

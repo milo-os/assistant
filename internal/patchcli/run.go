@@ -31,8 +31,10 @@ const (
 	KindConvShow
 	// KindConvRename names one conversation.
 	KindConvRename
-	// KindGapList lists a provider project's capability-gap reports.
+	// KindGapList lists a provider project's distinct capability gaps.
 	KindGapList
+	// KindGapReports lists the individual reports behind those gaps.
+	KindGapReports
 	// KindResume opens the full-screen chat straight into the conversation
 	// picker, or — with ContextID set — into that conversation with its
 	// transcript loaded.
@@ -148,7 +150,7 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 // opposed to the aggregated apiserver read views, which use kubectl).
 func (inv Invocation) needsService() bool {
 	switch inv.Kind {
-	case KindConvList, KindConvShow, KindGapList:
+	case KindConvList, KindConvShow, KindGapList, KindGapReports:
 		return false
 	}
 	return true
@@ -166,6 +168,8 @@ func (inv Invocation) Execute(ctx context.Context, io Io) int {
 		return runConversationsRename(ctx, inv, io)
 	case KindGapList:
 		return runGapsList(ctx, inv, io)
+	case KindGapReports:
+		return runGapReportsList(ctx, inv, io)
 
 	case KindCard:
 		card, err := resolveCard(ctx, inv.BaseURL)

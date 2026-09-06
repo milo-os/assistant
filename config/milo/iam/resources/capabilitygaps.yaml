@@ -1,0 +1,21 @@
+# CapabilityGap — the aggregate view over CapabilityGapReport: one entry per
+# distinct gap with a count of how many conversations hit it. Read-only
+# (rest.Lister only, so `list` is the whole surface), namespaced by the
+# PROVIDER project exactly like capabilitygapreports.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: assistant.miloapis.com-capabilitygaps
+spec:
+  serviceRef:
+    name: "assistant.miloapis.com"
+  kind: CapabilityGap
+  plural: capabilitygaps
+  singular: capabilitygap
+  permissions:
+    - list
+  parentResources:
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Organization
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Project
