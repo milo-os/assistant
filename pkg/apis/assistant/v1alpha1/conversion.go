@@ -80,6 +80,24 @@ func RegisterConversions(s *runtime.Scheme) error {
 				return convert_assistant_CapabilityGapReportList_To_v1alpha1(a.(*assistant.CapabilityGapReportList), b.(*CapabilityGapReportList))
 			},
 		},
+		{
+			(*assistant.CapabilityGap)(nil), (*CapabilityGap)(nil),
+			func(a, b any, sc conversion.Scope) error {
+				return convert_v1alpha1_CapabilityGap_To_assistant(a.(*CapabilityGap), b.(*assistant.CapabilityGap))
+			},
+			func(a, b any, sc conversion.Scope) error {
+				return convert_assistant_CapabilityGap_To_v1alpha1(a.(*assistant.CapabilityGap), b.(*CapabilityGap))
+			},
+		},
+		{
+			(*assistant.CapabilityGapList)(nil), (*CapabilityGapList)(nil),
+			func(a, b any, sc conversion.Scope) error {
+				return convert_v1alpha1_CapabilityGapList_To_assistant(a.(*CapabilityGapList), b.(*assistant.CapabilityGapList))
+			},
+			func(a, b any, sc conversion.Scope) error {
+				return convert_assistant_CapabilityGapList_To_v1alpha1(a.(*assistant.CapabilityGapList), b.(*CapabilityGapList))
+			},
+		},
 	}
 	for _, p := range pairs {
 		if err := s.AddGeneratedConversionFunc(p.external, p.internal, p.toInternal); err != nil {

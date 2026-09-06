@@ -102,6 +102,7 @@ func (c completedConfig) New() (*ConversationServer, error) {
 		"conversations":          conversation.NewConversationREST(c.ExtraConfig.Reader),
 		"conversations/messages": conversation.NewMessagesREST(c.ExtraConfig.Reader),
 		"capabilitygapreports":   capabilitygapreport.NewCapabilityGapReportREST(c.ExtraConfig.GapReports),
+		"capabilitygaps":         capabilitygapreport.NewCapabilityGapREST(c.ExtraConfig.GapReports),
 		"assistantendpoints":     endpoint.NewAssistantEndpointREST(c.ExtraConfig.PublicBaseURL),
 	}
 	apiGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = v1alpha1Storage

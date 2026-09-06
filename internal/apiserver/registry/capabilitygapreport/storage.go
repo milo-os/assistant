@@ -96,6 +96,7 @@ func newCapabilityGapReport(rep gapreport.Report) *assistant.CapabilityGapReport
 			ServiceName:     rep.ServiceName,
 			ConsumerProject: rep.ConsumerProject,
 			ContextID:       rep.ContextID,
+			CapabilityKey:   rep.CapabilityKey,
 			Capability:      rep.Capability,
 			Summary:         rep.Summary,
 			Kind:            string(kind),

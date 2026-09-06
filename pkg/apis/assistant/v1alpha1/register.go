@@ -27,6 +27,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&Conversation{}, &ConversationList{},
 		&ConversationMessages{},
 		&CapabilityGapReport{}, &CapabilityGapReportList{},
+		&CapabilityGap{}, &CapabilityGapList{},
 		&AssistantEndpoint{}, &AssistantEndpointList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)

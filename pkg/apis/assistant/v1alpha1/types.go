@@ -124,6 +124,12 @@ type CapabilityGapReportStatus struct {
 	// ContextID is the conversation the gap arose in — provenance only.
 	// +optional
 	ContextID string `json:"contextID,omitempty"`
+	// CapabilityKey groups this occurrence with every other report of the
+	// same gap; it is the name of the CapabilityGap it rolls up into. Empty
+	// on reports filed before keys existed, or filed without one — those
+	// stand alone in the aggregate rather than being merged on a guess.
+	// +optional
+	CapabilityKey string `json:"capabilityKey,omitempty"`
 	// Capability is a short description of the capability at fault.
 	// +optional
 	Capability string `json:"capability,omitempty"`
@@ -182,6 +188,93 @@ type CapabilityGapReportList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []CapabilityGapReport `json:"items"`
+}
+
+// ----------------------------------------------------------------------------
+// CapabilityGap — one distinct gap, with how many conversations hit it.
+// ----------------------------------------------------------------------------
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName=gap
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Service",type=string,JSONPath=`.status.serviceName`
+// +kubebuilder:printcolumn:name="Conversations",type=integer,JSONPath=`.status.conversations`
+// +kubebuilder:printcolumn:name="Occurrences",type=integer,JSONPath=`.status.occurrences`
+// +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.status.kind`
+// +kubebuilder:printcolumn:name="Capability",type=string,JSONPath=`.status.capability`
+// +kubebuilder:printcolumn:name="Last-Seen",type=date,JSONPath=`.status.lastSeen`
+// +genclient
+
+// CapabilityGap is one distinct capability gap for a provider service: every
+// CapabilityGapReport sharing a capability key, collapsed into a single entry
+// with a count of how many conversations hit it. It is the view to prioritise
+// from — the same gap described three different ways by three conversations
+// is one gap here and three reports there.
+//
+// The individual reports stay available as capabilitygapreports and are where
+// the per-occurrence evidence lives; that evidence is what makes a quality
+// defect diagnosable, so the aggregate summarises it rather than replacing it.
+//
+// name == the capability key, or, for a report filed before keys existed, that
+// report's own id — keyless reports are never merged with each other, because
+// their free-prose descriptions are exactly what cannot establish that two of
+// them are the same gap. namespace == the PROVIDER project, same as
+// CapabilityGapReport. Read-only.
+//
+// It carries no consumer identity: how many conversations hit a gap is the
+// prioritisation signal, and which customers they were is a separate question
+// this view deliberately does not answer.
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type CapabilityGap struct {
+	metav1.TypeMeta `json:",inline"`
+	// Name = capability key (or report id), Namespace = provider project,
+	// CreationTimestamp = first seen.
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	// +optional
+	Status CapabilityGapStatus `json:"status,omitempty"`
+}
+
+// CapabilityGapStatus carries one distinct gap and how widely it was hit.
+type CapabilityGapStatus struct {
+	// ServiceName identifies the provider service the gap belongs to. Keys
+	// are per-service vocabulary: the same key on two services is two gaps.
+	// +optional
+	ServiceName string `json:"serviceName,omitempty"`
+	// CapabilityKey is the key every occurrence shares, e.g.
+	// "workload-metrics". Empty for a gap filed before keys existed.
+	// +optional
+	CapabilityKey string `json:"capabilityKey,omitempty"`
+	// Capability is the most recent occurrence's description — the freshest
+	// wording of a gap that has been re-filed several times.
+	// +optional
+	Capability string `json:"capability,omitempty"`
+	// Kind is the most recent occurrence's classification.
+	// +optional
+	Kind CapabilityGapKind `json:"kind,omitempty"`
+	// Conversations is how many distinct conversations hit this gap. It
+	// counts conversations, not reports, so one conversation filing twice
+	// still counts once.
+	// +optional
+	Conversations int32 `json:"conversations,omitempty"`
+	// Occurrences is how many reports were filed. It can exceed
+	// Conversations.
+	// +optional
+	Occurrences int32 `json:"occurrences,omitempty"`
+	// FirstSeen is when this gap was first reported.
+	// +optional
+	FirstSeen metav1.Time `json:"firstSeen,omitempty"`
+	// LastSeen is when it was most recently reported.
+	// +optional
+	LastSeen metav1.Time `json:"lastSeen,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type CapabilityGapList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []CapabilityGap `json:"items"`
 }
 
 // ----------------------------------------------------------------------------

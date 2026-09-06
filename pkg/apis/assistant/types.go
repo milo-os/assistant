@@ -95,6 +95,9 @@ type CapabilityGapReportStatus struct {
 	ConsumerProject string
 	// ContextID is the conversation the gap arose in — provenance only.
 	ContextID string
+	// CapabilityKey groups this occurrence with other reports of the same
+	// gap. Empty on reports filed before keys existed, or without one.
+	CapabilityKey string
 	// Capability is a short description of the capability at fault.
 	Capability string
 	// Summary is what the user was trying to do.
@@ -126,6 +129,46 @@ type CapabilityGapReportList struct {
 	metav1.TypeMeta
 	metav1.ListMeta
 	Items []CapabilityGapReport
+}
+
+// CapabilityGap is the aggregate form of the above: see the v1alpha1 type.
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +genclient
+type CapabilityGap struct {
+	metav1.TypeMeta
+	// Name = capability key (or the report id for a keyless report),
+	// Namespace = provider project, CreationTimestamp = first seen.
+	metav1.ObjectMeta
+
+	Status CapabilityGapStatus
+}
+
+// CapabilityGapStatus carries one distinct gap and how widely it was hit.
+type CapabilityGapStatus struct {
+	// ServiceName identifies the provider service the gap belongs to.
+	ServiceName string
+	// CapabilityKey is the key the occurrences share. Empty for a gap filed
+	// before keys existed, which stands alone.
+	CapabilityKey string
+	// Capability is the most recent occurrence's description.
+	Capability string
+	// Kind is the most recent occurrence's classification.
+	Kind string
+	// Conversations counts the distinct conversations that hit this gap.
+	Conversations int32
+	// Occurrences counts the reports filed; it can exceed Conversations.
+	Occurrences int32
+	// FirstSeen and LastSeen bound the occurrences.
+	FirstSeen metav1.Time
+	LastSeen  metav1.Time
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CapabilityGapList struct {
+	metav1.TypeMeta
+	metav1.ListMeta
+	Items []CapabilityGap
 }
 
 // AssistantEndpoint is the internal form of the endpoint discovery resource.
