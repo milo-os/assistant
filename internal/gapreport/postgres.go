@@ -38,11 +38,10 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS capability_gap_report_provider_project_idx
 		ON capability_gap_report (provider_project, created_at DESC)`,
-	// Kind and evidence were added after the table shipped, so they arrive as
-	// ADD COLUMN IF NOT EXISTS with defaults rather than a new table: this
-	// runs against a shared database on every open, and every row written
-	// before kinds existed must keep reading back as MissingCapability.
-	// NOT NULL DEFAULT is metadata-only on PostgreSQL 11+ — no table rewrite.
+	// Added after the table shipped, so additively: this runs against a shared
+	// database on every open, and every row written before kinds existed must
+	// keep reading back as MissingCapability. NOT NULL DEFAULT is
+	// metadata-only on PostgreSQL 11+ — no table rewrite.
 	`ALTER TABLE capability_gap_report
 		ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'MissingCapability'`,
 	`ALTER TABLE capability_gap_report
@@ -51,10 +50,9 @@ var schema = []string{
 		ADD COLUMN IF NOT EXISTS evidence_observed text NOT NULL DEFAULT ''`,
 	`ALTER TABLE capability_gap_report
 		ADD COLUMN IF NOT EXISTS evidence_contradicted_by text NOT NULL DEFAULT ''`,
-	// The de-duplication key, added the same additive way and for the same
-	// reason: this migrates a shared database that already holds real rows on
-	// every process start. Existing rows take the '' default and keep reading
-	// back exactly as before — they simply do not group (see [Store].Aggregate).
+	// The de-duplication key, added the same additive way. Existing rows take
+	// the '' default and read back exactly as before — they simply do not group
+	// (see [Store].Aggregate).
 	`ALTER TABLE capability_gap_report
 		ADD COLUMN IF NOT EXISTS capability_key text NOT NULL DEFAULT ''`,
 	// Serves both aggregate reads: the provider-wide grouping and the
@@ -212,12 +210,11 @@ func (s *PostgresStore) Insert(ctx context.Context, params InsertParams) (Report
 }
 
 // aggregateQuery groups a provider project's reports into distinct gaps. The
-// grouping key is the capability key, or the report's own id when it has none
-// — a keyless row becomes a group of one rather than merging with every other
+// grouping key is the capability key, or the report's own id when it has none,
+// so a keyless row is a group of one rather than merging with every other
 // keyless row (see [Store].Aggregate). Capability and kind come from the most
-// recent occurrence via array_agg ... ORDER BY, and Postgres computes
-// count(DISTINCT context_id) directly, so "how many conversations" never has
-// to be assembled client-side.
+// recent occurrence; count(DISTINCT context_id) is computed in Postgres rather
+// than assembled client-side.
 const aggregateQuery = `
 	SELECT grp,
 	       max(capability_key)                             AS capability_key,

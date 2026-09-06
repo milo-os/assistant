@@ -25,10 +25,9 @@ const (
 	ToolNamespaceSeparator = "__"
 	// defaultMCPClientName is announced to MCP servers during initialization.
 	defaultMCPClientName = "datum-assistant-service"
-	// gapKeyLookupTimeout bounds the per-service capability-key read that
-	// Compose does on every turn. The key list only improves de-duplication
-	// in a provider's report feed; a slow store must never be able to hold up
-	// the user's answer, so this is far tighter than the store's own bound.
+	// gapKeyLookupTimeout bounds the per-service capability-key read Compose
+	// does on every turn. The key list only improves de-duplication in a
+	// provider's feed, so a slow store must never hold up the user's answer.
 	gapKeyLookupTimeout = 2 * time.Second
 )
 
@@ -151,16 +150,13 @@ type ComposeOptions struct {
 
 // knownCapabilityKeys reads the capability keys already filed against one
 // service, for injection into that service's gap-report tool schema. It
-// DEGRADES to nil on any failure — an error, a timeout, or a document that
-// names no service — matching how the rest of composition treats a store
-// read: the memory index does the same, and a conversation must not fail
-// because a bookkeeping lookup did.
+// DEGRADES to nil on any failure, like every other store read in composition: a
+// conversation must not fail because a bookkeeping lookup did.
 //
-// Only bare keys cross this boundary. The result lands in a prompt running
-// in one consumer's conversation, and the keys were coined in others' — a
-// key is a bounded slug naming the PROVIDER's own capability, whereas the
-// report prose beside it is model-written text about someone else's session
-// and has no business travelling.
+// Only bare keys cross this boundary. The result lands in one consumer's
+// conversation and the keys were coined in others' — a key is a bounded slug
+// naming the PROVIDER's own capability, whereas the report prose beside it is
+// text about someone else's session and has no business travelling.
 func knownCapabilityKeys(ctx context.Context, store gapreport.Store, doc CapabilityDocument, logger *slog.Logger) []string {
 	if doc.Spec.ReportingProject == "" || doc.Spec.ServiceName == "" {
 		return nil

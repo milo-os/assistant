@@ -31,9 +31,8 @@ var ErrCapabilityTooLong = errors.New("gapreport: capability exceeds MaxCapabili
 var ErrCapabilityKeyTooLong = errors.New("gapreport: capability key exceeds MaxCapabilityKeyLen")
 
 // ErrInvalidCapabilityKey is returned by Insert for a key outside the
-// [CapabilityKey] grammar. Junk is rejected rather than stored: the key's
-// only job is to be recognized and reused by the next conversation, and a
-// key nobody will type the same way twice is worse than none at all.
+// [CapabilityKey] grammar. A key nobody types the same way twice cannot be
+// recognized and reused, so junk is rejected rather than stored.
 var ErrInvalidCapabilityKey = errors.New("gapreport: capability key must be lowercase alphanumeric words joined by single dashes")
 
 // ErrSummaryTooLong is returned by Insert when summary exceeds
@@ -45,9 +44,8 @@ var ErrSummaryTooLong = errors.New("gapreport: summary exceeds MaxSummaryLen")
 var ErrEvidenceTooLong = errors.New("gapreport: evidence field exceeds its maximum length")
 
 // ErrUnknownKind is returned by Insert (via [ParseKind]) for a kind outside
-// [Kinds]. Unlike a missing kind, which has an obvious default, an
-// unrecognized one carries no salvageable meaning — storing it would put a
-// value in the provider's feed that no reader can interpret.
+// [Kinds]. A missing kind has an obvious default; an unrecognized one would
+// put a value in the provider's feed that no reader can interpret.
 var ErrUnknownKind = errors.New("gapreport: unknown kind")
 
 // ErrProjectFull is returned by Insert when a provider project already
@@ -72,19 +70,17 @@ const MaxSummaryLen = 1000
 const MaxEvidenceToolLen = 200
 
 // MaxEvidenceTextLen caps Evidence.Observed and Evidence.ContradictedBy in
-// bytes. Evidence is meant to be a quoted fragment of tool output, not the
-// whole response; a bound this size keeps a provider's feed readable and
-// limits how much can be dumped across the project boundary at once.
+// bytes. Evidence is a quoted fragment of tool output, not the whole response,
+// and the bound limits how much can cross the project boundary at once.
 const MaxEvidenceTextLen = 500
 
 // MaxReportsPerProject caps how many reports a single provider project
 // accumulates.
 const MaxReportsPerProject = 500
 
-// Kind classifies what kind of shortfall a report describes. A gap is not
-// only an absent tool: a tool that answers with too little, answers
-// misleadingly, or tells the user to do something impossible is a defect the
-// provider's team can act on, and one they cannot see from their side.
+// Kind classifies what kind of shortfall a report describes. A gap is not only
+// an absent tool: a tool that answers with too little, misleadingly, or
+// unactionably is a defect the provider's team cannot see from their side.
 type Kind string
 
 const (
@@ -107,9 +103,8 @@ const (
 var Kinds = []Kind{KindMissingCapability, KindInsufficientDetail, KindMisleadingOutput, KindUnactionableGuidance}
 
 // ParseKind maps tool input to a [Kind]. The empty string is
-// KindMissingCapability: kinds were added after the fact, so every provider
-// that never sets one and every row stored before they existed keeps meaning
-// exactly what it already meant.
+// KindMissingCapability, so a provider that sets no kind and every row stored
+// before kinds existed keep meaning exactly what they already meant.
 func ParseKind(s string) (Kind, error) {
 	if s == "" {
 		return KindMissingCapability, nil
@@ -122,17 +117,16 @@ func ParseKind(s string) (Kind, error) {
 	return "", fmt.Errorf("%w: %q", ErrUnknownKind, s)
 }
 
-// NeedsEvidence reports whether a kind is one whose report is only
-// actionable with evidence attached. A MissingCapability report has no tool
-// output to quote; every other kind is an accusation about output that
-// exists, and without the quote the receiving team has nothing to check.
-// Evidence is still not *enforced* — see [Store].Insert.
+// NeedsEvidence reports whether a kind's report is only actionable with
+// evidence. MissingCapability has no tool output to quote; every other kind is
+// an accusation about output that exists, and without the quote the receiving
+// team has nothing to check. Evidence is still not *enforced* — see
+// [Store].Insert.
 func NeedsEvidence(k Kind) bool { return k != "" && k != KindMissingCapability }
 
 // capabilityKeyPattern is the whole grammar: lowercase alphanumeric words
-// joined by single dashes. Deliberately the DNS-label shape — a key names a
-// CapabilityGap object in the API, and it is also the vocabulary the model is
-// shown and asked to reuse, so it has to be a form the model reproduces
+// joined by single dashes. The DNS-label shape is deliberate — a key names a
+// CapabilityGap object in the API, and the model has to reproduce it
 // character-for-character rather than approximately.
 var capabilityKeyPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
@@ -152,10 +146,9 @@ func ValidateCapabilityKey(key string) error {
 	return nil
 }
 
-// Evidence quotes the tool output a non-MissingCapability report is about.
-// Its fields hold TOOL OUTPUT and OBJECT STATE only — never text from the
-// user's message; see the report_capability_gap tool description for why
-// that line matters and where it is drawn.
+// Evidence quotes the tool output a non-MissingCapability report is about. Its
+// fields hold TOOL OUTPUT and OBJECT STATE only — never text from the user's
+// message; the report_capability_gap tool description draws that line.
 type Evidence struct {
 	// Tool is the tool whose output is at fault, e.g. "workloads_list".
 	Tool string
@@ -185,18 +178,13 @@ type Report struct {
 	// ContextID is the conversation the gap arose in — provenance only.
 	ContextID string
 	// CapabilityKey names the gap in a form two conversations can agree on,
-	// e.g. "workload-metrics". Capability is prose the model writes fresh
-	// each time and no two writings of the same gap match; the key is what
-	// makes occurrences of one gap group. Empty on rows written before keys
-	// existed, and on any report filed without one.
+	// e.g. "workload-metrics". Capability is prose no two writings of the same
+	// gap match; the key is what makes occurrences group. Empty on rows written
+	// before keys existed, and on any report filed without one.
 	//
-	// The model will eventually coin a synonym for a key it already has, so
-	// merging has to stay possible. It is: because the key lives per
-	// occurrence and grouping happens at read time, merging two keys is one
-	// UPDATE ... SET capability_key over the losing key, and the next
-	// Aggregate re-derives every count from the rows. Nothing has to be
-	// reconciled, because nothing is precomputed — which is the second reason
-	// this is not an upsert onto a counter.
+	// It lives per occurrence and grouping happens at read time, so merging two
+	// synonym keys stays one UPDATE and the next Aggregate re-derives every
+	// count — the reason this is not an upsert onto a counter.
 	CapabilityKey string
 	// Capability is a short description of the capability at fault, e.g.
 	// "list pipelines for StreamCo".
@@ -212,24 +200,19 @@ type Report struct {
 	CreatedAt time.Time
 }
 
-// Aggregate is one distinct capability gap: every report filed against the
-// same [Report].CapabilityKey for one service, collapsed into a single entry
-// with a count of how many conversations hit it. It is the view a provider's
-// team prioritises from; the occurrence rows behind it stay available through
-// [Store].List and carry the per-occurrence evidence, which is the material
-// that makes a quality defect diagnosable.
+// Aggregate is one distinct capability gap: every report sharing a
+// [Report].CapabilityKey for one service, collapsed into one entry with a count
+// of how many conversations hit it. The occurrence rows behind it stay listable
+// through [Store].List, carrying the per-occurrence evidence.
 //
 // It deliberately carries NO consumer identity — not ConsumerProject, not
 // ContextID, not a per-customer breakdown. "How many conversations" is the
-// prioritisation signal; "which of your customers" is a distinct, more
-// legible cross-tenant profile that prioritisation does not need. The
-// occurrence rows already show a provider the consumer project per report;
-// this view simply declines to hand them the same thing pre-tabulated.
+// prioritisation signal; "which of your customers" is a cross-tenant profile
+// prioritisation does not need.
 type Aggregate struct {
-	// Key is the group's identity, and the name of the CapabilityGap object
-	// the API projects from it. It is CapabilityKey when there is one, and
-	// otherwise the single report's own ID — see [Store].Aggregate for why
-	// keyless occurrences are never merged with each other.
+	// Key is the group's identity, and the name of the CapabilityGap object the
+	// API projects from it: CapabilityKey when there is one, otherwise the
+	// single report's own ID — see [Store].Aggregate.
 	Key string
 	// CapabilityKey is the model-coined key, empty for a group of one
 	// keyless (pre-key, or filed-without-one) report.
@@ -250,11 +233,10 @@ type Aggregate struct {
 	LastSeen    time.Time
 }
 
-// InsertParams is the input to [Store].Insert. It is a struct rather than a
-// positional argument list because every field is a string: providerProject,
-// consumerProject, and contextID are mutually swappable at a call site with
-// no compiler complaint, and a swap silently files a report into the wrong
-// team's project.
+// InsertParams is the input to [Store].Insert. A struct rather than positional
+// arguments because providerProject, consumerProject, and contextID are all
+// strings: a swap compiles fine and silently files into the wrong team's
+// project.
 type InsertParams struct {
 	ProviderProject string
 	ServiceName     string
@@ -284,11 +266,10 @@ type Store interface {
 	// descending, then LastSeen descending, then Key ascending so the result
 	// is deterministic. An unknown project yields nil, nil.
 	//
-	// Reports with no capability key are NOT merged with each other: each
-	// becomes its own single-occurrence entry keyed by its report ID. Free
-	// prose is exactly what cannot tell us whether two of them are the same
-	// gap — that is the problem keys exist to solve — so merging them would
-	// be a guess presented as a count. They still appear, unmerged, so
+	// Reports with no capability key are NOT merged with each other: each is
+	// its own single-occurrence entry keyed by its report ID. Free prose is
+	// exactly what cannot establish that two are the same gap, so merging them
+	// would be a guess presented as a count. They still appear, unmerged, so
 	// nothing already filed drops out of the provider's view.
 	Aggregate(ctx context.Context, providerProject string) ([]Aggregate, error)
 	// CapabilityKeys returns the keys already filed against one service in
@@ -296,32 +277,25 @@ type Store interface {
 	// capped at limit (<= 0 means no cap). Reports with no key contribute
 	// nothing.
 	//
-	// It returns bare keys and nothing else, on purpose: its caller is
-	// [github.com/milo-os/assistant/internal/capability.Compose], which
-	// injects the result into a prompt running in SOME OTHER consumer's
-	// conversation. A key is a bounded, charset-constrained slug naming the
-	// provider's own capability; the report prose around it is not, and has
-	// no business crossing into a different tenant's turn. The signature is
-	// where that boundary is enforced.
+	// It returns bare keys and nothing else, on purpose: the result is injected
+	// into a prompt running in SOME OTHER consumer's conversation. A key is a
+	// bounded slug naming the provider's own capability; the report prose
+	// around it is not, and has no business crossing into another tenant's
+	// turn. This signature is where that boundary is enforced.
 	CapabilityKeys(ctx context.Context, providerProject, serviceName string, limit int) ([]string, error)
-	// Insert records a new report, assigning ID and CreatedAt, and
-	// defaulting an empty Kind to KindMissingCapability. It returns
-	// ErrCapabilityTooLong, ErrSummaryTooLong, ErrCapabilityKeyTooLong,
-	// ErrInvalidCapabilityKey, ErrEvidenceTooLong, ErrUnknownKind, or
-	// ErrProjectFull if the input is invalid or a bound is violated; the
-	// store is left unchanged.
+	// Insert records a new report, assigning ID and CreatedAt, and defaulting
+	// an empty Kind to KindMissingCapability. It returns ErrCapabilityTooLong,
+	// ErrSummaryTooLong, ErrCapabilityKeyTooLong, ErrInvalidCapabilityKey,
+	// ErrEvidenceTooLong, ErrUnknownKind, or ErrProjectFull; the store is left
+	// unchanged.
 	//
-	// A malformed capability key is REJECTED, unlike missing evidence, which
-	// is accepted: a key is mechanically fixable by the caller on the spot,
-	// so the error round-trips into a corrected retry rather than losing the
-	// report. An omitted key is fine — it just does not group.
+	// A malformed capability key is REJECTED because the caller can fix it on
+	// the spot and retry. An omitted key is fine — it just does not group.
 	//
-	// A kind that [NeedsEvidence] with no evidence is ACCEPTED, not
-	// rejected: an under-evidenced report still tells the provider's team
-	// which tool to look at, whereas rejecting it drops the signal entirely
-	// and pushes the caller toward relabelling it MissingCapability — a
-	// wrong classification is worse for the reader than a thin one. The
-	// nudge belongs in the tool result, where the model can act on it.
+	// A kind that [NeedsEvidence] with no evidence is ACCEPTED, not rejected:
+	// rejecting drops the signal entirely and pushes the caller toward
+	// relabelling it MissingCapability, and a wrong classification is worse for
+	// the reader than a thin one. The nudge belongs in the tool result.
 	Insert(ctx context.Context, params InsertParams) (Report, error)
 }
 
@@ -430,9 +404,8 @@ func (s *MemoryStore) CapabilityKeys(ctx context.Context, providerProject, servi
 }
 
 // aggregateReports is the in-memory form of the grouping [Store].Aggregate
-// specifies; PostgresStore does the same thing in SQL. Keeping it here rather
-// than in the test file means the two implementations are held to one written
-// definition of the grouping, not two readings of a doc comment.
+// specifies; PostgresStore does the same in SQL. It lives here, not in a test,
+// so both implementations answer to one definition of the grouping.
 func aggregateReports(reports []Report) []Aggregate {
 	type group struct {
 		agg      Aggregate

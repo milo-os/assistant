@@ -16,16 +16,12 @@ import (
 
 var gapsResource = assistant.Resource("capabilitygaps")
 
-// CapabilityGapREST serves the aggregate view over the same store and the
-// same namespace rule as [CapabilityGapReportREST]: one item per distinct
-// gap, so a provider's team reads "one gap, seven conversations" instead of
-// counting seven rows that describe it seven different ways.
+// CapabilityGapREST serves the aggregate view over the same store and the same
+// namespace rule as [CapabilityGapReportREST]: one item per distinct gap.
 //
-// It is a second view, not a replacement. The occurrence rows stay listable
-// as capabilitygapreports and are where the per-occurrence evidence lives —
-// three MisleadingOutput reports with three different contradictedBy values
-// tell a team far more than a counter does, so the aggregate summarises them
-// rather than standing in for them.
+// A second view, not a replacement — the occurrence rows stay listable as
+// capabilitygapreports and are where the per-occurrence evidence a team needs
+// to diagnose a defect lives.
 type CapabilityGapREST struct {
 	store gapreport.Store
 	rest.TableConvertor
@@ -71,9 +67,9 @@ func (r *CapabilityGapREST) List(ctx context.Context, _ *metainternalversion.Lis
 }
 
 // newCapabilityGap maps one aggregated gap to the internal API object.
-// Deliberately carries no consumer project and no context id: the count of
-// conversations is the prioritisation signal, and which customers they were
-// is a question this view does not answer — see [gapreport.Aggregate].
+// Deliberately carries no consumer project and no context id: the conversation
+// count is the prioritisation signal, and which customers they were is a
+// question this view does not answer — see [gapreport.Aggregate].
 func newCapabilityGap(providerProject string, g gapreport.Aggregate) *assistant.CapabilityGap {
 	kind := g.Kind
 	if kind == "" {
@@ -83,7 +79,7 @@ func newCapabilityGap(providerProject string, g gapreport.Aggregate) *assistant.
 		ObjectMeta: metav1.ObjectMeta{
 			// Named by the key, so the object identity is the gap itself and
 			// stays stable as occurrences accumulate. A keyless report falls
-			// back to its own id — it is a group of one.
+			// back to its own id: it is a group of one.
 			Name:              g.Key,
 			Namespace:         providerProject,
 			CreationTimestamp: metav1.NewTime(g.FirstSeen),

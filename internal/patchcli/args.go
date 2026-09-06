@@ -199,9 +199,8 @@ func parseArgs(argv []string) command {
 		if len(rest) > 0 {
 			sub = rest[0]
 		}
-		// "list" is the aggregate — one row per distinct gap, which is what a
-		// provider prioritises from. "reports" is the occurrence log behind
-		// it, where the per-report evidence lives.
+		// "list" is the aggregate, one row per distinct gap; "reports" is the
+		// occurrence log behind it, where the per-report evidence lives.
 		switch sub {
 		case "list":
 			common.kind = KindGapList

@@ -22,13 +22,10 @@ import (
 const GapReportToolBaseName = "report_capability_gap"
 
 // MaxInjectedCapabilityKeys caps how many of a service's existing capability
-// keys are shown to the model in the gap-report tool schema. This text sits
-// in EVERY turn's prompt for an entitled service, so it has to stay small: 40
-// slugs is well under a kilobyte against a description already several times
-// that. Truncation is safe because the list is ordered most-hit first — see
-// [gapreport.Store].CapabilityKeys — so what a cap drops is by construction
-// the keys least likely to be filed again, while the ones a second
-// conversation is actually about to duplicate can never be cut.
+// keys are shown to the model in the gap-report tool schema, which sits in
+// EVERY turn's prompt for an entitled service. Truncating is safe because the
+// list is most-hit first — a cap can only drop the keys least likely to be
+// filed again.
 const MaxInjectedCapabilityKeys = 40
 
 // GapReportToolName renders the model-facing name for one provider's gap-
@@ -59,9 +56,8 @@ type reportCapabilityGapTool struct {
 	contextID       string
 	// knownKeys are the capability keys already filed against this service,
 	// most-hit first, injected into the schema so the model RECOGNIZES an
-	// existing gap instead of naming one. Nil is the correct degraded state
-	// (a fresh service, or a store read that failed) — the model coins a key
-	// as it would have anyway.
+	// existing gap instead of naming one. Nil is the correct degraded state —
+	// the model coins a key as it would have anyway.
 	knownKeys []string
 	// metrics records assistant_gap_report_total. Nil (e.g. in tests that
 	// don't set ComposeOptions.Metrics) is a safe no-op — see
@@ -117,15 +113,13 @@ func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
 				},
 			},
 		},
-		// capabilityKey is required, unlike kind and evidence. An omitted
-		// evidence block yields a thinner report; an omitted key yields one
-		// that cannot do the single job the field exists for, and — worse —
-		// a service whose first report is keyless shows the next
-		// conversation an empty list, so de-duplication never starts. Only
-		// PRESENCE and SHAPE are required, never membership in the injected
-		// list: forcing a genuinely new gap into an existing bucket would be
-		// the real compliance theatre. The worst case here is a fresh
-		// synonym, which the injected list corrects from occurrence two on.
+		// capabilityKey is required, unlike kind and evidence: an omitted
+		// evidence block yields a thinner report, but a service whose first
+		// report is keyless shows the next conversation an empty list, so
+		// de-duplication never starts. Only PRESENCE and SHAPE are required,
+		// never membership in the injected list — forcing a genuinely new gap
+		// into an existing bucket would be worse than a fresh synonym, which
+		// the injected list corrects from occurrence two on.
 		"required": []string{"capabilityKey", "capability", "summary"},
 	})
 	return agentcore.ToolDefinition{
@@ -136,14 +130,10 @@ func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
 }
 
 // capabilityKeyDescription renders the capabilityKey field's description,
-// including the keys this service already has. Naming a gap freshly each time
-// produces a synonym every time; being shown the existing keys turns naming
-// into recognition, which is the only thing that reliably de-duplicates prose
-// nobody writes the same way twice.
-//
-// With no keys yet the field is still offered — a service's first gap has to
-// be able to coin one — but the sentence asking for reuse is dropped rather
-// than left dangling with an empty list.
+// including the keys this service already has: showing them turns naming into
+// recognition, which is the only thing that reliably de-duplicates prose nobody
+// writes the same way twice. With no keys yet the field is still offered — a
+// service's first gap has to be able to coin one.
 func (t *reportCapabilityGapTool) capabilityKeyDescription() string {
 	return "REQUIRED. A short, stable key naming the capability at fault: lowercase words joined by single " +
 		"dashes, at most " + strconv.Itoa(gapreport.MaxCapabilityKeyLen) + " characters, e.g. " +
@@ -152,10 +142,9 @@ func (t *reportCapabilityGapTool) capabilityKeyDescription() string {
 		t.capabilityKeyHint()
 }
 
-// capabilityKeyHint is the half of the guidance that depends on what has
-// already been filed. It is shared by the field description and by the
-// rejection the model gets when it omits the key, so the correction it is
-// handed carries the same list the schema offered.
+// capabilityKeyHint is the half of the guidance that depends on what has already
+// been filed. Shared by the field description and by the rejection for an
+// omitted key, so the correction carries the same list the schema offered.
 func (t *reportCapabilityGapTool) capabilityKeyHint() string {
 	if len(t.knownKeys) == 0 {
 		return "No keys have been filed against " + t.serviceName + " yet, so coin one."
@@ -165,10 +154,9 @@ func (t *reportCapabilityGapTool) capabilityKeyHint() string {
 		strings.Join(t.knownKeys, ", ") + ". Coin a new key only when none of those names this gap."
 }
 
-// gapReportToolDescription is the only thing steering the model's choice of
-// kind and its handling of evidence, and it sits in every turn's prompt for
-// an entitled service — so it is written once, here, rather than assembled
-// inline.
+// gapReportToolDescription is the only thing steering the model's choice of kind
+// and its handling of evidence, and it sits in every turn's prompt for an
+// entitled service.
 func gapReportToolDescription(service string) string {
 	return fmt.Sprintf(
 		"Report to %[1]s's own team that this service fell short for a user: either no tool covered what they "+
@@ -248,8 +236,8 @@ func (t *reportCapabilityGapTool) Execute(ctx context.Context, input json.RawMes
 
 	if args.CapabilityKey == "" {
 		// Rejected rather than filed-and-nudged: the model can add a key and
-		// call again in the same turn, and a keyless row is unusable for
-		// grouping AND poisons the next conversation's key list.
+		// retry in the same turn, and a keyless row is unusable for grouping
+		// AND poisons the next conversation's key list.
 		return "", fmt.Errorf("%s: capabilityKey is required — %s", t.name, t.capabilityKeyHint())
 	}
 
@@ -277,8 +265,8 @@ func (t *reportCapabilityGapTool) Execute(ctx context.Context, input json.RawMes
 		if errors.Is(err, gapreport.ErrCapabilityTooLong) {
 			return "", fmt.Errorf("%s: that capability description is too long — try a shorter one", t.name)
 		}
-		// Both key errors are recoverable in place: the model can reshape the
-		// key and call again in the same turn, so the message says the rule.
+		// Both key errors are recoverable in place, so the message states the
+		// rule the model has to satisfy on the retry.
 		if errors.Is(err, gapreport.ErrInvalidCapabilityKey) {
 			return "", fmt.Errorf("%s: capabilityKey %q is not a valid key — use lowercase words joined by single dashes, e.g. \"workload-metrics\"", t.name, args.CapabilityKey)
 		}
@@ -298,8 +286,8 @@ func (t *reportCapabilityGapTool) Execute(ctx context.Context, input json.RawMes
 	}
 
 	// A kind that wants evidence but arrived without it is still stored —
-	// dropping the report would lose the signal entirely — so the nudge goes
-	// back to the model, which is the only party that can still fix it.
+	// dropping it would lose the signal — so the nudge goes back to the model,
+	// the only party that can still fix it.
 	msg := fmt.Sprintf("Reported to %s (%s/%s): %s", t.serviceName, args.CapabilityKey, kind, args.Capability)
 	if gapreport.NeedsEvidence(kind) && evidence.IsZero() {
 		msg += fmt.Sprintf(" — filed without evidence; a %s report is hard for %s's team to act on without "+

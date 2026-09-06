@@ -103,8 +103,7 @@ func newCapabilityGapReport(rep gapreport.Report) *assistant.CapabilityGapReport
 		},
 	}
 	// Projected only when something was actually quoted, so a plain
-	// MissingCapability report does not read back with an empty evidence
-	// block in `datumctl get capabilitygapreports -o yaml`.
+	// MissingCapability report does not read back with an empty evidence block.
 	if !rep.Evidence.IsZero() {
 		out.Status.Evidence = &assistant.CapabilityGapReportEvidence{
 			Tool:           rep.Evidence.Tool,

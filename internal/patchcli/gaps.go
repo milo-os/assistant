@@ -34,8 +34,7 @@ func gapsPath(project string) string {
 }
 
 // runGapsList prints one row per DISTINCT gap, most-hit first, with how many
-// conversations hit it — the number that decides what a provider's team works
-// on. `patch gaps reports` prints the individual reports behind these rows.
+// conversations hit it. `patch gaps reports` prints the reports behind them.
 func runGapsList(ctx context.Context, inv Invocation, io Io) int {
 	view := ReadViewFor(inv)
 	out, err := view.get(ctx, inv.Project, gapsPath(inv.Project))
@@ -78,9 +77,8 @@ func runGapsList(ctx context.Context, inv Invocation, io Io) int {
 	return 0
 }
 
-// gapKeyText renders a gap's key. A gap filed before keys existed has none
-// and stands alone, so say that rather than leaving the column blank and
-// letting it read as a rendering bug.
+// gapKeyText renders a gap's key. A gap filed before keys existed has none, so
+// say that rather than leaving a blank that reads as a rendering bug.
 func gapKeyText(key string) string {
 	if key == "" {
 		return "(unkeyed)"
@@ -97,9 +95,8 @@ func emitRaw(out []byte, io Io) int {
 	return 0
 }
 
-// runGapReportsList prints the occurrence log: one row per report filed
-// (service, capability, summary, consumer project, age), newest first. This
-// is the drill-down behind `patch gaps list`, and the only view that shows
+// runGapReportsList prints the occurrence log: one row per report filed, newest
+// first. The drill-down behind `patch gaps list`, and the only view that shows
 // which consumer project each report came from.
 func runGapReportsList(ctx context.Context, inv Invocation, io Io) int {
 	view := ReadViewFor(inv)
@@ -147,9 +144,8 @@ func runGapReportsList(ctx context.Context, inv Invocation, io Io) int {
 	return 0
 }
 
-// gapKindText renders a report's kind for the table. Reports stored before
-// kinds existed carry none; they meant "no tool for this", so say so rather
-// than leaving the column blank.
+// gapKindText renders a report's kind. Reports stored before kinds existed
+// carry none and meant "no tool for this", so say so rather than blank.
 func gapKindText(kind assistantv1alpha1.CapabilityGapKind) string {
 	if kind == "" {
 		return string(assistantv1alpha1.CapabilityGapKindMissingCapability)
