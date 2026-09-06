@@ -20,10 +20,13 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		v1alpha1.AssistantEndpoint{}.OpenAPIModelName():           schema_pkg_apis_assistant_v1alpha1_AssistantEndpoint(ref),
 		v1alpha1.AssistantEndpointList{}.OpenAPIModelName():       schema_pkg_apis_assistant_v1alpha1_AssistantEndpointList(ref),
 		v1alpha1.AssistantEndpointSpec{}.OpenAPIModelName():       schema_pkg_apis_assistant_v1alpha1_AssistantEndpointSpec(ref),
+		v1alpha1.CapabilityGap{}.OpenAPIModelName():               schema_pkg_apis_assistant_v1alpha1_CapabilityGap(ref),
+		v1alpha1.CapabilityGapList{}.OpenAPIModelName():           schema_pkg_apis_assistant_v1alpha1_CapabilityGapList(ref),
 		v1alpha1.CapabilityGapReport{}.OpenAPIModelName():         schema_pkg_apis_assistant_v1alpha1_CapabilityGapReport(ref),
 		v1alpha1.CapabilityGapReportEvidence{}.OpenAPIModelName(): schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportEvidence(ref),
 		v1alpha1.CapabilityGapReportList{}.OpenAPIModelName():     schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportList(ref),
 		v1alpha1.CapabilityGapReportStatus{}.OpenAPIModelName():   schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref),
+		v1alpha1.CapabilityGapStatus{}.OpenAPIModelName():         schema_pkg_apis_assistant_v1alpha1_CapabilityGapStatus(ref),
 		v1alpha1.Conversation{}.OpenAPIModelName():                schema_pkg_apis_assistant_v1alpha1_Conversation(ref),
 		v1alpha1.ConversationList{}.OpenAPIModelName():            schema_pkg_apis_assistant_v1alpha1_ConversationList(ref),
 		v1alpha1.ConversationMessage{}.OpenAPIModelName():         schema_pkg_apis_assistant_v1alpha1_ConversationMessage(ref),
@@ -203,6 +206,96 @@ func schema_pkg_apis_assistant_v1alpha1_AssistantEndpointSpec(ref common.Referen
 	}
 }
 
+func schema_pkg_apis_assistant_v1alpha1_CapabilityGap(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CapabilityGap is one distinct capability gap for a provider service: every CapabilityGapReport sharing a capability key, collapsed into a single entry with a count of how many conversations hit it. It is the view to prioritise from — the same gap described three different ways by three conversations is one gap here and three reports there.\n\nThe individual reports stay available as capabilitygapreports and are where the per-occurrence evidence lives; that evidence is what makes a quality defect diagnosable, so the aggregate summarises it rather than replacing it.\n\nname == the capability key, or, for a report filed before keys existed, that report's own id — keyless reports are never merged with each other, because their free-prose descriptions are exactly what cannot establish that two of them are the same gap. namespace == the PROVIDER project, same as CapabilityGapReport. Read-only.\n\nIt carries no consumer identity: how many conversations hit a gap is the prioritisation signal, and which customers they were is a separate question this view deliberately does not answer.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name = capability key (or report id), Namespace = provider project, CreationTimestamp = first seen.",
+							Default:     map[string]interface{}{},
+							Ref:         ref(v1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1alpha1.CapabilityGapStatus{}.OpenAPIModelName()),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			v1alpha1.CapabilityGapStatus{}.OpenAPIModelName(), v1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_pkg_apis_assistant_v1alpha1_CapabilityGapList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref(v1alpha1.CapabilityGap{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			v1alpha1.CapabilityGap{}.OpenAPIModelName(), v1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
 func schema_pkg_apis_assistant_v1alpha1_CapabilityGapReport(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -355,6 +448,13 @@ func schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref common.Ref
 							Format:      "",
 						},
 					},
+					"capabilityKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CapabilityKey groups this occurrence with every other report of the same gap; it is the name of the CapabilityGap it rolls up into. Empty on reports filed before keys existed, or filed without one — those stand alone in the aggregate rather than being merged on a guess.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"capability": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Capability is a short description of the capability at fault.",
@@ -387,6 +487,75 @@ func schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref common.Ref
 		},
 		Dependencies: []string{
 			v1alpha1.CapabilityGapReportEvidence{}.OpenAPIModelName()},
+	}
+}
+
+func schema_pkg_apis_assistant_v1alpha1_CapabilityGapStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CapabilityGapStatus carries one distinct gap and how widely it was hit.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"serviceName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServiceName identifies the provider service the gap belongs to. Keys are per-service vocabulary: the same key on two services is two gaps.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"capabilityKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CapabilityKey is the key every occurrence shares, e.g. \"workload-metrics\". Empty for a gap filed before keys existed.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"capability": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Capability is the most recent occurrence's description — the freshest wording of a gap that has been re-filed several times.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is the most recent occurrence's classification.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"conversations": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Conversations is how many distinct conversations hit this gap. It counts conversations, not reports, so one conversation filing twice still counts once.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"occurrences": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Occurrences is how many reports were filed. It can exceed Conversations.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"firstSeen": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FirstSeen is when this gap was first reported.",
+							Ref:         ref(v1.Time{}.OpenAPIModelName()),
+						},
+					},
+					"lastSeen": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastSeen is when it was most recently reported.",
+							Ref:         ref(v1.Time{}.OpenAPIModelName()),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			v1.Time{}.OpenAPIModelName()},
 	}
 }
 
