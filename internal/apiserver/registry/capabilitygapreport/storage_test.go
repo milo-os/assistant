@@ -24,8 +24,11 @@ func nsCtx(ns string) context.Context {
 // consumer's.
 func TestListScopedToProviderProjectNotConsumerProject(t *testing.T) {
 	store := gapreport.NewMemoryStore()
-	if _, err := store.Insert(context.Background(), "streamco-platform", "streaming.streamco.example",
-		"demo-project", "ctx-1", "list pipelines", "user needed a pipeline id"); err != nil {
+	if _, err := store.Insert(context.Background(), gapreport.InsertParams{
+		ProviderProject: "streamco-platform", ServiceName: "streaming.streamco.example",
+		ConsumerProject: "demo-project", ContextID: "ctx-1",
+		Capability: "list pipelines", Summary: "user needed a pipeline id",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	rest := NewCapabilityGapReportREST(store)
@@ -47,6 +50,14 @@ func TestListScopedToProviderProjectNotConsumerProject(t *testing.T) {
 	}
 	if item.Status.Capability != "list pipelines" || item.Status.Summary != "user needed a pipeline id" {
 		t.Errorf("Status = %+v", item.Status)
+	}
+	// A report filed without a kind projects as MissingCapability, and
+	// projects no evidence block at all rather than an empty one.
+	if item.Status.Kind != string(gapreport.KindMissingCapability) {
+		t.Errorf("Status.Kind = %q, want %q", item.Status.Kind, gapreport.KindMissingCapability)
+	}
+	if item.Status.Evidence != nil {
+		t.Errorf("Status.Evidence = %+v, want nil for a report with nothing to quote", item.Status.Evidence)
 	}
 
 	obj, err = rest.List(nsCtx("demo-project"), &metainternalversion.ListOptions{})
@@ -79,5 +90,46 @@ func TestProjectIdentityMismatchIsForbidden(t *testing.T) {
 	_, err := rest.List(ctx, &metainternalversion.ListOptions{})
 	if !apierrors.IsForbidden(err) {
 		t.Fatalf("err = %v, want Forbidden", err)
+	}
+}
+
+// TestListProjectsKindAndEvidence pins that a quality defect survives the
+// projection intact — this is what `datumctl get capabilitygapreports -o yaml`
+// shows the provider's team.
+func TestListProjectsKindAndEvidence(t *testing.T) {
+	store := gapreport.NewMemoryStore()
+	evidence := gapreport.Evidence{
+		Tool:           "workloads_list",
+		Observed:       "actionability: transient",
+		ContradictedBy: "instance unchanged for 9d",
+	}
+	if _, err := store.Insert(context.Background(), gapreport.InsertParams{
+		ProviderProject: "streamco-platform", ServiceName: "streaming.streamco.example",
+		ConsumerProject: "demo-project", ContextID: "ctx-1",
+		Capability: "workload stall duration", Summary: "user was diagnosing a stalled workload",
+		Kind: gapreport.KindMisleadingOutput, Evidence: evidence,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	obj, err := NewCapabilityGapReportREST(store).List(nsCtx("streamco-platform"), &metainternalversion.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	items := obj.(*assistant.CapabilityGapReportList).Items
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	status := items[0].Status
+	if status.Kind != string(gapreport.KindMisleadingOutput) {
+		t.Errorf("Kind = %q, want %q", status.Kind, gapreport.KindMisleadingOutput)
+	}
+	if status.Evidence == nil {
+		t.Fatal("Evidence not projected")
+	}
+	if status.Evidence.Tool != evidence.Tool ||
+		status.Evidence.Observed != evidence.Observed ||
+		status.Evidence.ContradictedBy != evidence.ContradictedBy {
+		t.Errorf("Evidence = %+v, want %+v", status.Evidence, evidence)
 	}
 }

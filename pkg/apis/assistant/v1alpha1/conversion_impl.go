@@ -127,6 +127,12 @@ func convert_v1alpha1_CapabilityGapReport_To_assistant(in *CapabilityGapReport, 
 		ContextID:       in.Status.ContextID,
 		Capability:      in.Status.Capability,
 		Summary:         in.Status.Summary,
+		Kind:            string(in.Status.Kind),
+	}
+	if e := in.Status.Evidence; e != nil {
+		out.Status.Evidence = &assistant.CapabilityGapReportEvidence{
+			Tool: e.Tool, Observed: e.Observed, ContradictedBy: e.ContradictedBy,
+		}
 	}
 	return nil
 }
@@ -140,6 +146,12 @@ func convert_assistant_CapabilityGapReport_To_v1alpha1(in *assistant.CapabilityG
 		ContextID:       in.Status.ContextID,
 		Capability:      in.Status.Capability,
 		Summary:         in.Status.Summary,
+		Kind:            CapabilityGapKind(in.Status.Kind),
+	}
+	if e := in.Status.Evidence; e != nil {
+		out.Status.Evidence = &CapabilityGapReportEvidence{
+			Tool: e.Tool, Observed: e.Observed, ContradictedBy: e.ContradictedBy,
+		}
 	}
 	return nil
 }

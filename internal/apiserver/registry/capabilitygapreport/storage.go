@@ -82,7 +82,11 @@ func (r *CapabilityGapReportREST) List(ctx context.Context, _ *metainternalversi
 
 // newCapabilityGapReport maps a stored report to the internal API object.
 func newCapabilityGapReport(rep gapreport.Report) *assistant.CapabilityGapReport {
-	return &assistant.CapabilityGapReport{
+	kind := rep.Kind
+	if kind == "" {
+		kind = gapreport.KindMissingCapability
+	}
+	out := &assistant.CapabilityGapReport{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              rep.ID,
 			Namespace:         rep.ProviderProject,
@@ -94,6 +98,18 @@ func newCapabilityGapReport(rep gapreport.Report) *assistant.CapabilityGapReport
 			ContextID:       rep.ContextID,
 			Capability:      rep.Capability,
 			Summary:         rep.Summary,
+			Kind:            string(kind),
 		},
 	}
+	// Projected only when something was actually quoted, so a plain
+	// MissingCapability report does not read back with an empty evidence
+	// block in `datumctl get capabilitygapreports -o yaml`.
+	if !rep.Evidence.IsZero() {
+		out.Status.Evidence = &assistant.CapabilityGapReportEvidence{
+			Tool:           rep.Evidence.Tool,
+			Observed:       rep.Evidence.Observed,
+			ContradictedBy: rep.Evidence.ContradictedBy,
+		}
+	}
+	return out
 }

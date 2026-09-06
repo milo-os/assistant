@@ -93,6 +93,7 @@ type ConversationMessage struct {
 // +kubebuilder:resource:shortName=gapreport
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Service",type=string,JSONPath=`.status.serviceName`
+// +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.status.kind`
 // +kubebuilder:printcolumn:name="Capability",type=string,JSONPath=`.status.capability`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +genclient
@@ -123,12 +124,56 @@ type CapabilityGapReportStatus struct {
 	// ContextID is the conversation the gap arose in — provenance only.
 	// +optional
 	ContextID string `json:"contextID,omitempty"`
-	// Capability is a short description of what was missing.
+	// Capability is a short description of the capability at fault.
 	// +optional
 	Capability string `json:"capability,omitempty"`
 	// Summary is what the user was trying to do.
 	// +optional
 	Summary string `json:"summary,omitempty"`
+	// Kind classifies the shortfall. Reports stored before kinds existed read
+	// back as MissingCapability.
+	// +optional
+	Kind CapabilityGapKind `json:"kind,omitempty"`
+	// Evidence quotes the tool output a non-MissingCapability report is
+	// about. Absent when there is nothing to quote.
+	// +optional
+	Evidence *CapabilityGapReportEvidence `json:"evidence,omitempty"`
+}
+
+// CapabilityGapKind classifies what kind of shortfall a report describes: a
+// gap is not only an absent tool, but also a tool that answers with too
+// little, answers misleadingly, or gives guidance the user cannot act on.
+// +kubebuilder:validation:Enum=MissingCapability;InsufficientDetail;MisleadingOutput;UnactionableGuidance
+type CapabilityGapKind string
+
+const (
+	// CapabilityGapKindMissingCapability: no tool covered what the user needed.
+	CapabilityGapKindMissingCapability CapabilityGapKind = "MissingCapability"
+	// CapabilityGapKindInsufficientDetail: a tool answered, but omitted a
+	// field the answer needed to be actionable.
+	CapabilityGapKindInsufficientDetail CapabilityGapKind = "InsufficientDetail"
+	// CapabilityGapKindMisleadingOutput: a tool answered, and its output
+	// pointed at a wrong conclusion.
+	CapabilityGapKindMisleadingOutput CapabilityGapKind = "MisleadingOutput"
+	// CapabilityGapKindUnactionableGuidance: a tool told the user to do
+	// something they cannot do.
+	CapabilityGapKindUnactionableGuidance CapabilityGapKind = "UnactionableGuidance"
+)
+
+// CapabilityGapReportEvidence quotes the offending tool output so the
+// provider's team can check the claim. It carries tool output and object
+// state only — never text from the user's message.
+type CapabilityGapReportEvidence struct {
+	// Tool is the tool whose output was at fault, e.g. "workloads_list".
+	// +optional
+	Tool string `json:"tool,omitempty"`
+	// Observed is what that tool returned, e.g. "actionability: transient".
+	// +optional
+	Observed string `json:"observed,omitempty"`
+	// ContradictedBy is the fact that makes Observed wrong, thin, or
+	// impossible to act on, e.g. "instance unchanged for 9d".
+	// +optional
+	ContradictedBy string `json:"contradictedBy,omitempty"`
 }
 
 // +kubebuilder:object:root=true

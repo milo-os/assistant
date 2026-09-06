@@ -62,11 +62,12 @@ func runGapsList(ctx context.Context, inv Invocation, io Io) int {
 
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "AGE\tSERVICE\tCAPABILITY\tCONSUMER-PROJECT\tSUMMARY")
+	fmt.Fprintln(tw, "AGE\tSERVICE\tKIND\tCAPABILITY\tCONSUMER-PROJECT\tSUMMARY")
 	for _, r := range list.Items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			ago(r.CreationTimestamp.Time),
 			r.Status.ServiceName,
+			gapKindText(r.Status.Kind),
 			r.Status.Capability,
 			r.Status.ConsumerProject,
 			previewText(r.Status.Summary, 60),
@@ -75,6 +76,16 @@ func runGapsList(ctx context.Context, inv Invocation, io Io) int {
 	_ = tw.Flush()
 	io.Out(b.String())
 	return 0
+}
+
+// gapKindText renders a report's kind for the table. Reports stored before
+// kinds existed carry none; they meant "no tool for this", so say so rather
+// than leaving the column blank.
+func gapKindText(kind assistantv1alpha1.CapabilityGapKind) string {
+	if kind == "" {
+		return string(assistantv1alpha1.CapabilityGapKindMissingCapability)
+	}
+	return string(kind)
 }
 
 // previewText collapses whitespace and truncates for a compact table cell.

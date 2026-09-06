@@ -95,10 +95,29 @@ type CapabilityGapReportStatus struct {
 	ConsumerProject string
 	// ContextID is the conversation the gap arose in — provenance only.
 	ContextID string
-	// Capability is a short description of what was missing.
+	// Capability is a short description of the capability at fault.
 	Capability string
 	// Summary is what the user was trying to do.
 	Summary string
+	// Kind classifies the shortfall (MissingCapability, InsufficientDetail,
+	// MisleadingOutput, UnactionableGuidance). Reports stored before kinds
+	// existed read back as MissingCapability.
+	Kind string
+	// Evidence quotes the tool output a non-MissingCapability report is
+	// about. Nil when there is nothing to quote.
+	Evidence *CapabilityGapReportEvidence
+}
+
+// CapabilityGapReportEvidence quotes the offending tool output. It carries
+// tool output and object state only — never text from the user's message.
+type CapabilityGapReportEvidence struct {
+	// Tool is the tool whose output was at fault.
+	Tool string
+	// Observed is what that tool returned.
+	Observed string
+	// ContradictedBy is the fact that makes Observed wrong, thin, or
+	// impossible to act on.
+	ContradictedBy string
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
