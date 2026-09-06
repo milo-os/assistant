@@ -263,6 +263,225 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 	})
 
+	t.Run("capability key round-trips", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("key")
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", CapabilityKey: "workload-metrics",
+			Capability: "CPU/memory usage metrics for workloads", Summary: "s"}); err != nil {
+			t.Fatal(err)
+		}
+		reports, err := s.List(ctx, provider)
+		if err != nil || len(reports) != 1 || reports[0].CapabilityKey != "workload-metrics" {
+			t.Fatalf("List = %+v, %v; want the key preserved", reports, err)
+		}
+	})
+
+	t.Run("junk capability key is rejected", func(t *testing.T) {
+		for _, bad := range []string{"Workload Metrics", "workload_metrics", "-nope", "a/b"} {
+			s := newStore(t)
+			provider := fresh("badkey")
+			_, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: "ctx-1", CapabilityKey: bad,
+				Capability: "cap", Summary: "s"})
+			if !errors.Is(err, ErrInvalidCapabilityKey) {
+				t.Fatalf("Insert(key=%q) = %v; want ErrInvalidCapabilityKey", bad, err)
+			}
+			if reports, _ := s.List(ctx, provider); len(reports) != 0 {
+				t.Fatalf("%q: rejected insert must not write a partial report", bad)
+			}
+		}
+	})
+
+	t.Run("capability key over its bound is rejected", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("bigkey")
+		_, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1",
+			CapabilityKey: strings.Repeat("a", MaxCapabilityKeyLen+1), Capability: "cap", Summary: "s"})
+		if !errors.Is(err, ErrCapabilityKeyTooLong) {
+			t.Fatalf("Insert = %v; want ErrCapabilityKeyTooLong", err)
+		}
+	})
+
+	// The whole point of the feature: three conversations describing one gap
+	// in three different sentences collapse to a single entry the provider
+	// can prioritise, with the count that makes it worth prioritising.
+	t.Run("occurrences sharing a key aggregate to one entry", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("agg")
+		prose := []string{
+			"time-series CPU/memory utilization metrics",
+			"Instance/Workload resource usage metrics (CPU, memory) over a time window",
+		}
+		for i, cap := range prose {
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: fmt.Sprintf("consumer-%d", i), ContextID: fmt.Sprintf("ctx-%d", i),
+				CapabilityKey: "workload-metrics", Capability: cap, Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 1 {
+			t.Fatalf("Aggregate = %+v, %v; want exactly 1 entry", groups, err)
+		}
+		g := groups[0]
+		if g.Key != "workload-metrics" || g.CapabilityKey != "workload-metrics" {
+			t.Errorf("Key/CapabilityKey = %q/%q", g.Key, g.CapabilityKey)
+		}
+		if g.Conversations != 2 || g.Occurrences != 2 {
+			t.Errorf("Conversations/Occurrences = %d/%d; want 2/2", g.Conversations, g.Occurrences)
+		}
+		if g.Capability != prose[len(prose)-1] {
+			t.Errorf("Capability = %q; want the most recent occurrence's prose %q", g.Capability, prose[len(prose)-1])
+		}
+		if g.Kind != KindMissingCapability {
+			t.Errorf("Kind = %q; want %q", g.Kind, KindMissingCapability)
+		}
+		if !g.FirstSeen.Before(g.LastSeen) && !g.FirstSeen.Equal(g.LastSeen) {
+			t.Errorf("FirstSeen %v must not be after LastSeen %v", g.FirstSeen, g.LastSeen)
+		}
+		// The occurrence rows are still there behind the aggregate — that is
+		// where the per-occurrence evidence lives.
+		if reports, err := s.List(ctx, provider); err != nil || len(reports) != 2 {
+			t.Fatalf("List = %+v, %v; want both occurrences still readable", reports, err)
+		}
+	})
+
+	// count(DISTINCT context_id), not count(*): one conversation that files
+	// the same gap twice is one conversation that hit it.
+	t.Run("one conversation filing twice counts once", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("dupe")
+		for range 2 {
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: "ctx-same",
+				CapabilityKey: "workload-metrics", Capability: "cap", Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 1 {
+			t.Fatalf("Aggregate = %+v, %v; want 1 entry", groups, err)
+		}
+		if groups[0].Conversations != 1 {
+			t.Errorf("Conversations = %d; want 1 — the same conversation filed twice", groups[0].Conversations)
+		}
+		if groups[0].Occurrences != 2 {
+			t.Errorf("Occurrences = %d; want 2", groups[0].Occurrences)
+		}
+	})
+
+	// Keyless reports are the four rows already in staging. They must show up
+	// in the provider's view, and they must NOT be merged with each other:
+	// prose is exactly what cannot tell us whether they are the same gap.
+	t.Run("keyless reports each stand alone in the aggregate", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("keyless")
+		for i := range 3 {
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: fmt.Sprintf("ctx-%d", i),
+				Capability: fmt.Sprintf("cap %d", i), Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 3 {
+			t.Fatalf("Aggregate = %+v, %v; want 3 unmerged entries", groups, err)
+		}
+		reports, err := s.List(ctx, provider)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := map[string]bool{}
+		for _, r := range reports {
+			ids[r.ID] = true
+		}
+		for _, g := range groups {
+			if g.CapabilityKey != "" {
+				t.Errorf("CapabilityKey = %q; want empty", g.CapabilityKey)
+			}
+			if !ids[g.Key] {
+				t.Errorf("Key = %q; a keyless group must be named by its own report id", g.Key)
+			}
+			if g.Conversations != 1 || g.Occurrences != 1 {
+				t.Errorf("Conversations/Occurrences = %d/%d; want 1/1", g.Conversations, g.Occurrences)
+			}
+		}
+	})
+
+	t.Run("aggregate orders most-hit first", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("order-agg")
+		file := func(key, ctxID string) {
+			t.Helper()
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: ctxID, CapabilityKey: key,
+				Capability: "cap", Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		file("rare", "ctx-1")
+		file("common", "ctx-2")
+		file("common", "ctx-3")
+		file("common", "ctx-4")
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 2 {
+			t.Fatalf("Aggregate = %+v, %v; want 2", groups, err)
+		}
+		if groups[0].CapabilityKey != "common" || groups[0].Conversations != 3 {
+			t.Fatalf("Aggregate[0] = %+v; want the 3-conversation gap first", groups[0])
+		}
+	})
+
+	t.Run("capability keys are per service, most-hit first, and capped", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("keys")
+		file := func(service, key, ctxID string) {
+			t.Helper()
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: service,
+				ConsumerProject: "demo-project", ContextID: ctxID, CapabilityKey: key,
+				Capability: "cap", Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		file("svc-a", "rare", "ctx-1")
+		file("svc-a", "common", "ctx-2")
+		file("svc-a", "common", "ctx-3")
+		file("svc-b", "other-service-key", "ctx-4")
+		// A keyless report contributes nothing to reuse.
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc-a",
+			ConsumerProject: "demo-project", ContextID: "ctx-5", Capability: "cap", Summary: "s"}); err != nil {
+			t.Fatal(err)
+		}
+
+		keys, err := s.CapabilityKeys(ctx, provider, "svc-a", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(keys) != 2 || keys[0] != "common" || keys[1] != "rare" {
+			t.Fatalf("CapabilityKeys = %v; want [common rare] — most-hit first, no other service's key, no empty", keys)
+		}
+		capped, err := s.CapabilityKeys(ctx, provider, "svc-a", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(capped) != 1 || capped[0] != "common" {
+			t.Fatalf("CapabilityKeys(limit 1) = %v; want [common] — a cap drops the least-hit", capped)
+		}
+		if keys, err := s.CapabilityKeys(ctx, provider, "svc-unknown", 0); err != nil || len(keys) != 0 {
+			t.Fatalf("CapabilityKeys(unknown service) = %v, %v; want empty", keys, err)
+		}
+	})
+
+	t.Run("aggregate of an unknown provider project is empty, not error", func(t *testing.T) {
+		s := newStore(t)
+		groups, err := s.Aggregate(ctx, fresh("agg-empty"))
+		if err != nil || len(groups) != 0 {
+			t.Fatalf("Aggregate = %v, %v; want empty", groups, err)
+		}
+	})
+
 	t.Run("concurrent inserts never collide or lose a report", func(t *testing.T) {
 		s := newStore(t)
 		provider := fresh("conc")

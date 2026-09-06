@@ -2,6 +2,7 @@ package gapreport
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -58,5 +59,47 @@ func TestEvidenceIsZero(t *testing.T) {
 	}
 	if (Evidence{Tool: "workloads_list"}).IsZero() {
 		t.Error("partially filled Evidence must not report IsZero")
+	}
+}
+
+// TestValidateCapabilityKey pins the grammar. The key's whole job is to be
+// reproduced character-for-character by a later conversation, so anything the
+// model might write two ways — capitals, spaces, underscores — is junk and is
+// rejected rather than stored under a spelling nobody will match.
+func TestValidateCapabilityKey(t *testing.T) {
+	valid := []string{
+		"",                 // optional: no key is not an invalid key
+		"workload-metrics", // the canonical shape
+		"metrics",
+		"cpu-memory-usage-over-time",
+		"s3",
+		"2fa-status", // a leading digit is a real key, not junk
+		strings.Repeat("a", MaxCapabilityKeyLen),
+	}
+	for _, k := range valid {
+		if err := ValidateCapabilityKey(k); err != nil {
+			t.Errorf("ValidateCapabilityKey(%q) = %v; want nil", k, err)
+		}
+	}
+
+	junk := []string{
+		"Workload-Metrics",            // capitals
+		"workload metrics",            // spaces
+		"workload_metrics",            // underscores
+		"workload--metrics",           // doubled dash
+		"-workload",                   // leading dash
+		"workload-",                   // trailing dash
+		"workload/metrics",            // path-ish
+		"time-series CPU/mem métrics", // prose with punctuation and accents
+	}
+	for _, k := range junk {
+		if err := ValidateCapabilityKey(k); !errors.Is(err, ErrInvalidCapabilityKey) {
+			t.Errorf("ValidateCapabilityKey(%q) = %v; want ErrInvalidCapabilityKey", k, err)
+		}
+	}
+
+	tooLong := strings.Repeat("a", MaxCapabilityKeyLen+1)
+	if err := ValidateCapabilityKey(tooLong); !errors.Is(err, ErrCapabilityKeyTooLong) {
+		t.Errorf("ValidateCapabilityKey(%d chars) = %v; want ErrCapabilityKeyTooLong", len(tooLong), err)
 	}
 }

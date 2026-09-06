@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -24,6 +25,16 @@ import (
 // ErrCapabilityTooLong is returned by Insert when capability exceeds
 // MaxCapabilityLen.
 var ErrCapabilityTooLong = errors.New("gapreport: capability exceeds MaxCapabilityLen")
+
+// ErrCapabilityKeyTooLong is returned by Insert when capabilityKey exceeds
+// MaxCapabilityKeyLen.
+var ErrCapabilityKeyTooLong = errors.New("gapreport: capability key exceeds MaxCapabilityKeyLen")
+
+// ErrInvalidCapabilityKey is returned by Insert for a key outside the
+// [CapabilityKey] grammar. Junk is rejected rather than stored: the key's
+// only job is to be recognized and reused by the next conversation, and a
+// key nobody will type the same way twice is worse than none at all.
+var ErrInvalidCapabilityKey = errors.New("gapreport: capability key must be lowercase alphanumeric words joined by single dashes")
 
 // ErrSummaryTooLong is returned by Insert when summary exceeds
 // MaxSummaryLen.
@@ -47,6 +58,11 @@ var ErrProjectFull = errors.New("gapreport: provider project exceeds MaxReportsP
 
 // MaxCapabilityLen caps the short capability description in bytes.
 const MaxCapabilityLen = 200
+
+// MaxCapabilityKeyLen caps the capability key in bytes. 63 is the DNS label
+// bound, which is what a key must fit anyway: it is the name of a
+// CapabilityGap object in the API.
+const MaxCapabilityKeyLen = 63
 
 // MaxSummaryLen caps the summary in bytes.
 const MaxSummaryLen = 1000
@@ -113,6 +129,29 @@ func ParseKind(s string) (Kind, error) {
 // Evidence is still not *enforced* — see [Store].Insert.
 func NeedsEvidence(k Kind) bool { return k != "" && k != KindMissingCapability }
 
+// capabilityKeyPattern is the whole grammar: lowercase alphanumeric words
+// joined by single dashes. Deliberately the DNS-label shape — a key names a
+// CapabilityGap object in the API, and it is also the vocabulary the model is
+// shown and asked to reuse, so it has to be a form the model reproduces
+// character-for-character rather than approximately.
+var capabilityKeyPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// ValidateCapabilityKey checks a key against the grammar and
+// MaxCapabilityKeyLen. The empty string is valid: a key is optional, and
+// every row written before keys existed has none.
+func ValidateCapabilityKey(key string) error {
+	if key == "" {
+		return nil
+	}
+	if len(key) > MaxCapabilityKeyLen {
+		return ErrCapabilityKeyTooLong
+	}
+	if !capabilityKeyPattern.MatchString(key) {
+		return fmt.Errorf("%w: %q", ErrInvalidCapabilityKey, key)
+	}
+	return nil
+}
+
 // Evidence quotes the tool output a non-MissingCapability report is about.
 // Its fields hold TOOL OUTPUT and OBJECT STATE only — never text from the
 // user's message; see the report_capability_gap tool description for why
@@ -145,6 +184,20 @@ type Report struct {
 	ConsumerProject string
 	// ContextID is the conversation the gap arose in — provenance only.
 	ContextID string
+	// CapabilityKey names the gap in a form two conversations can agree on,
+	// e.g. "workload-metrics". Capability is prose the model writes fresh
+	// each time and no two writings of the same gap match; the key is what
+	// makes occurrences of one gap group. Empty on rows written before keys
+	// existed, and on any report filed without one.
+	//
+	// The model will eventually coin a synonym for a key it already has, so
+	// merging has to stay possible. It is: because the key lives per
+	// occurrence and grouping happens at read time, merging two keys is one
+	// UPDATE ... SET capability_key over the losing key, and the next
+	// Aggregate re-derives every count from the rows. Nothing has to be
+	// reconciled, because nothing is precomputed — which is the second reason
+	// this is not an upsert onto a counter.
+	CapabilityKey string
 	// Capability is a short description of the capability at fault, e.g.
 	// "list pipelines for StreamCo".
 	Capability string
@@ -159,6 +212,44 @@ type Report struct {
 	CreatedAt time.Time
 }
 
+// Aggregate is one distinct capability gap: every report filed against the
+// same [Report].CapabilityKey for one service, collapsed into a single entry
+// with a count of how many conversations hit it. It is the view a provider's
+// team prioritises from; the occurrence rows behind it stay available through
+// [Store].List and carry the per-occurrence evidence, which is the material
+// that makes a quality defect diagnosable.
+//
+// It deliberately carries NO consumer identity — not ConsumerProject, not
+// ContextID, not a per-customer breakdown. "How many conversations" is the
+// prioritisation signal; "which of your customers" is a distinct, more
+// legible cross-tenant profile that prioritisation does not need. The
+// occurrence rows already show a provider the consumer project per report;
+// this view simply declines to hand them the same thing pre-tabulated.
+type Aggregate struct {
+	// Key is the group's identity, and the name of the CapabilityGap object
+	// the API projects from it. It is CapabilityKey when there is one, and
+	// otherwise the single report's own ID — see [Store].Aggregate for why
+	// keyless occurrences are never merged with each other.
+	Key string
+	// CapabilityKey is the model-coined key, empty for a group of one
+	// keyless (pre-key, or filed-without-one) report.
+	CapabilityKey string
+	// ServiceName is the provider service the gap belongs to. Keys are
+	// per-service: the same key filed against two services is two gaps.
+	ServiceName string
+	// Capability and Kind are taken from the most recent occurrence — the
+	// freshest description of a gap that has been re-filed several times.
+	Capability string
+	Kind       Kind
+	// Conversations counts DISTINCT ContextIDs, which is literally "how many
+	// conversations hit this". Robust to one conversation filing twice.
+	Conversations int
+	// Occurrences counts reports, which can exceed Conversations.
+	Occurrences int
+	FirstSeen   time.Time
+	LastSeen    time.Time
+}
+
 // InsertParams is the input to [Store].Insert. It is a struct rather than a
 // positional argument list because every field is a string: providerProject,
 // consumerProject, and contextID are mutually swappable at a call site with
@@ -169,8 +260,11 @@ type InsertParams struct {
 	ServiceName     string
 	ConsumerProject string
 	ContextID       string
-	Capability      string
-	Summary         string
+	// CapabilityKey is optional but is what makes de-duplication work; see
+	// [Report].CapabilityKey. Validated against [ValidateCapabilityKey].
+	CapabilityKey string
+	Capability    string
+	Summary       string
 	// Kind is optional; empty means KindMissingCapability.
 	Kind Kind
 	// Evidence is optional. Expected for every kind but MissingCapability,
@@ -182,13 +276,45 @@ type InsertParams struct {
 // safe for concurrent use.
 type Store interface {
 	// List returns a provider project's reports, newest first. An unknown
-	// project yields nil, nil.
+	// project yields nil, nil. This is the occurrence view: one row per
+	// report filed, each with its own evidence.
 	List(ctx context.Context, providerProject string) ([]Report, error)
+	// Aggregate returns a provider project's distinct gaps, one entry per
+	// (service, capability key), most-hit first — ordered by Conversations
+	// descending, then LastSeen descending, then Key ascending so the result
+	// is deterministic. An unknown project yields nil, nil.
+	//
+	// Reports with no capability key are NOT merged with each other: each
+	// becomes its own single-occurrence entry keyed by its report ID. Free
+	// prose is exactly what cannot tell us whether two of them are the same
+	// gap — that is the problem keys exist to solve — so merging them would
+	// be a guess presented as a count. They still appear, unmerged, so
+	// nothing already filed drops out of the provider's view.
+	Aggregate(ctx context.Context, providerProject string) ([]Aggregate, error)
+	// CapabilityKeys returns the keys already filed against one service in
+	// one provider project, most-hit first (same ordering as Aggregate),
+	// capped at limit (<= 0 means no cap). Reports with no key contribute
+	// nothing.
+	//
+	// It returns bare keys and nothing else, on purpose: its caller is
+	// [github.com/milo-os/assistant/internal/capability.Compose], which
+	// injects the result into a prompt running in SOME OTHER consumer's
+	// conversation. A key is a bounded, charset-constrained slug naming the
+	// provider's own capability; the report prose around it is not, and has
+	// no business crossing into a different tenant's turn. The signature is
+	// where that boundary is enforced.
+	CapabilityKeys(ctx context.Context, providerProject, serviceName string, limit int) ([]string, error)
 	// Insert records a new report, assigning ID and CreatedAt, and
 	// defaulting an empty Kind to KindMissingCapability. It returns
-	// ErrCapabilityTooLong, ErrSummaryTooLong, ErrEvidenceTooLong,
-	// ErrUnknownKind, or ErrProjectFull if the input is invalid or a bound
-	// is violated; the store is left unchanged.
+	// ErrCapabilityTooLong, ErrSummaryTooLong, ErrCapabilityKeyTooLong,
+	// ErrInvalidCapabilityKey, ErrEvidenceTooLong, ErrUnknownKind, or
+	// ErrProjectFull if the input is invalid or a bound is violated; the
+	// store is left unchanged.
+	//
+	// A malformed capability key is REJECTED, unlike missing evidence, which
+	// is accepted: a key is mechanically fixable by the caller on the spot,
+	// so the error round-trips into a corrected retry rather than losing the
+	// report. An omitted key is fine — it just does not group.
 	//
 	// A kind that [NeedsEvidence] with no evidence is ACCEPTED, not
 	// rejected: an under-evidenced report still tells the provider's team
@@ -207,6 +333,9 @@ func normalize(p InsertParams) (InsertParams, error) {
 	}
 	if len(p.Summary) > MaxSummaryLen {
 		return InsertParams{}, ErrSummaryTooLong
+	}
+	if err := ValidateCapabilityKey(p.CapabilityKey); err != nil {
+		return InsertParams{}, err
 	}
 	if len(p.Evidence.Tool) > MaxEvidenceToolLen ||
 		len(p.Evidence.Observed) > MaxEvidenceTextLen ||
@@ -271,6 +400,7 @@ func (s *MemoryStore) Insert(_ context.Context, params InsertParams) (Report, er
 		ServiceName:     p.ServiceName,
 		ConsumerProject: p.ConsumerProject,
 		ContextID:       p.ContextID,
+		CapabilityKey:   p.CapabilityKey,
 		Capability:      p.Capability,
 		Summary:         p.Summary,
 		Kind:            p.Kind,
@@ -279,4 +409,111 @@ func (s *MemoryStore) Insert(_ context.Context, params InsertParams) (Report, er
 	}
 	s.reports[p.ProviderProject] = append(s.reports[p.ProviderProject], r)
 	return r, nil
+}
+
+// Aggregate implements [Store].
+func (s *MemoryStore) Aggregate(_ context.Context, providerProject string) ([]Aggregate, error) {
+	s.mu.Lock()
+	reports := make([]Report, len(s.reports[providerProject]))
+	copy(reports, s.reports[providerProject])
+	s.mu.Unlock()
+	return aggregateReports(reports), nil
+}
+
+// CapabilityKeys implements [Store].
+func (s *MemoryStore) CapabilityKeys(ctx context.Context, providerProject, serviceName string, limit int) ([]string, error) {
+	groups, err := s.Aggregate(ctx, providerProject)
+	if err != nil {
+		return nil, err
+	}
+	return keysFromAggregates(groups, serviceName, limit), nil
+}
+
+// aggregateReports is the in-memory form of the grouping [Store].Aggregate
+// specifies; PostgresStore does the same thing in SQL. Keeping it here rather
+// than in the test file means the two implementations are held to one written
+// definition of the grouping, not two readings of a doc comment.
+func aggregateReports(reports []Report) []Aggregate {
+	type group struct {
+		agg      Aggregate
+		contexts map[string]struct{}
+	}
+	byKey := make(map[string]*group)
+	var order []string
+	for _, r := range reports {
+		// A keyless report groups only with itself: see [Store].Aggregate.
+		// Namespacing by service keeps one key from spanning two services.
+		id := r.ServiceName + "\x00" + r.CapabilityKey
+		if r.CapabilityKey == "" {
+			id = r.ServiceName + "\x00\x00" + r.ID
+		}
+		g, ok := byKey[id]
+		if !ok {
+			g = &group{
+				agg: Aggregate{
+					Key:           r.CapabilityKey,
+					CapabilityKey: r.CapabilityKey,
+					ServiceName:   r.ServiceName,
+					FirstSeen:     r.CreatedAt,
+				},
+				contexts: map[string]struct{}{},
+			}
+			if r.CapabilityKey == "" {
+				g.agg.Key = r.ID
+			}
+			byKey[id] = g
+			order = append(order, id)
+		}
+		g.contexts[r.ContextID] = struct{}{}
+		g.agg.Occurrences++
+		if r.CreatedAt.Before(g.agg.FirstSeen) {
+			g.agg.FirstSeen = r.CreatedAt
+		}
+		// Capability and Kind describe the most recent occurrence, so they
+		// move only when this report is at least as new as the current one.
+		if g.agg.LastSeen.IsZero() || !r.CreatedAt.Before(g.agg.LastSeen) {
+			g.agg.LastSeen = r.CreatedAt
+			g.agg.Capability = r.Capability
+			g.agg.Kind = r.Kind
+			if g.agg.Kind == "" {
+				g.agg.Kind = KindMissingCapability
+			}
+		}
+	}
+	if len(order) == 0 {
+		return nil
+	}
+	out := make([]Aggregate, 0, len(order))
+	for _, id := range order {
+		g := byKey[id]
+		g.agg.Conversations = len(g.contexts)
+		out = append(out, g.agg)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Conversations != out[j].Conversations {
+			return out[i].Conversations > out[j].Conversations
+		}
+		if !out[i].LastSeen.Equal(out[j].LastSeen) {
+			return out[i].LastSeen.After(out[j].LastSeen)
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out
+}
+
+// keysFromAggregates narrows an aggregate list to one service's keys, in the
+// order it was already sorted, dropping keyless groups (they have no key to
+// reuse) and applying limit.
+func keysFromAggregates(groups []Aggregate, serviceName string, limit int) []string {
+	var out []string
+	for _, g := range groups {
+		if g.CapabilityKey == "" || g.ServiceName != serviceName {
+			continue
+		}
+		out = append(out, g.CapabilityKey)
+		if limit > 0 && len(out) == limit {
+			break
+		}
+	}
+	return out
 }
