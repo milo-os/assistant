@@ -17,6 +17,13 @@
       "configurationVersion": "v1-playground",
       "reportingProject": "streamco-platform",
       "knowledge": {
+        "sources": [
+          {
+            "type": "LLMDocs",
+            "title": "StreamCo overview",
+            "url": "http://streamco.patch-playground.svc.cluster.local:7810/llms-full.txt"
+          }
+        ],
         "concepts": [
           {
             "gvk": {
