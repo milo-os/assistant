@@ -165,15 +165,11 @@ type Config struct {
 	// are untrusted (then prefer a host allow-list). Default false = safe.
 	AllowPrivateCapabilityNetworks bool
 
-	// CapabilityIdentityForwardHosts is the operator-sanctioned set of MCP
-	// endpoint hosts that may receive the CALLING USER's bearer token and the
-	// turn's project, so a provider that reads the customer's own resources can
-	// act as that user (env CAPABILITY_IDENTITY_FORWARD_HOSTS, comma-separated;
-	// an entry matches a host exactly and as a domain suffix). Empty (the
-	// default) forwards to nobody: a capability document is provider-controlled
-	// data, so naming an endpoint must never by itself cause a credential to be
-	// sent there. In this platform the sanctioned host is the AI gateway that
-	// fronts every provider endpoint.
+	// CapabilityIdentityForwardHosts are the operator-sanctioned MCP endpoint
+	// hosts that may receive the calling user's bearer token and the turn's
+	// project (comma-separated env; exact or domain-suffix match). Empty (the
+	// default) forwards to nobody — a capability document is provider-controlled
+	// data, so naming an endpoint must never by itself send a credential there.
 	CapabilityIdentityForwardHosts []string
 
 	Model ModelConfig
@@ -468,8 +464,7 @@ func oneOf(value string, allowed []string, fallback string) string {
 }
 
 // splitList parses a comma-separated env value into trimmed, non-empty
-// entries. An unset or all-blank value yields nil, which every consumer reads
-// as "no entries" — the safe default for an allow-list.
+// entries. Unset or all-blank yields nil — the safe default for an allow-list.
 func splitList(v string) []string {
 	var out []string
 	for _, part := range strings.Split(v, ",") {

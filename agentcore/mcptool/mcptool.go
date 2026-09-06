@@ -42,11 +42,10 @@ type Options struct {
 	ClientName string
 	// ClientVersion is the announced client version. Empty uses "0".
 	ClientVersion string
-	// Headers are set on every request this session sends to Endpoint. They
-	// are applied only to requests aimed at Endpoint's own host, so a redirect
-	// off the endpoint cannot carry a credential meant for it. Deciding WHICH
-	// headers an endpoint deserves is the composition layer's policy, not this
-	// package's — see internal/capability.
+	// Headers are set on every request of this session, but only on requests
+	// to Endpoint's own host, so a redirect off the endpoint cannot carry a
+	// credential meant for it. Which headers an endpoint deserves is
+	// internal/capability's policy, not this package's.
 	Headers map[string]string
 	// EnableStandaloneSSE opts into the server-initiated SSE stream. It is off
 	// by default because the per-request, request/response usage here needs no
@@ -207,10 +206,9 @@ func (rt *acceptRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	return rt.next.RoundTrip(req)
 }
 
-// headerRoundTripper sets [Options.Headers] on requests to the session's own
-// endpoint host. Headers may carry a credential, and a round-tripper runs per
-// redirect hop — after the client's own cross-domain header stripping — so
-// scoping by host is what keeps a hostile redirect from harvesting one.
+// headerRoundTripper stamps [Options.Headers] only on the session's own
+// endpoint host: a round-tripper runs per redirect hop, so without the host
+// check a hostile redirect would harvest the credential.
 type headerRoundTripper struct {
 	next    http.RoundTripper
 	host    string

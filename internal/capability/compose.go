@@ -95,18 +95,15 @@ type ComposeOptions struct {
 	// (backward compatible). The integrator populates these from config.
 	AllowedHosts []string
 	AllowedCIDRs []string
-	// Caller is the calling user's own credential. Forwarded (with
-	// ExpectedProject) to MCP endpoints whose host is in IdentityForwardHosts,
-	// so a provider that reads the customer's resources can act as the caller
-	// rather than holding standing access of its own. Empty forwards nothing.
+	// Caller is the calling user's own credential, forwarded (with
+	// ExpectedProject) only to endpoints in IdentityForwardHosts so a provider
+	// can read as the caller instead of holding standing access of its own.
 	Caller CallerIdentity
 	// IdentityForwardHosts is the OPERATOR-sanctioned set of MCP endpoint hosts
-	// that may receive Caller — matched exactly and as a domain suffix, like
-	// AllowedHosts. It is deliberately separate from the SSRF allow-list: that
-	// one answers "may we connect at all", this one answers the far narrower
-	// "may we hand this endpoint the user's credential". Empty (the default)
-	// forwards to nobody, so a capability document naming an endpoint never
-	// causes a token to be sent anywhere by itself. See identity.go.
+	// that may receive Caller — matched exactly and as a domain suffix. Kept
+	// separate from the SSRF allow-list on purpose: that one answers "may we
+	// connect at all", this the far narrower "may we hand this endpoint the
+	// user's credential". Empty (the default) forwards to nobody. See identity.go.
 	IdentityForwardHosts []string
 	// ExpectedProject, when set, is the namespace/project of the calling request.
 	// It is a defense-in-depth tenant-isolation check on the capability Source:
