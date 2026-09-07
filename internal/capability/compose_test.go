@@ -267,7 +267,7 @@ func TestComposeKnowledge_EmptyWhenNoKnowledge(t *testing.T) {
 // ── Tools (Tier 2) ────────────────────────────────────────────
 
 func connectorFor(sessions map[string]*fakeSession) mcpConnector {
-	return func(_ context.Context, endpoint string) (mcpSession, error) {
+	return func(_ context.Context, endpoint string, _ map[string]string) (mcpSession, error) {
 		if s, ok := sessions[endpoint]; ok {
 			return s, nil
 		}
@@ -401,7 +401,7 @@ func TestComposeTools_KeepsComposingWhenOneServerFails(t *testing.T) {
 
 func TestComposeTools_TimesOutHangingConnectAndClosesLateSession(t *testing.T) {
 	late := newFakeSession("streams_list")
-	connect := func(_ context.Context, _ string) (mcpSession, error) {
+	connect := func(_ context.Context, _ string, _ map[string]string) (mcpSession, error) {
 		time.Sleep(40 * time.Millisecond)
 		return late, nil
 	}
@@ -449,7 +449,7 @@ func TestComposeTools_ToolsListTimeoutDegradesWithoutHanging(t *testing.T) {
 	done := make(chan *Composed, 1)
 	go func() {
 		composed, _ := Compose(context.Background(), []CapabilityDocument{doc}, ComposeOptions{
-			connect: func(_ context.Context, endpoint string) (mcpSession, error) {
+			connect: func(_ context.Context, endpoint string, _ map[string]string) (mcpSession, error) {
 				if endpoint == "http://provider/mcp" {
 					return session, nil
 				}

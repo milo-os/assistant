@@ -36,8 +36,70 @@ in the platform, and Patch inherits it — including revocation.
 
 Patch authenticates its own review calls with its service account, which holds
 `system:auth-delegator` and nothing else. It can ask the control plane questions
-about a caller; it never acquires that caller's authority, and it holds no read
-access to any project resource.
+about a caller; it is never *granted* that caller's authority, and it holds no
+read access to any project resource of its own. Where a provider tool must read
+a customer's resources, it borrows the caller's credential for that one call —
+see below.
+
+## Acting as the caller
+
+Some provider tools read the customer's own resources. The compute plugin's MCP
+server is the first: it clears every credential it might have, sets the token on
+the request, and reads as that bearer. It therefore holds no standing access to
+anyone's project, and needs no impersonation privilege — but it does need the
+caller's credential and the project to read in.
+
+So a turn forwards two headers to such a server:
+
+| Header | Value | Source |
+|---|---|---|
+| `Authorization` | `Bearer <the caller's own token>` | the authenticated request |
+| `X-Datum-Project` | the project the turn was authorized for | the authorized request, never a tool argument |
+
+The project comes from the request that a SubjectAccessReview already approved.
+A tool *argument* naming a project would be steerable by prompt injection, which
+is why neither side reads one.
+
+### Who may receive it
+
+Forwarding a raw end-user token is credential spreading, and a capability
+document is provider-controlled data: a document could name any endpoint at all
+and harvest tokens from every project entitled to it. So naming an endpoint
+grants it nothing. The credential travels only to hosts an **operator**
+sanctioned out-of-band, in `CAPABILITY_IDENTITY_FORWARD_HOSTS`, and the empty
+default forwards to nobody. On this platform that list is the AI gateway that
+already fronts every provider endpoint and enforces the tool allow-list a second
+time.
+
+That list is deliberately separate from the SSRF allow-list. The SSRF guard
+answers "may we connect at all"; this answers the much narrower "may we hand
+this endpoint the user's credential", and an endpoint can clear the first
+without clearing the second.
+
+The decision fails closed on every doubt — no token, no authorized project, no
+sanctioned list, an unparseable endpoint, a host outside the list — and the
+headers travel as a pair, since a server that cannot read as the caller has no
+use for the project name. Knowledge sources and skill bodies are excluded
+outright: they are static documents fetched with a plain GET, named by the same
+provider-controlled document, so carrying a credential there would widen the
+harvest surface for nothing gained.
+
+### What this is not
+
+It is not a scoped delegation. The forwarded token is the caller's full-strength
+credential: an MCP server that receives it can do anything its bearer can do,
+not merely the reads the capability document declares, and its lifetime is the
+token's own rather than the turn's. The sanctioned-host list bounds *who* is
+trusted with it; nothing yet bounds *what* they may do with it.
+
+The end state is a token exchange ([RFC 8693][rfc8693]): before a tool call the
+assistant swaps the caller's token for a short-lived one, audience-bound to that
+one provider endpoint and scoped to the reads the document declares, so a
+compromised or curious provider holds something that is useless elsewhere and
+expires in minutes. That needs an exchange endpoint on the control plane, an
+audience per provider service, and a scope vocabulary derived from
+`spec.authority` — a platform project rather than a service change, which is why
+the sanctioned-host list stands in the meantime.
 
 ## Failing closed
 
@@ -80,5 +142,6 @@ the request. A caller cannot name someone else's project to reach their task.
 - [Configuration](../configuration.md) — endpoints, credentials, and timeouts.
 - [Deployment](../deployment.md) — the production posture.
 
+[rfc8693]: https://datatracker.ietf.org/doc/html/rfc8693
 [tokenreview]: https://kubernetes.io/docs/reference/access-authn-authz/authentication/#webhook-token-authentication
 [sar]: https://kubernetes.io/docs/reference/access-authn-authz/authorization/#checking-api-access
