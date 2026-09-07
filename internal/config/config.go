@@ -101,6 +101,12 @@ type ModelConfig struct {
 	GatewayURL string
 	// GatewayModel is the model name the gateway routes upstream.
 	GatewayModel string
+	// GatewayTokenFile is an optional path to a bearer token presented to the
+	// gateway (GATEWAY_TOKEN_FILE). This authenticates the SERVICE to the
+	// gateway; it is not a model credential, which the gateway still injects
+	// itself. On the Datum platform it is a projected ServiceAccount token with
+	// audience "ai-gateway", which the gateway validates as a JWT.
+	GatewayTokenFile string
 	// GatewayCACert is an optional CA PEM path for a self-signed gateway TLS cert.
 	GatewayCACert string
 	// GatewayTLSInsecure skips gateway TLS verification (local convenience only).
@@ -359,6 +365,7 @@ func Load(getenv func(string) string) (*Config, error) {
 			AnthropicModel:     anthropicModel,
 			GatewayURL:         gatewayURL,
 			GatewayModel:       gatewayModel,
+			GatewayTokenFile:   env("GATEWAY_TOKEN_FILE"),
 			GatewayCACert:      env("GATEWAY_CA_CERT"),
 			GatewayTLSInsecure: isTruthy(env("GATEWAY_TLS_INSECURE")),
 		},
