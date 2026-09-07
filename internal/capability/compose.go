@@ -112,7 +112,7 @@ type ComposeOptions struct {
 	// ExpectedProject is dropped and logged rather than trusted. Documents that
 	// carry no namespace are passed through — for those the Source remains the
 	// scoping authority (the CRD projection has no spec-level project field to
-	// cross-check; if one is added later, extend scopeDocuments to verify it).
+	// cross-check; if one is added later, extend ScopeDocuments to verify it).
 	ExpectedProject string
 	// Memory, when non-nil, enables the memory_remember / memory_forget
 	// built-in tools (see internal/capability/memory.go) scoped to
@@ -178,7 +178,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 
 	// Tenant-isolation depth: drop any document the Source mis-scoped before it
 	// contributes knowledge or tools (no-op unless ExpectedProject is set).
-	docs = scopeDocuments(docs, opts.ExpectedProject, logger)
+	docs = ScopeDocuments(docs, opts.ExpectedProject, logger)
 
 	// One SSRF guard drives all three provider-URL sinks (knowledge, skills,
 	// MCP). The knowledge/skill fetches share a guarded HTTP client; the MCP
@@ -293,7 +293,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 	}, nil
 }
 
-// scopeDocuments is the defense-in-depth tenant-isolation seam. The capability
+// ScopeDocuments is the defense-in-depth tenant-isolation seam. The capability
 // Source is trusted to return only the calling project's documents; this guards
 // against a Source bug (or a compromised fan-out) leaking another tenant's
 // document by dropping any whose Metadata.Namespace names a different project.
@@ -301,7 +301,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 // kept, because the schema carries no other project handle to cross-check and
 // the Source stays the scoping authority there. With no ExpectedProject the
 // check is disabled and docs pass through unchanged (backward compatible).
-func scopeDocuments(docs []CapabilityDocument, expectedProject string, logger *slog.Logger) []CapabilityDocument {
+func ScopeDocuments(docs []CapabilityDocument, expectedProject string, logger *slog.Logger) []CapabilityDocument {
 	if expectedProject == "" {
 		return docs
 	}
@@ -423,9 +423,14 @@ var toolNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 // NamespaceToolName renders the model-facing name "<server>__<tool>", with
 // both parts sanitized to the [a-zA-Z0-9_-] set model providers require.
 func NamespaceToolName(serverName, toolName string) string {
-	sanitize := func(v string) string { return toolNameSanitizer.ReplaceAllString(v, "-") }
-	return sanitize(serverName) + ToolNamespaceSeparator + sanitize(toolName)
+	return SanitizeName(serverName) + ToolNamespaceSeparator + SanitizeName(toolName)
 }
+
+// SanitizeName reduces a provider-supplied name to the character set tool and
+// skill identifiers use. Exported so anything deriving an identifier from a
+// document (the agent card's per-service skill IDs) applies the same rule as
+// [NamespaceToolName] rather than passing an arbitrary provider string through.
+func SanitizeName(v string) string { return toolNameSanitizer.ReplaceAllString(v, "-") }
 
 // guardedConnector wraps a connector with the SSRF guard: it refuses to connect
 // to an endpoint whose scheme is disallowed or that resolves to a non-routable

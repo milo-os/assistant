@@ -100,12 +100,29 @@ func newTestService(t *testing.T) string {
 // newTestServiceWith is newTestService with a caller-supplied executor.
 func newTestServiceWith(t *testing.T, executor a2asrv.AgentExecutor) string {
 	t.Helper()
+	// Assigned below, once the server URL is known; the producer only reads it
+	// at request time.
+	var publicCard *a2a.AgentCard
+
 	handler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithCallInterceptors(&devAuth{tokens: map[string]string{
 			"good":  "demo-project",
 			"wrong": "other-project",
 		}}),
+		// The handler refuses GetExtendedAgentCard unless its own capability
+		// copy allows it, mirroring the real service.
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{Streaming: true, ExtendedAgentCard: true}),
+		a2asrv.WithExtendedAgentCardProducer(a2asrv.ExtendedAgentCardProducerFn(
+			func(ctx context.Context, req *a2a.GetExtendedAgentCardRequest) (*a2a.AgentCard, error) {
+				ext := *publicCard
+				ext.Skills = append(append([]a2a.AgentSkill{}, publicCard.Skills...), a2a.AgentSkill{
+					ID:          req.Tenant + "-svc",
+					Name:        "svc." + req.Tenant + ".example",
+					Description: "Tools: " + req.Tenant + "__thing.",
+				})
+				return &ext, nil
+			})),
 		a2asrv.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
 
@@ -115,7 +132,7 @@ func newTestServiceWith(t *testing.T, executor a2asrv.AgentExecutor) string {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	card := &a2a.AgentCard{
+	publicCard = &a2a.AgentCard{
 		Name:        "Patch",
 		Description: "Patch is the Datum Cloud assistant.",
 		Version:     "0.1.0",
@@ -123,13 +140,13 @@ func newTestServiceWith(t *testing.T, executor a2asrv.AgentExecutor) string {
 			a2a.NewAgentInterface(srv.URL+"/a2a", a2a.TransportProtocolJSONRPC),
 		},
 		Provider:           &a2a.AgentProvider{Org: "Datum", URL: "https://www.datum.net"},
-		Capabilities:       a2a.AgentCapabilities{Streaming: true},
+		Capabilities:       a2a.AgentCapabilities{Streaming: true, ExtendedAgentCard: true},
 		DefaultInputModes:  []string{"text/plain"},
 		DefaultOutputModes: []string{"text/plain"},
 		SecuritySchemes:    a2a.NamedSecuritySchemes{"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}},
 		Skills:             []a2a.AgentSkill{{ID: "project-assistant", Name: "Project assistant", Description: "d"}},
 	}
-	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card))
+	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(publicCard))
 	return srv.URL
 }
 
@@ -169,6 +186,45 @@ func TestRun_Card(t *testing.T) {
 	}
 	if !strings.Contains(io.out.String(), base+"/a2a") {
 		t.Errorf("card output missing endpoint: %q", io.out.String())
+	}
+}
+
+func TestRun_CardProject_ExtendedCard(t *testing.T) {
+	base := newTestService(t)
+	env := envFn(map[string]string{"PATCH_URL": base, "PATCH_TOKEN": "good"})
+	var io capture
+	code := Run(context.Background(), []string{"card", "--project", "demo-project"}, env, &io)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0\nstderr: %s", code, io.err.String())
+	}
+	// The project reached the server as GetExtendedAgentCardRequest.Tenant and
+	// came back as an extra, listed skill.
+	for _, want := range []string{"project-assistant", "demo-project-svc", "demo-project__thing"} {
+		if !strings.Contains(io.out.String(), want) {
+			t.Errorf("extended card output missing %q:\n%s", want, io.out.String())
+		}
+	}
+}
+
+func TestRun_CardProjectNoToken_ClearError(t *testing.T) {
+	base := newTestService(t)
+	env := envFn(map[string]string{"PATCH_URL": base}) // no token
+	var io capture
+	code := Run(context.Background(), []string{"card", "--project", "demo-project"}, env, &io)
+	if code != 2 {
+		t.Fatalf("code = %d, want 2\nstderr: %s", code, io.err.String())
+	}
+	if !strings.Contains(io.err.String(), "PATCH_TOKEN") {
+		t.Errorf("stderr should name the missing token: %q", io.err.String())
+	}
+}
+
+// A service without a per-project card should point the user at the flag to
+// drop, not at the library's bare sentinel text.
+func TestFriendlyError_ExtendedCardNotConfigured(t *testing.T) {
+	msg := friendlyError(a2a.ErrExtendedCardNotConfigured, nil)
+	if !strings.Contains(msg, "--project") {
+		t.Errorf("message should name the flag to drop: %q", msg)
 	}
 }
 

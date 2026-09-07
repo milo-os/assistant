@@ -18,7 +18,7 @@
 //
 // Grammar:
 //
-//	patch card [--json]
+//	patch card [--project <p>] [--json]
 //	patch chat "<message>" --project <p> [--context-id <c>] [--json]
 //	patch chat -i --project <p> [--context-id <c>]
 //	patch chat -c --project <p>
@@ -93,7 +93,11 @@ func parseArgs(argv []string) command {
 
 	switch name {
 	case "card":
+		// --project is optional and purely additive: with it, `card` asks for
+		// the authenticated extended card for that project instead of the
+		// public one.
 		common.kind = KindCard
+		common.project = flags.project
 		return common
 
 	case "chat":
@@ -346,7 +350,7 @@ func valueFor(arg string, argv []string, index int) (value string, consumedNext 
 const usage = `patch — Datum Cloud assistant (A2A) CLI
 
 Usage:
-  patch card [--json]
+  patch card [--project <name>] [--json]
   patch chat "<message>" --project <name> [--context-id <c>] [--json]
   patch chat -i --project <name> [--context-id <c>]
   patch chat --tui --project <name> [--context-id <c>] ["<message>"]
@@ -363,7 +367,8 @@ Usage:
 Options:
   --project <name>    Milo project the task runs against (chat, conversations,
                       gaps — for gaps this is the PROVIDER's own project, see
-                      below, not the project a conversation ran in)
+                      below, not the project a conversation ran in). Optional
+                      on 'card': see Card below.
   --context-id <c>    Continue an existing conversation (chat); the service
                       replays that conversation's history into the turn
   -c, --continue      Continue the project's most recently active conversation
@@ -447,6 +452,14 @@ Compact:
   it reports that rather than treating it as a failure. The chat --tui has
   the same thing as /compact.
 
+Card:
+  'card' prints the public agent card — the same generic capabilities every
+  caller sees, no token needed. With --project it instead requests the
+  AUTHENTICATED extended card (A2A GetExtendedAgentCard) for that project:
+  the public card plus one skill per provider service the project is entitled
+  to, with the service's tool names and MCP endpoints. That needs a token
+  (PATCH_TOKEN or --token) authorized for the project.
+
 Conversations:
   'conversations' browses the durable chat history exposed by the
   conversations aggregated apiserver (assistant.miloapis.com) via kubectl —
@@ -473,6 +486,7 @@ Examples:
   patch resume --last --project demo-project
   patch chat -c --project demo-project
   patch card --url http://localhost:7820
+  patch card --project demo-project
   patch conversations list --project demo-project
   patch conversations show 019f7293-3579-7d8e-8233-4da8bc900405 --project demo-project
   patch gaps list --project streamco-platform

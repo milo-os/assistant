@@ -77,6 +77,21 @@ unreadable body, or a malformed document is logged and treated as no
 capabilities: the turn proceeds with what remains. Individual documents that
 fail validation are skipped with a warning while valid ones still apply.
 
+## Advertising what a project has
+
+Discovery is per project as well. The public agent card is served
+unauthenticated and stays generic: it names no provider, tool, or endpoint. An
+authenticated caller that names a project it is authorized for gets the extended
+card, which carries one skill per service that project's capability documents
+entitle it to, with the allow-listed tool names and MCP endpoints.
+
+The extended card is derived from the same documents, through the same project
+scope gate, that the next turn would compose — so it cannot promise a service
+that turn would not build. It stops there: no MCP connection is opened, and the
+tool list is the declared allow-list rather than a live `tools/list`. The card
+therefore claims **entitlement, not health**. A service that is entitled but down
+still appears, and a router must not read the card as a liveness signal.
+
 ## Reporting what is missing
 
 When a customer asks for something no entitled tool can do, the assistant

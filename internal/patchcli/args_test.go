@@ -19,6 +19,16 @@ func TestParseArgs(t *testing.T) {
 			want: command{kind: KindCard, json: true, url: "http://x", token: "t"},
 		},
 		{
+			name: "card --project asks for the extended card",
+			argv: []string{"card", "--project", "demo"},
+			want: command{kind: KindCard, project: "demo"},
+		},
+		{
+			name: "card --project --json",
+			argv: []string{"card", "--project=demo", "--json"},
+			want: command{kind: KindCard, project: "demo", json: true},
+		},
+		{
 			name: "--flag=value form",
 			argv: []string{"card", "--url=http://y", "--token=zzz"},
 			want: command{kind: KindCard, url: "http://y", token: "zzz"},

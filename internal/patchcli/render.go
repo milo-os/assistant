@@ -214,9 +214,27 @@ func renderCard(card *a2a.AgentCard, jsonOut bool, io Io) {
 		fmt.Sprintf("Provider:   %s", describeProvider(card)),
 		fmt.Sprintf("Streaming:  %s", yesNo(card.Capabilities.Streaming)),
 		fmt.Sprintf("Auth:       %s", describeSecurity(card)),
-		fmt.Sprintf("Skills:     %s", describeSkills(card)),
 	}
+	lines = append(lines, skillLines(card)...)
 	io.Out(strings.Join(lines, "\n") + "\n")
+}
+
+// skillLines renders a card's skills. The public card's single generic skill
+// stays the one-line summary it has always been; an extended card, which adds
+// one skill per entitled provider service, gets a list so each service's tools
+// and endpoints are readable.
+func skillLines(card *a2a.AgentCard) []string {
+	if len(card.Skills) <= 1 {
+		return []string{fmt.Sprintf("Skills:     %s", describeSkills(card))}
+	}
+	lines := []string{"Skills:"}
+	for _, s := range card.Skills {
+		lines = append(lines, "  "+s.ID+"  ("+s.Name+")")
+		if s.Description != "" {
+			lines = append(lines, "    "+s.Description)
+		}
+	}
+	return lines
 }
 
 // renderTask prints a task's state and answer, either pretty or as raw JSON.

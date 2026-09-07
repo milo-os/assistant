@@ -50,6 +50,12 @@ type Deps struct {
 	// that route, matching Compactor's posture.
 	Renamer history.Renamer
 
+	// SkillAdvertiser backs the authenticated extended agent card
+	// (GetExtendedAgentCard). Nil means the method answers
+	// ErrExtendedCardNotConfigured rather than failing to build the server — an
+	// AgentRunner that can't describe entitlement simply doesn't offer one.
+	SkillAdvertiser assistanta2a.SkillAdvertiser
+
 	// TaskStore backs the A2A task lifecycle. When nil the server falls back to
 	// the a2a-go in-memory store (dev/tests): tasks are lost on restart. Boot
 	// injects the durable Postgres store (internal/taskstore) when a conversation
@@ -95,14 +101,21 @@ func New(deps Deps) http.Handler {
 	store = newMeteredTaskStore(store, metrics)
 
 	executor := assistanta2a.NewExecutor(deps.Runner, logger)
-	handler := a2asrv.NewHandler(executor,
+	// The handler's capability copy MUST be the value the published card
+	// carries: it refuses GetExtendedAgentCard before ever consulting the
+	// producer below when its own copy says false. Push notifications stay
+	// unconfigured, so those methods still reject cleanly.
+	capabilities := assistanta2a.Capabilities()
+	opts := []a2asrv.RequestHandlerOption{
 		a2asrv.WithTaskStore(store),
 		a2asrv.WithLogger(logger),
-		// Advertise streaming; leave push notifications unconfigured so the
-		// push methods reject cleanly (a2a.ErrPushNotificationNotSupported),
-		// matching the TS service's "push unimplemented" behavior.
-		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{Streaming: true}),
-	)
+		a2asrv.WithCapabilityChecks(&capabilities),
+	}
+	if deps.SkillAdvertiser != nil {
+		opts = append(opts, a2asrv.WithExtendedAgentCardProducer(
+			extendedCardProducer(deps.Config, deps.SkillAdvertiser, logger)))
+	}
+	handler := a2asrv.NewHandler(executor, opts...)
 	jsonrpc := a2asrv.NewJSONRPCHandler(handler)
 
 	card := a2asrv.NewStaticAgentCardHandler(assistanta2a.BuildAgentCard(deps.Config))
@@ -150,6 +163,33 @@ func New(deps Deps) http.Handler {
 	// configured), this wrapper still runs but costs a no-op span per
 	// request: no exporter, no network call, no behavioral change.
 	return otelhttp.NewHandler(withRequestID(metrics.instrument(mux), logger), "assistant.http")
+}
+
+// extendedCardProducer answers GetExtendedAgentCard with the services one
+// project is entitled to. The project arrives as req.Tenant — the only field
+// the request carries, and the SAME field the auth middleware authorized (see
+// [assistanta2a.CardRequest] for that overload), so the card can never describe
+// a project the caller was not cleared for.
+func extendedCardProducer(cfg *config.Config, advertiser assistanta2a.SkillAdvertiser, logger *slog.Logger) a2asrv.ExtendedAgentCardProducerFn {
+	return func(ctx context.Context, req *a2a.GetExtendedAgentCardRequest) (*a2a.AgentCard, error) {
+		var project string
+		if req != nil {
+			project = req.Tenant
+		}
+		// No project to scope by ⇒ nothing project-specific may be disclosed,
+		// which is also why the middleware skipped authorization here.
+		if project == "" {
+			return assistanta2a.BuildAgentCard(cfg), nil
+		}
+		skills, err := advertiser.ProjectSkills(ctx, assistanta2a.CardRequest{ProjectName: project})
+		if err != nil {
+			// Degrade like the capability Source does: a generic card beats a
+			// 500 on a discovery endpoint.
+			logger.Warn("a2a.extendedcard.skills_failed", "projectName", project, "error", err.Error())
+			return assistanta2a.BuildAgentCard(cfg), nil
+		}
+		return assistanta2a.BuildExtendedAgentCardFromSkills(cfg, skills), nil
+	}
 }
 
 // readyHandler answers GET /readyz. It runs the dependency check under a short

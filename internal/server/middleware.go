@@ -24,6 +24,9 @@ const (
 	methodSendStreamingMessage = "SendStreamingMessage"
 	methodGetTask              = "GetTask"
 	methodCancelTask           = "CancelTask"
+	// GetExtendedAgentCard carries its project in the spec's only field,
+	// "tenant" — see tenantFromExtendedCardParams.
+	methodGetExtendedAgentCard = "GetExtendedAgentCard"
 )
 
 // maxRequestBodyBytes caps the JSON-RPC body the middleware buffers before
@@ -75,8 +78,9 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	// ── AuthZ ─────────────────────────────────────────────────
-	// A malformed body is left to the JSON-RPC handler to reject with the
-	// proper parse/invalid-request error; we only authorize when we can.
+	// A body we cannot peek is rejected here rather than passed down: the
+	// handler would still dispatch it, and dispatching something we failed to
+	// authorize is exactly the hole peekEnvelope exists to close.
 	if err := m.authorize(ctx, principal, body); err != nil {
 		m.writeAuthErr(w, err, "Authorization failed")
 		return
@@ -102,22 +106,55 @@ func authenticateBearer(ctx context.Context, authenticator auth.Authenticator, r
 	return authenticator.Authenticate(ctx, token)
 }
 
+// rpcEnvelope is the slice of a JSON-RPC request the middleware authorizes on:
+// which method is being called, and the raw params to pull the project out of.
+type rpcEnvelope struct {
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+}
+
+// peekEnvelope reads the method and params that a2a-go will actually dispatch,
+// and FAILS CLOSED when it cannot.
+//
+// The handler decodes with json.Decoder (a2asrv/jsonrpc.go), which stops at the
+// first JSON value and ignores any trailing bytes, whereas json.Unmarshal
+// rejects the same body outright. Peeking with Unmarshal and shrugging off the
+// error therefore let a caller append one junk byte to skip authorization
+// completely while the request still ran. Decode the first value exactly as the
+// handler does, then refuse trailing data so no parser disagreement can reopen
+// that gap.
+func peekEnvelope(body []byte) (rpcEnvelope, error) {
+	var peek rpcEnvelope
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if err := dec.Decode(&peek); err != nil {
+		return peek, malformedBody("Malformed JSON-RPC request body")
+	}
+	if dec.More() {
+		return peek, malformedBody("Unexpected trailing data after JSON-RPC request")
+	}
+	return peek, nil
+}
+
+// malformedBody is a 400, not a 401/403: the request never got far enough to
+// reach a project decision, so reporting it as an auth denial would mislead.
+func malformedBody(message string) *auth.Error {
+	return &auth.Error{Status: http.StatusBadRequest, Message: message}
+}
+
 // authorize resolves the target project from the JSON-RPC request and checks it
-// against the principal. It is DENY-BY-DEFAULT: only the four project-scoped
-// methods (SendMessage/SendStreamingMessage/GetTask/CancelTask) can be allowed,
-// and only when their project check passes. Every other method a2a-go v2
-// dispatches is rejected outright — see the default case for why.
+// against the principal. It is DENY-BY-DEFAULT: only the five project-scoped
+// methods (SendMessage/SendStreamingMessage/GetTask/CancelTask/
+// GetExtendedAgentCard) can be allowed, and only when their project check
+// passes. Every other method a2a-go v2 dispatches is rejected outright — see
+// the default case for why.
 //
 // For an allowed method it still returns nil (defer to the handler) when it
 // cannot resolve the project (missing project, unknown task); those surface
 // downstream as InvalidParams / TaskNotFound, matching the TS flow.
 func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal, body []byte) error {
-	var peek struct {
-		Method string          `json:"method"`
-		Params json.RawMessage `json:"params"`
-	}
-	if err := json.Unmarshal(body, &peek); err != nil {
-		return nil // let the JSON-RPC handler report the parse error
+	peek, err := peekEnvelope(body)
+	if err != nil {
+		return err
 	}
 
 	switch peek.Method {
@@ -146,11 +183,19 @@ func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal
 		}
 		return m.authorizer.AuthorizeProject(ctx, principal, project)
 
+	case methodGetExtendedAgentCard:
+		project := tenantFromExtendedCardParams(peek.Params)
+		if project == "" {
+			return nil // producer answers with the generic public card
+		}
+		return m.authorizer.AuthorizeProject(ctx, principal, project)
+
 	default:
 		// DENY-BY-DEFAULT. a2a-go v2 also dispatches ListTasks, SubscribeToTask
 		// and the push-config methods (CreateTaskPushNotificationConfig,
 		// GetTaskPushNotificationConfig, ListTaskPushNotificationConfigs,
-		// DeleteTaskPushNotificationConfig) plus GetExtendedAgentCard.
+		// DeleteTaskPushNotificationConfig), none of which are project-scoped
+		// here.
 		//
 		// ListTasks stays DENIED even though the durable store now carries the
 		// owning project on every row (internal/taskstore): a2a-go's ListTasks
@@ -172,7 +217,11 @@ func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal
 }
 
 // projectFromSendParams reads the projectName extension from a SendMessage /
-// SendStreamingMessage params object (message.metadata first, then params.metadata).
+// SendStreamingMessage params object (message.metadata first, then
+// params.metadata). Any "tenant" on these params is deliberately IGNORED:
+// a2a-go's client transport auto-stamps a tenant onto every request, so
+// honoring it here would let a stray client default decide the authorized
+// project — and it is not the field the executor reads for the turn.
 func projectFromSendParams(raw json.RawMessage) string {
 	var p struct {
 		Message  *a2a.Message   `json:"message"`
@@ -182,6 +231,20 @@ func projectFromSendParams(raw json.RawMessage) string {
 		return ""
 	}
 	return assistanta2a.ProjectName(p.Message, p.Metadata)
+}
+
+// tenantFromExtendedCardParams reads the project off a GetExtendedAgentCard
+// params object. GetExtendedAgentCardRequest carries only "tenant", so that is
+// the project field for this method — and it is the SAME field the card
+// producer reads, so authorization and card content can never diverge.
+// (SendMessage keeps using message.metadata.projectName: a2a-go's client stamps
+// a tenant onto every request, and we deliberately ignore it there.)
+func tenantFromExtendedCardParams(raw json.RawMessage) string {
+	var p a2a.GetExtendedAgentCardRequest
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return ""
+	}
+	return p.Tenant
 }
 
 func taskIDFromParams(raw json.RawMessage) string {

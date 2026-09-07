@@ -66,15 +66,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 // Compactor exists) and gets identical behavior to newTestServer.
 func newTestServerWithCompactor(t *testing.T, compactor assistanta2a.Compactor) *httptest.Server {
 	t.Helper()
-	cfg, err := config.Load(config.MapGetenv(map[string]string{
-		"MODEL_MODE":                "mock",
-		"AUTHN_TOKENREVIEW_API_URL": "https://control-plane.test",
-		"AUTHZ_SAR_API_URL":         "https://control-plane.test",
-		"PUBLIC_BASE_URL":           "http://assistant.test",
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := testConfig(t)
 	log := logger.Silent()
 	authn, authz := testAuth()
 	app := New(Deps{
@@ -88,6 +80,21 @@ func newTestServerWithCompactor(t *testing.T, compactor assistanta2a.Compactor) 
 	srv := httptest.NewServer(app)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// testConfig is the config every server test boots with.
+func testConfig(t *testing.T) *config.Config {
+	t.Helper()
+	cfg, err := config.Load(config.MapGetenv(map[string]string{
+		"MODEL_MODE":                "mock",
+		"AUTHN_TOKENREVIEW_API_URL": "https://control-plane.test",
+		"AUTHZ_SAR_API_URL":         "https://control-plane.test",
+		"PUBLIC_BASE_URL":           "http://assistant.test",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
 }
 
 // stubAuthenticator resolves a fixed token→subject map. The server tests
@@ -243,17 +250,18 @@ func TestAgentCard(t *testing.T) {
 		if !card.Capabilities.Streaming {
 			t.Errorf("%s: streaming capability should be true", path)
 		}
+		// The flag is a prerequisite, not a nicety: a2aclient short-circuits
+		// GetExtendedAgentCard unless the PUBLIC card advertises it.
+		if !card.Capabilities.ExtendedAgentCard {
+			t.Errorf("%s: extendedAgentCard capability should be true", path)
+		}
 		if _, ok := card.SecuritySchemes["bearer"]; !ok {
 			t.Errorf("%s: bearer security scheme missing", path)
 		}
-		hasSkill := false
-		for _, s := range card.Skills {
-			if s.ID == "project-assistant" {
-				hasSkill = true
-			}
-		}
-		if !hasSkill {
-			t.Errorf("%s: project-assistant skill missing", path)
+		// The public card stays generic: exactly the one skill, no provider
+		// service names, tool names or endpoints.
+		if len(card.Skills) != 1 || card.Skills[0].ID != "project-assistant" {
+			t.Errorf("%s: skills = %+v, want only project-assistant", path, card.Skills)
 		}
 	}
 }
@@ -402,6 +410,8 @@ func TestUnknownMethod(t *testing.T) {
 // leak every project's tasks (with message History) to any valid token. Both
 // must be denied (403) at the auth boundary, together with the push-config
 // methods. A valid, project-granted token must still get a denial — not data.
+// Adding GetExtendedAgentCard to the allow-list widened it by exactly one
+// method; these six stay denied.
 func TestNonGatedMethodsDenied(t *testing.T) {
 	srv := newTestServer(t)
 	denied := []string{
