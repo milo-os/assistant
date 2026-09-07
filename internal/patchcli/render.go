@@ -34,12 +34,16 @@ type Io interface {
 // the client (auth/validation failures), which Run maps to a friendly message.
 func renderChat(events iter.Seq2[a2a.Event, error], jsonOut bool, io Io) (int, error) {
 	var finalState a2a.TaskState
+	var taskID a2a.TaskID
 	wroteAnswer := false
 	answerEndsWithNewline := false
 
 	for ev, err := range events {
 		if err != nil {
 			return 1, err
+		}
+		if id := ev.TaskInfo().TaskID; id != "" {
+			taskID = id
 		}
 		if jsonOut {
 			if b, mErr := json.Marshal(ev); mErr == nil {
@@ -95,6 +99,17 @@ func renderChat(events iter.Seq2[a2a.Event, error], jsonOut bool, io Io) (int, e
 
 	if finalState == a2a.TaskStateCompleted {
 		return 0, nil
+	}
+	// A stream that ended without any terminal state did not end because the
+	// turn did — the connection dropped and whatever was printed is a
+	// fragment. Say so, and name the task: the work continues server-side and
+	// lands in the durable store, so the answer is still retrievable.
+	if !terminalTaskState(finalState) && !jsonOut {
+		msg := "the connection dropped before the turn finished; the answer above is incomplete"
+		if taskID != "" {
+			msg += "\n  the turn is still running — retrieve it with: patch task get " + string(taskID)
+		}
+		io.Err("patch: " + msg + "\n")
 	}
 	return 1, nil
 }
