@@ -1,22 +1,24 @@
-# Publishes the two artifacts the platform deploys: the assistant container
-# image and the kustomize bundle that references it.
-#
-# datum-cloud/infra's Flux OCIRepository pulls
-# oci://ghcr.io/milo-os/assistant-kustomize and its staging overlay filters tags
-# on `.*-main-\d+-\d+`. The reusable workflow's docker/metadata-action rules
-# produce `v0.0.0-<branch>-<YYYYMMDD>-<HHmmss>` for a branch push, so a main
-# build lands as e.g. v0.0.0-main-20260903-121500 and matches.
-#
-# ONE image. It carries both binaries this module builds — the service and the
-# aggregated apiserver — because they are released together and share the
-# conversation-store schema and the assistant.miloapis.com types; separate
-# images could drift into a version skew that nothing prevents. The apiserver
-# Deployment selects its binary with `command`. sink and streamco serve the
-# local playground and the e2e harness and are not published.
+# One image carries both binaries — the service and the aggregated apiserver.
+# They share the conversation-store schema and the assistant.miloapis.com types,
+# so separate images could drift into a version skew nothing prevents.
 name: Build and Publish
 
 on:
+  # Not a bare `push:` — this repo carries ~20 feature branches, and publishing
+  # every one fills ghcr with tags no OCIRepository ever pulls.
   push:
+    branches:
+      - main
+      - integration
+  # PRs publish so a change has an image to deploy before it merges; note this
+  # fires on every push to the head branch, not just when the PR opens.
+  #
+  # No Flux overlay can pull these: a PR tag carries the PR number rather than a
+  # branch name, and the overlays filter on a literal branch segment.
+  pull_request:
+  # Tags are deliberately absent from the push filter: a release fires both
+  # `push` (the tag) and `release: published`, so listing tags would publish
+  # the same release twice.
   release:
     types: ["published"]
 
@@ -28,6 +30,12 @@ jobs:
     # No point building an image if the manifests that reference it are invalid.
     needs:
       - validate-kustomize
+    # A fork PR gets a read-only GITHUB_TOKEN and no secrets, so the ghcr push
+    # can only fail. publish-kustomize-bundle needs this job and skips alongside;
+    # validate-kustomize needs neither and still runs.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       id-token: write
       contents: read
@@ -37,16 +45,19 @@ jobs:
     with:
       image-name: assistant
       # Repository root: the Dockerfile's default target compiles ./cmd/assistant
-      # in-image, so it needs the source tree (the `prebuilt` target that copies
-      # a host-compiled binary is for the local playground only).
+      # in-image, so it needs the source tree.
       context: .
       dockerfile-path: deploy/assistant.Dockerfile
       registry-organization: milo-os
     secrets: inherit
 
   publish-kustomize-bundle:
-    # The image must exist before the bundle that pins it is published —
-    # publishing the bundle is what triggers the Flux rollout.
+    # The image must exist before the bundle that pins it — publishing the bundle
+    # is what triggers the Flux rollout.
+    #
+    # Published for PRs too: the bundle is what pins the image tag, so without one
+    # a PR build can only be deployed by hand-editing the image, which infra's
+    # README warns silently outranks a correctly pinned bundle.
     needs:
       - validate-kustomize
       - publish-container-image
@@ -57,9 +68,9 @@ jobs:
     uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.14.0
     with:
       bundle-name: ghcr.io/milo-os/assistant-kustomize
-      # The whole config/ tree, so the bundle root carries both ./overlays/production
-      # (the workload) and ./milo (the IAM projection) — the two paths infra's
-      # Flux Kustomizations point at.
+      # The whole config/ tree, so the bundle root carries both
+      # ./overlays/production and ./milo — the two paths infra's Flux
+      # Kustomizations point at.
       bundle-path: config
       # Stamp the released tag into base; every overlay composes it, and the
       # apiserver Deployment runs the same image, so one pin covers both.
