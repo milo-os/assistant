@@ -127,7 +127,8 @@ func (e *Executor) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Se
 }
 
 // streamSink turns streamed text deltas into A2A artifact events: the first
-// delta creates the "response" artifact, later deltas append to it.
+// delta creates the "response" artifact, later deltas append to it. Tool
+// activity goes out alongside, as working status updates (see activity.go).
 type streamSink struct {
 	ec         *a2asrv.ExecutorContext
 	yield      func(a2a.Event, error) bool
@@ -149,6 +150,36 @@ func (s *streamSink) OnTextDelta(text string) {
 		ev = a2a.NewArtifactUpdateEvent(s.ec, s.artifactID, a2a.NewTextPart(text))
 	}
 	if !s.yield(ev, nil) {
+		s.stopped = true
+	}
+}
+
+// OnToolStart and OnToolFinish announce one tool call's lifecycle as
+// working-state status updates carrying a [toolActivityData] data part. They
+// keep the task in the working state — the terminal status is still the
+// executor's to emit — so a client that ignores the data part sees nothing
+// new.
+func (s *streamSink) OnToolStart(act ToolActivity) {
+	s.emitActivity(toolActivityData{
+		Kind: toolActivityKind, Phase: toolPhaseStarted,
+		ID: act.ID, Name: act.Name, Summary: act.Summary,
+	})
+}
+
+func (s *streamSink) OnToolFinish(act ToolActivity) {
+	s.emitActivity(toolActivityData{
+		Kind: toolActivityKind, Phase: toolPhaseFinished,
+		ID: act.ID, Name: act.Name, Summary: act.Summary,
+		OK: act.OK, ElapsedMs: act.Elapsed.Milliseconds(),
+	})
+}
+
+func (s *streamSink) emitActivity(data toolActivityData) {
+	if s.stopped || data.Name == "" {
+		return
+	}
+	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, s.ec, a2a.NewDataPart(data))
+	if !s.yield(a2a.NewStatusUpdateEvent(s.ec, a2a.TaskStateWorking, msg), nil) {
 		s.stopped = true
 	}
 }

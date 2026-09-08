@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -204,6 +205,8 @@ const (
 	EventText EventKind = "text-delta"
 	// EventToolCall announces that the model invoked a provider tool.
 	EventToolCall EventKind = "tool-call"
+	// EventToolResult reports that a tool call finished, successfully or not.
+	EventToolResult EventKind = "tool-result"
 )
 
 // Event is one streamed happening during a run. The A2A layer translates these
@@ -212,6 +215,14 @@ type Event struct {
 	Kind     EventKind
 	Text     string
 	ToolName string
+	// ToolCallID correlates an [EventToolCall] with its [EventToolResult];
+	// providers that omit an id leave it empty.
+	ToolCallID string
+	// ToolInput is the call's raw JSON arguments ([EventToolCall] only). It is
+	// caller-summarized before leaving the service — see internal/a2a.
+	ToolInput json.RawMessage
+	// ToolFailed marks an [EventToolResult] the tool reported as an error.
+	ToolFailed bool
 }
 
 // UsageSummary is the run's aggregated token usage and metering outcome.
@@ -562,7 +573,23 @@ func (s *Stream) Recv() (Event, error) {
 			return Event{Kind: EventText, Text: part.Text}, nil
 		case agentcore.StreamPartToolCall:
 			if part.ToolCall != nil {
-				return Event{Kind: EventToolCall, ToolName: part.ToolCall.Name}, nil
+				return Event{
+					Kind:       EventToolCall,
+					ToolName:   part.ToolCall.Name,
+					ToolCallID: part.ToolCall.ID,
+					ToolInput:  part.ToolCall.Input,
+				}, nil
+			}
+		case agentcore.StreamPartToolResult:
+			// Surfaced so callers can close out the activity they showed for
+			// the matching tool call; the content itself stays internal.
+			if part.ToolResult != nil {
+				return Event{
+					Kind:       EventToolResult,
+					ToolName:   part.ToolResult.Name,
+					ToolCallID: part.ToolResult.ToolCallID,
+					ToolFailed: part.ToolResult.IsError,
+				}, nil
 			}
 		case agentcore.StreamPartFinish:
 			s.total = part.TotalUsage
@@ -582,7 +609,7 @@ func (s *Stream) Recv() (Event, error) {
 				s.errMsg = part.Err.Error()
 			}
 		default:
-			// tool-result and step-finish are internal to the run.
+			// step-finish is internal to the run.
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/agent"
@@ -153,9 +154,8 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 }
 
 // conversationRunner adapts an [agent.Conversation] to [assistanta2a.AgentRunner]:
-// it drives the event stream, forwarding text deltas to the sink, then returns
-// the terminal result. Tool-call events are not surfaced to the A2A layer (v0),
-// matching the TS behavior.
+// it drives the event stream, forwarding text deltas and tool activity to the
+// sink, then returns the terminal result.
 type conversationRunner struct {
 	conv *agent.Conversation
 }
@@ -169,6 +169,7 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 	})
 	defer stream.Close()
 
+	activity := newToolActivityTracker()
 	for {
 		ev, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -178,8 +179,13 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 			// A stream error still finalizes into a terminal Result below.
 			break
 		}
-		if ev.Kind == agent.EventText && ev.Text != "" {
-			sink.OnTextDelta(ev.Text)
+		switch ev.Kind {
+		case agent.EventText:
+			if ev.Text != "" {
+				sink.OnTextDelta(ev.Text)
+			}
+		case agent.EventToolCall, agent.EventToolResult:
+			activity.forward(ev, sink)
 		}
 	}
 
@@ -189,6 +195,58 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 		Text:  res.Text,
 		Error: res.Error,
 	}
+}
+
+// toolActivityTracker turns the run loop's tool-call/tool-result event pair
+// into the sink's started/finished callbacks, timing the gap between them.
+//
+// Elapsed is measured from the moment the model asked for the tool rather than
+// from the loop's own execution start (which it does not report): that is also
+// what the user is waiting on, and the difference is the tail of one model
+// stream.
+type toolActivityTracker struct {
+	started map[string]time.Time
+	// names remembers the tool name per call id, since providers may omit the
+	// name on the result.
+	names map[string]string
+}
+
+func newToolActivityTracker() *toolActivityTracker {
+	return &toolActivityTracker{started: map[string]time.Time{}, names: map[string]string{}}
+}
+
+func (t *toolActivityTracker) forward(ev agent.Event, sink assistanta2a.RunSink) {
+	key := ev.ToolCallID
+	if key == "" {
+		key = ev.ToolName // providers that assign no id: one call per name in flight
+	}
+	if ev.Kind == agent.EventToolCall {
+		t.started[key] = time.Now()
+		t.names[key] = ev.ToolName
+		sink.OnToolStart(assistanta2a.ToolActivity{
+			ID:      ev.ToolCallID,
+			Name:    ev.ToolName,
+			Summary: assistanta2a.SummarizeToolInput(ev.ToolInput),
+		})
+		return
+	}
+
+	name := ev.ToolName
+	if name == "" {
+		name = t.names[key]
+	}
+	var elapsed time.Duration
+	if start, ok := t.started[key]; ok {
+		elapsed = time.Since(start)
+	}
+	delete(t.started, key)
+	delete(t.names, key)
+	sink.OnToolFinish(assistanta2a.ToolActivity{
+		ID:      ev.ToolCallID,
+		Name:    name,
+		OK:      !ev.ToolFailed,
+		Elapsed: elapsed,
+	})
 }
 
 // Compact implements [assistanta2a.Compactor] over the same [agent.Conversation]
