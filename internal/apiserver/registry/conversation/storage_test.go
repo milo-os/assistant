@@ -55,7 +55,7 @@ func nsCtx(ns string) context.Context {
 func TestConversationGet(t *testing.T) {
 	now := time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)
 	reader := &fakeReader{convs: map[string][]history.Conversation{
-		"demo": {{ProjectName: "demo", ContextID: "ctx-1", CreatedAt: now, LastActiveAt: now.Add(time.Hour), TurnCount: 3}},
+		"demo": {{ProjectName: "demo", ContextID: "ctx-1", CreatedAt: now, LastActiveAt: now.Add(time.Hour), TurnCount: 3, Title: "why is p-1 down?"}},
 	}}
 	rest := NewConversationREST(reader)
 
@@ -70,11 +70,54 @@ func TestConversationGet(t *testing.T) {
 	if c.Status.MessageCount != 3 {
 		t.Errorf("MessageCount = %d, want 3", c.Status.MessageCount)
 	}
+	if c.Status.Title != "why is p-1 down?" {
+		t.Errorf("Title = %q, want the store's title", c.Status.Title)
+	}
 	if !c.CreationTimestamp.Time.Equal(now) {
 		t.Errorf("CreationTimestamp = %v, want %v", c.CreationTimestamp.Time, now)
 	}
 	if reader.lastProject != "demo" {
 		t.Errorf("query scoped to %q, want demo", reader.lastProject)
+	}
+}
+
+// The name is a separate field from the title, not a replacement for it: a
+// client that shows the name still needs the derived title as its fallback,
+// and a listing that dropped the title on rename could never fall back.
+func TestConversationNameAndTitleAreBothSurfaced(t *testing.T) {
+	reader := &fakeReader{convs: map[string][]history.Conversation{
+		"demo": {
+			{ProjectName: "demo", ContextID: "named", Title: "why is p-1 down?", Name: "dfw quota escalation"},
+			{ProjectName: "demo", ContextID: "unnamed", Title: "why is p-2 down?"},
+		},
+	}}
+	rest := NewConversationREST(reader)
+
+	obj, err := rest.Get(nsCtx("demo"), "named", &metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	c := obj.(*assistant.Conversation)
+	if c.Status.Name != "dfw quota escalation" {
+		t.Errorf("Name = %q, want the store's name", c.Status.Name)
+	}
+	if c.Status.Title != "why is p-1 down?" {
+		t.Errorf("Title = %q, want it kept alongside the name", c.Status.Title)
+	}
+
+	listObj, err := rest.List(nsCtx("demo"), &metainternalversion.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	items := listObj.(*assistant.ConversationList).Items
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	if items[0].Status.Name != "dfw quota escalation" {
+		t.Errorf("list[0].Name = %q", items[0].Status.Name)
+	}
+	if items[1].Status.Name != "" {
+		t.Errorf("list[1].Name = %q, want empty for a conversation never named", items[1].Status.Name)
 	}
 }
 

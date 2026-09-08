@@ -88,7 +88,7 @@ func buildMessage(text, project, contextID string) *a2a.Message {
 // can show a friendlier message instead of treating it as an error.
 var ErrNothingToCompact = errors.New("nothing to compact")
 
-// requestCompact calls POST /v1/compact — the manual, user-triggered history
+// requestCompact calls POST /v1alpha1/compact — the manual, user-triggered history
 // compaction endpoint outside the A2A JSON-RPC surface (there is no message
 // to answer, just a store mutation) — for one project/conversation. It reuses
 // this CLI's usual bearer-token auth ([bearerTransport]) rather than a
@@ -99,7 +99,7 @@ func requestCompact(ctx context.Context, baseURL string, token TokenSource, proj
 	if err != nil {
 		return err
 	}
-	url := strings.TrimRight(baseURL, "/") + "/v1/compact"
+	url := strings.TrimRight(baseURL, "/") + "/v1alpha1/compact"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err

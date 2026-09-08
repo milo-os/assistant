@@ -88,7 +88,7 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // authenticateBearer resolves the bearer token on r to a [auth.Principal], or
 // an [*auth.Error] (401) on a missing/invalid token. It is the exact authn
 // step authMiddleware applies in front of POST /a2a, pulled out so other
-// routes needing the identical bearer-token scheme (POST /v1/compact) don't
+// routes needing the identical bearer-token scheme (POST /v1alpha1/compact) don't
 // duplicate it.
 func authenticateBearer(ctx context.Context, authenticator auth.Authenticator, r *http.Request) (auth.Principal, error) {
 	token := auth.ExtractBearerToken(r.Header.Get("Authorization"))
@@ -196,7 +196,7 @@ func (m *authMiddleware) writeAuthErr(w http.ResponseWriter, err error, fallback
 }
 
 // writeAuthErrWith is [authMiddleware.writeAuthErr] without needing an
-// authMiddleware receiver, for other handlers (POST /v1/compact) sharing the
+// authMiddleware receiver, for other handlers (POST /v1alpha1/compact) sharing the
 // same authn/authz error mapping.
 func writeAuthErrWith(w http.ResponseWriter, logger *slog.Logger, err error, fallbackMsg string) {
 	var authErr *auth.Error

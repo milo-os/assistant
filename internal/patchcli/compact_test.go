@@ -10,7 +10,7 @@ import (
 )
 
 // newTestCompactService starts a bare HTTP server implementing just POST
-// /v1/compact (the CLI never talks A2A for this command, so there's no need
+// /v1alpha1/compact (the CLI never talks A2A for this command, so there's no need
 // for the full a2a-go server stack newTestService sets up for chat). It
 // checks the bearer token against a fixed "good" value and replies according
 // to reply, recording the last decoded request body for assertions.
@@ -23,7 +23,7 @@ func newTestCompactService(t *testing.T, reply map[string]any, status int) (stri
 	t.Helper()
 	spy := &compactRequestSpy{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/compact", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1alpha1/compact", func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != "Bearer good" {
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Missing bearer token"})

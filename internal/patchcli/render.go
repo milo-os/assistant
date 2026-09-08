@@ -89,7 +89,7 @@ func renderChat(events iter.Seq2[a2a.Event, error], jsonOut bool, io Io) (int, e
 }
 
 // renderCompactResult prints the outcome of `patch compact` (POST
-// /v1/compact via [requestCompact]) and returns the process exit code: 0 on
+// /v1alpha1/compact via [requestCompact]) and returns the process exit code: 0 on
 // success or "nothing to compact" (neither is a user-facing failure), 1 on a
 // real error. Unlike renderChat there is no event stream — one request, one
 // outcome — so this mirrors renderTask's simple pretty/--json split instead.

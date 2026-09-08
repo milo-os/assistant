@@ -55,7 +55,7 @@ type (
 	}
 	// streamErrMsg is a transport/stream error surfaced by the a2a client.
 	streamErrMsg struct{ err error }
-	// compactDoneMsg ends a /compact request (POST /v1/compact, outside the
+	// compactDoneMsg ends a /compact request (POST /v1alpha1/compact, outside the
 	// a2a client): err is nil on success, [ErrNothingToCompact] when the
 	// server had nothing to fold, or any other error on a real failure.
 	compactDoneMsg struct{ err error }
@@ -193,7 +193,7 @@ type chatModel struct {
 	client  *serviceClient
 	project string
 	view    ReadView // how the /resume picker reaches the aggregated API
-	baseURL string   // for /compact's POST /v1/compact call (outside the a2a client)
+	baseURL string   // for /compact's POST /v1alpha1/compact call (outside the a2a client)
 	token   TokenSource
 
 	vp       viewport.Model
@@ -1130,7 +1130,7 @@ func (m *chatModel) stream(text, contextID string) {
 	m.prog.Send(streamDoneMsg{contextID: seen})
 }
 
-// compact runs one manual "/compact" request against POST /v1/compact — a
+// compact runs one manual "/compact" request against POST /v1alpha1/compact — a
 // plain REST call, not the a2a client, since there is no message to answer —
 // and reports the outcome back via p.Send, the same producer-in-a-goroutine
 // pattern [chatModel.stream] uses.

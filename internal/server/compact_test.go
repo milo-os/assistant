@@ -29,7 +29,7 @@ func (f *fakeCompactor) Compact(_ context.Context, req assistanta2a.CompactReque
 func postCompact(t *testing.T, srv *httptest.Server, token string, body map[string]any) *http.Response {
 	t.Helper()
 	raw, _ := json.Marshal(body)
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/compact", bytes.NewReader(raw))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1alpha1/compact", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
