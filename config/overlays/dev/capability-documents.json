@@ -7,14 +7,31 @@
       "namespace": "demo-project"
     },
     "spec": {
-      "serviceRef": { "name": "streaming-streamco-example" },
+      "serviceRef": {
+        "name": "streaming-streamco-example"
+      },
       "serviceName": "streaming.streamco.example",
-      "serviceAgentRef": { "name": "streamco-streaming-agent" },
+      "serviceAgentRef": {
+        "name": "streamco-streaming-agent"
+      },
       "configurationVersion": "v1-playground",
       "reportingProject": "streamco-platform",
       "knowledge": {
+        "sources": [
+          {
+            "type": "LLMDocs",
+            "title": "StreamCo overview",
+            "url": "http://streamco.patch-playground.svc.cluster.local:7810/llms-full.txt"
+          }
+        ],
         "concepts": [
-          { "gvk": { "group": "streaming.streamco.example", "kind": "Stream" }, "summary": "A live media stream" }
+          {
+            "gvk": {
+              "group": "streaming.streamco.example",
+              "kind": "Stream"
+            },
+            "summary": "A live media stream"
+          }
         ]
       },
       "tools": {
@@ -41,12 +58,25 @@
         }
       ],
       "authority": {
-        "reads": [{ "gvk": { "group": "streaming.streamco.example", "kind": "*" } }],
+        "reads": [
+          {
+            "gvk": {
+              "group": "streaming.streamco.example",
+              "kind": "*"
+            }
+          }
+        ],
         "maxTaskDurationSeconds": 60
       }
     },
     "status": {
-      "conditions": [{ "type": "Ready", "status": "True", "reason": "AllAgentGatesOpen" }]
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "AllAgentGatesOpen"
+        }
+      ]
     }
   }
 ]
