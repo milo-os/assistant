@@ -102,3 +102,35 @@ type CapabilityGapReportList struct {
 	metav1.ListMeta
 	Items []CapabilityGapReport
 }
+
+// AssistantEndpoint is the internal form of the endpoint discovery resource.
+// See the v1alpha1 type for what it is and why it exists.
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type AssistantEndpoint struct {
+	metav1.TypeMeta
+	metav1.ObjectMeta
+
+	Spec AssistantEndpointSpec
+}
+
+// AssistantEndpointSpec describes how to reach the service.
+type AssistantEndpointSpec struct {
+	URL           string
+	AgentCardPath string
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type AssistantEndpointList struct {
+	metav1.TypeMeta
+	metav1.ListMeta
+	Items []AssistantEndpoint
+}
+
+const (
+	// AssistantEndpointName is the name of the singleton endpoint object. One
+	// assistant serves the control plane, so there is exactly one.
+	AssistantEndpointName = "assistant"
+
+	// DefaultAgentCardPath is the well-known A2A agent card location.
+	DefaultAgentCardPath = "/.well-known/agent-card.json"
+)

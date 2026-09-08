@@ -1,6 +1,15 @@
 # Read-only access to conversation history through the conversations aggregated
 # apiserver. Deliberately excludes conversations.create: a viewer can audit past
 # turns without being able to spend model budget starting new ones.
+#
+# assistantendpoints.get/list rides along with the read side rather than with
+# the creator role: `datumctl patch` calls it first, before any conversation
+# exists, to discover the service's address. Withholding it from a viewer would
+# leave them able to read history only if someone told them the hostname out of
+# band — which is the problem the endpoint resource exists to remove. Reading it
+# grants nothing on its own: it returns the address the operator already
+# configured, and every A2A request to that address is authenticated and
+# authorized again per project by the service itself.
 apiVersion: iam.miloapis.com/v1alpha1
 kind: Role
 metadata:
@@ -15,3 +24,5 @@ spec:
     - assistant.miloapis.com/conversations.get
     - assistant.miloapis.com/conversations.list
     - assistant.miloapis.com/capabilitygapreports.list
+    - assistant.miloapis.com/assistantendpoints.get
+    - assistant.miloapis.com/assistantendpoints.list

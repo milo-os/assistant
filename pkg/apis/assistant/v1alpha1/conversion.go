@@ -36,6 +36,24 @@ func RegisterConversions(s *runtime.Scheme) error {
 			},
 		},
 		{
+			(*assistant.AssistantEndpoint)(nil), (*AssistantEndpoint)(nil),
+			func(a, b any, sc conversion.Scope) error {
+				return convert_v1alpha1_AssistantEndpoint_To_assistant(a.(*AssistantEndpoint), b.(*assistant.AssistantEndpoint))
+			},
+			func(a, b any, sc conversion.Scope) error {
+				return convert_assistant_AssistantEndpoint_To_v1alpha1(a.(*assistant.AssistantEndpoint), b.(*AssistantEndpoint))
+			},
+		},
+		{
+			(*assistant.AssistantEndpointList)(nil), (*AssistantEndpointList)(nil),
+			func(a, b any, sc conversion.Scope) error {
+				return convert_v1alpha1_AssistantEndpointList_To_assistant(a.(*AssistantEndpointList), b.(*assistant.AssistantEndpointList))
+			},
+			func(a, b any, sc conversion.Scope) error {
+				return convert_assistant_AssistantEndpointList_To_v1alpha1(a.(*assistant.AssistantEndpointList), b.(*AssistantEndpointList))
+			},
+		},
+		{
 			(*assistant.ConversationMessages)(nil), (*ConversationMessages)(nil),
 			func(a, b any, sc conversion.Scope) error {
 				return convert_v1alpha1_ConversationMessages_To_assistant(a.(*ConversationMessages), b.(*assistant.ConversationMessages))

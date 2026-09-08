@@ -167,3 +167,45 @@ func convert_assistant_CapabilityGapReportList_To_v1alpha1(in *assistant.Capabil
 	}
 	return nil
 }
+
+// --- AssistantEndpoint ---
+
+func convert_v1alpha1_AssistantEndpoint_To_assistant(in *AssistantEndpoint, out *assistant.AssistantEndpoint) error {
+	out.ObjectMeta = in.ObjectMeta
+	out.Spec = assistant.AssistantEndpointSpec{
+		URL:           in.Spec.URL,
+		AgentCardPath: in.Spec.AgentCardPath,
+	}
+	return nil
+}
+
+func convert_assistant_AssistantEndpoint_To_v1alpha1(in *assistant.AssistantEndpoint, out *AssistantEndpoint) error {
+	out.ObjectMeta = in.ObjectMeta
+	out.Spec = AssistantEndpointSpec{
+		URL:           in.Spec.URL,
+		AgentCardPath: in.Spec.AgentCardPath,
+	}
+	return nil
+}
+
+func convert_v1alpha1_AssistantEndpointList_To_assistant(in *AssistantEndpointList, out *assistant.AssistantEndpointList) error {
+	out.ListMeta = in.ListMeta
+	out.Items = make([]assistant.AssistantEndpoint, len(in.Items))
+	for i := range in.Items {
+		if err := convert_v1alpha1_AssistantEndpoint_To_assistant(&in.Items[i], &out.Items[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func convert_assistant_AssistantEndpointList_To_v1alpha1(in *assistant.AssistantEndpointList, out *AssistantEndpointList) error {
+	out.ListMeta = in.ListMeta
+	out.Items = make([]AssistantEndpoint, len(in.Items))
+	for i := range in.Items {
+		if err := convert_assistant_AssistantEndpoint_To_v1alpha1(&in.Items[i], &out.Items[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
