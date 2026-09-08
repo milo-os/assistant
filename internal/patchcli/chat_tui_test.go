@@ -1,13 +1,15 @@
-package main
+package patchcli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
 	spin "charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
 	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
@@ -25,11 +27,14 @@ func newTestModel() *chatModel {
 	ti.Focus()
 	sp := spin.New(spin.WithSpinner(spin.Dot))
 	return &chatModel{
-		project: "demo-project",
-		ti:      ti,
-		sp:      sp,
-		st:      st,
-		width:   120,
+		project:    "demo-project",
+		ti:         ti,
+		sp:         sp,
+		st:         st,
+		width:      120,
+		termHeight: 24,
+		vp:         viewport.New(viewport.WithWidth(120), viewport.WithHeight(10)),
+		follow:     true,
 	}
 }
 
@@ -381,6 +386,116 @@ func TestCompactDoneMsg_Error(t *testing.T) {
 	}
 	if len(m.turns) != 1 || !strings.Contains(m.turns[0], "boom") {
 		t.Fatalf("turns = %v, want the error text surfaced", m.turns)
+	}
+}
+
+// ── scrollback ──────────────────────────────
+
+// fillTranscript gives the model more finalized turns than the 10-row test
+// viewport can show, so there is something to scroll back through.
+func fillTranscript(m *chatModel, n int) {
+	for i := 0; i < n; i++ {
+		m.turns = append(m.turns, m.turnBlock("You", fmt.Sprintf("message %d", i)))
+		m.raw = append(m.raw, transcriptTurn{role: "user", content: fmt.Sprintf("message %d", i)})
+	}
+	m.rebuildViewport()
+}
+
+func TestScrollUpStopsFollowing(t *testing.T) {
+	m := newTestModel()
+	fillTranscript(m, 40)
+	if !m.vp.AtBottom() {
+		t.Fatal("a fresh transcript should start pinned to the bottom")
+	}
+	m.onKey(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.follow {
+		t.Fatal("pgup should stop following the newest output")
+	}
+	if m.vp.AtBottom() {
+		t.Fatal("pgup should have moved the viewport off the bottom")
+	}
+}
+
+// The regression this whole feature exists for: history the user scrolled back
+// to must stay put while an answer streams in below it.
+func TestStreamChunkKeepsPositionWhileScrolledUp(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	fillTranscript(m, 40)
+	m.onKey(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	before := m.vp.YOffset()
+
+	for _, chunk := range []string{"one", " two", " three"} {
+		m.Update(streamChunkMsg{text: chunk})
+	}
+
+	if m.follow {
+		t.Fatal("streaming should not re-arm follow on its own")
+	}
+	if got := m.vp.YOffset(); got != before {
+		t.Fatalf("streamed chunks moved the view: offset %d, want %d", got, before)
+	}
+}
+
+func TestStreamChunkFollowsWhenAtBottom(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	fillTranscript(m, 40)
+	m.Update(streamChunkMsg{text: strings.Repeat("more output\n", 20)})
+	if !m.vp.AtBottom() {
+		t.Fatal("streaming while following should keep the newest output in view")
+	}
+}
+
+func TestEscReturnsToTheLatest(t *testing.T) {
+	m := newTestModel()
+	fillTranscript(m, 40)
+	m.onKey(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m.onKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if !m.follow || !m.vp.AtBottom() {
+		t.Fatalf("esc should jump to the bottom and resume following (follow=%v atBottom=%v)",
+			m.follow, m.vp.AtBottom())
+	}
+}
+
+// Scrolling back down to the end re-arms follow without needing esc.
+func TestScrollingBackToBottomResumesFollow(t *testing.T) {
+	m := newTestModel()
+	fillTranscript(m, 40)
+	m.onKey(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	for i := 0; i < 10 && !m.vp.AtBottom(); i++ {
+		m.onKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	}
+	if !m.follow {
+		t.Fatal("reaching the bottom again should resume following")
+	}
+}
+
+// Bare arrows scroll only when no slash-command suggestion list is showing,
+// which owns ↑/↓ for cycling matches.
+func TestArrowsScrollOnlyWithoutSuggestions(t *testing.T) {
+	m := newTestModel()
+	fillTranscript(m, 40)
+	m.onKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.follow {
+		t.Fatal("bare up-arrow should scroll the transcript")
+	}
+
+	m.onKey(tea.KeyPressMsg{Code: tea.KeyEscape}) // back to the bottom
+	typeText(t, m, "/re")
+	before := m.vp.YOffset()
+	m.onKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	if got := m.vp.YOffset(); got != before {
+		t.Fatalf("up-arrow scrolled while suggestions were showing: offset %d, want %d", got, before)
+	}
+}
+
+func TestMouseWheelScrolls(t *testing.T) {
+	m := newTestModel()
+	fillTranscript(m, 40)
+	m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if m.follow || m.vp.AtBottom() {
+		t.Fatal("the wheel should scroll the transcript and stop following")
 	}
 }
 

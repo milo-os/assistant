@@ -17,7 +17,7 @@
 // Threading: the conversation's contextId is learned from the event stream (as
 // the REPL does) and sent on every later turn, so the whole session is one
 // conversation with memory.
-package main
+package patchcli
 
 import (
 	"context"
@@ -39,7 +39,6 @@ import (
 	glamourstyles "github.com/charmbracelet/glamour/styles"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/a2aproject/a2a-go/v2/a2aclient"
 
 	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
 )
@@ -191,11 +190,11 @@ func newInputStyles(dark bool) textinput.Styles {
 type chatModel struct {
 	ctx        context.Context
 	prog       *tea.Program
-	client     *a2aclient.Client
+	client     *serviceClient
 	project    string
 	kubeconfig string // for the /resume picker's kubectl calls; "" uses normal resolution
 	baseURL    string // for /compact's POST /v1/compact call (outside the a2a client)
-	token      string
+	token      TokenSource
 
 	vp       viewport.Model
 	ti       textinput.Model
@@ -209,6 +208,12 @@ type chatModel struct {
 	answer    strings.Builder  // in-progress assistant answer (raw markdown)
 	working   bool
 	dark      bool
+
+	// follow pins the transcript to the newest output. It is cleared when the
+	// user scrolls up and restored when they reach the bottom again (or send a
+	// new message), so a streaming answer never yanks the view away from
+	// history the user is reading.
+	follow bool
 
 	// overlay is "" (normal chat), "help", or "status" — a read-only reference
 	// screen shown full-screen and dismissed by any keypress (see onKey).
@@ -229,7 +234,7 @@ type chatModel struct {
 	width        int // full terminal width; content width subtracts padding
 }
 
-func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextID, firstMessage, kubeconfig, baseURL, token string) int {
+func runChatTUI(ctx context.Context, client *serviceClient, project, contextID, firstMessage, kubeconfig, baseURL string, token TokenSource) int {
 	st := newStyles(false) // provisional (light) until the background is learned
 
 	sp := spin.New(spin.WithSpinner(spin.Dot), spin.WithStyle(st.patch))
@@ -252,6 +257,7 @@ func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextI
 		sp:           sp,
 		st:           st,
 		firstMessage: firstMessage,
+		follow:       true,
 	}
 
 	p := tea.NewProgram(m, tea.WithContext(ctx))
@@ -265,6 +271,20 @@ func runChatTUI(ctx context.Context, client *a2aclient.Client, project, contextI
 		return 1
 	}
 	return 0
+}
+
+// newView wraps a rendered body in the tea.View every screen here uses. Both
+// settings must be identical across screens: the renderer diffs the mode
+// against the previous frame, so a view that forgot MouseMode would disable
+// mouse reporting for as long as it was showing (and re-enable it after).
+func (m *chatModel) newView(body string) tea.View {
+	v := tea.NewView(body)
+	v.AltScreen = true
+	// Cell motion gives us wheel events for scrolling the transcript. It also
+	// means the terminal, not the app, stops owning click-drag: selecting text
+	// to copy needs Option (macOS) or Shift (Linux) held down.
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
 }
 
 func (m *chatModel) Init() tea.Cmd {
@@ -337,7 +357,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case streamErrMsg:
-		errText := friendlyError(msg.err)
+		errText := friendlyError(msg.err, m.client.errs)
 		m.turns = append(m.turns, m.st.err.Render("patch: "+errText))
 		m.raw = append(m.raw, transcriptTurn{role: "system", content: "error: " + errText})
 		m.answer.Reset()
@@ -362,9 +382,15 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(msg)
-		return m, cmd
+		if m.picker.open || m.overlay != "" {
+			// The transcript isn't on screen; scrolling it here would leave the
+			// user somewhere they never navigated to once the picker closes.
+			return m, nil
+		}
+		// The viewport handles wheel events itself (MouseWheelEnabled, 3 lines
+		// a notch); scrollBy only re-derives follow from where it ends up.
+		m.scrollBy(func() { m.vp, _ = m.vp.Update(msg) })
+		return m, nil
 
 	case pickerListMsg:
 		m.picker.loading = false
@@ -413,6 +439,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.raw = append(m.raw, transcriptTurn{role: mm.Role, content: mm.Content})
 		}
 		m.picker = pickerState{}
+		m.follow = true
 		m.rebuildViewport()
 		return m, nil
 	}
@@ -464,6 +491,7 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.turns = nil
 			m.raw = nil
 			m.answer.Reset()
+			m.follow = true
 			m.rebuildViewport()
 			return m, nil
 		case "/compact":
@@ -519,16 +547,36 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if msg.Text == "" && !isEditingKey(msg.String()) {
-			return m, nil
+		// Nothing suggested: scroll the transcript a line at a time. (This
+		// branch previously dropped the key — arrows carry no .Text and aren't
+		// editing keys, so the text input never saw them anyway.)
+		if msg.String() == "up" {
+			m.scrollBy(func() { m.vp.ScrollUp(1) })
+		} else {
+			m.scrollBy(func() { m.vp.ScrollDown(1) })
 		}
-		var cmd tea.Cmd
-		m.ti, cmd = m.ti.Update(msg)
-		return m, cmd
-	case "pgup", "pgdown", "shift+up", "shift+down":
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(msg)
-		return m, cmd
+		return m, nil
+	case "pgup":
+		m.scrollBy(m.vp.PageUp)
+		return m, nil
+	case "pgdown":
+		m.scrollBy(m.vp.PageDown)
+		return m, nil
+	case "shift+up":
+		m.scrollBy(func() { m.vp.ScrollUp(1) })
+		return m, nil
+	case "shift+down":
+		m.scrollBy(func() { m.vp.ScrollDown(1) })
+		return m, nil
+	case "ctrl+home":
+		m.scrollBy(func() { m.vp.GotoTop() })
+		return m, nil
+	case "ctrl+end", "esc":
+		// esc doubles as "back to the latest" — the way out of having scrolled
+		// up, without hunting for the bottom. It's unbound outside the picker,
+		// which is handled earlier in this function.
+		m.scrollBy(func() { m.vp.GotoBottom() })
+		return m, nil
 	default:
 		// Only forward genuine editing input to the text field. Printable keys
 		// carry non-empty .Text; editing keys (backspace, arrows, …) don't but
@@ -716,9 +764,7 @@ func (m *chatModel) pickerView() tea.View {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, b.String(), "    ", m.previewPane())
 	}
 
-	v := tea.NewView(m.st.box.Render(body))
-	v.AltScreen = true
-	return v
+	return m.newView(m.st.box.Render(body))
 }
 
 // pickerPreviewMaxLines caps how many messages the preview pane shows: the
@@ -921,11 +967,11 @@ func (m *chatModel) helpView() tea.View {
 	for _, h := range helpText {
 		b.WriteString("  " + m.st.you.Render(h.cmd) + "  " + m.st.subtle.Render(h.desc) + "\n")
 	}
-	b.WriteString("\n" + m.st.hint.Render("any key to dismiss"))
+	b.WriteString("\n" + m.st.hint.Render("scroll  ↑/↓ · pgup/pgdn · mouse wheel · esc jumps to the latest"))
+	b.WriteString("\n" + m.st.hint.Render("mouse reporting is on, so selecting text to copy needs option (macOS) or shift held"))
+	b.WriteString("\n\n" + m.st.hint.Render("any key to dismiss"))
 
-	v := tea.NewView(m.st.box.Render(b.String()))
-	v.AltScreen = true
-	return v
+	return m.newView(m.st.box.Render(b.String()))
 }
 
 // statusView renders the /status overlay: the current session's project,
@@ -943,9 +989,7 @@ func (m *chatModel) statusView() tea.View {
 	fmt.Fprintf(&b, "  %s  %d\n", m.st.you.Render("turns"), len(m.raw))
 	b.WriteString("\n" + m.st.hint.Render("any key to dismiss"))
 
-	v := tea.NewView(m.st.box.Render(b.String()))
-	v.AltScreen = true
-	return v
+	return m.newView(m.st.box.Render(b.String()))
 }
 
 // exportTranscript writes the current conversation to a plain-text markdown
@@ -979,9 +1023,7 @@ func (m *chatModel) exportTranscript() (string, error) {
 
 func (m *chatModel) View() tea.View {
 	if !m.ready {
-		v := tea.NewView(m.st.box.Render("starting patch chat…"))
-		v.AltScreen = true
-		return v
+		return m.newView(m.st.box.Render("starting patch chat…"))
 	}
 	if m.picker.open {
 		return m.pickerView()
@@ -996,7 +1038,18 @@ func (m *chatModel) View() tea.View {
 	if m.working {
 		status = m.sp.View() + " " + m.st.subtle.Render("thinking…")
 	} else {
-		status = m.st.hint.Render("enter to send · pgup/pgdn scroll · / for commands (tab completes) · ctrl+c or /quit to leave")
+		status = m.st.hint.Render("enter to send · ↑/↓ pgup/pgdn scroll · / for commands (tab completes) · ctrl+c or /quit to leave")
+	}
+	// Scrolled off the bottom is a mode the user can get stuck in — say so, and
+	// say the way out. It replaces the usual hint, but never the spinner: not
+	// following is exactly when you can't see that an answer is still arriving.
+	if !m.follow {
+		scrolled := m.st.hint.Render(fmt.Sprintf("scrolled · %d%% · esc for the latest", int(m.vp.ScrollPercent()*100)))
+		if m.working {
+			status += m.st.hint.Render("  ·  ") + scrolled
+		} else {
+			status = scrolled
+		}
 	}
 	// One blank line between each major region for an even vertical rhythm:
 	// header → blank → transcript → gap/suggestions → bordered input → status.
@@ -1008,6 +1061,11 @@ func (m *chatModel) View() tea.View {
 	// input off-screen.
 	if h := m.viewportHeight(); h != m.vp.Height() {
 		m.vp.SetHeight(h)
+		if m.follow {
+			m.vp.GotoBottom()
+		} else {
+			m.vp.SetYOffset(m.vp.YOffset()) // SetHeight doesn't re-clamp; this does
+		}
 	}
 	gap := m.suggestionBar()
 	body := strings.Join([]string{
@@ -1019,9 +1077,7 @@ func (m *chatModel) View() tea.View {
 		status,
 	}, "\n")
 
-	v := tea.NewView(m.st.box.Render(body))
-	v.AltScreen = true
-	return v
+	return m.newView(m.st.box.Render(body))
 }
 
 // submit records the user's line, starts the spinner, and launches the
@@ -1032,6 +1088,7 @@ func (m *chatModel) submit(text string) tea.Cmd {
 	m.raw = append(m.raw, transcriptTurn{role: "user", content: text})
 	m.answer.Reset()
 	m.working = true
+	m.follow = true
 	m.rebuildViewport()
 
 	go m.stream(text, m.contextID)
@@ -1148,6 +1205,7 @@ func (m *chatModel) layout(width, height int) tea.Cmd {
 	m.ti.SetWidth(tiWidth)
 	m.renderer = newMarkdownRenderer(cw, m.dark) // glamour wrap stays at content width
 	m.ready = true
+	m.follow = true // the resize re-wraps every line, so the old offset is meaningless
 	m.rebuildViewport()
 
 	if !m.sentFirst && m.firstMessage != "" {
@@ -1166,7 +1224,9 @@ func (m *chatModel) turnBlock(label, body string) string {
 }
 
 // rebuildViewport composes the transcript (finalized turns plus any in-progress
-// answer) into the viewport, one blank line between turns, pinned to the bottom.
+// answer) into the viewport, one blank line between turns. It only pins to the
+// bottom while following; if the user has scrolled up, their position is kept
+// so streamed chunks accumulate below instead of dragging the view down.
 func (m *chatModel) rebuildViewport() {
 	blocks := make([]string, 0, len(m.turns)+1)
 	blocks = append(blocks, m.turns...)
@@ -1178,7 +1238,22 @@ func (m *chatModel) rebuildViewport() {
 		blocks = append(blocks, m.turnBlock(m.st.patch.Render("Patch"), ans))
 	}
 	m.vp.SetContent(strings.Join(blocks, "\n\n"))
-	m.vp.GotoBottom()
+	if m.follow {
+		m.vp.GotoBottom()
+	} else {
+		// SetContent keeps yOffset as-is; re-set it so the viewport re-clamps
+		// against the new line count (SetYOffset clamps, plain assignment
+		// wouldn't).
+		m.vp.SetYOffset(m.vp.YOffset())
+	}
+}
+
+// scrollBy runs a viewport movement and re-derives follow from where it landed:
+// scrolling off the bottom stops auto-follow, scrolling back to it resumes.
+// Every scroll path (keys and wheel) goes through here so the two can't drift.
+func (m *chatModel) scrollBy(move func()) {
+	move()
+	m.follow = m.vp.AtBottom()
 }
 
 // renderMarkdown formats markdown through glamour, falling back to the raw text

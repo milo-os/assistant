@@ -10,7 +10,7 @@
 // The caller authenticates with their normal k8s identity (KUBECONFIG), NOT the
 // A2A service's PATCH_TOKEN. Once you have a context id, resume it with
 // `patch chat --context-id <id>`.
-package main
+package patchcli
 
 import (
 	"context"
@@ -28,9 +28,9 @@ import (
 
 // runConversationsList prints a table of the caller's conversations in a
 // project (id, created, last-active, message count), newest activity first.
-func runConversationsList(ctx context.Context, cmd command, io Io) int {
-	out, err := kubectlJSON(ctx, cmd.kubeconfig,
-		"get", "conversations", "-n", cmd.project, "-o", "json")
+func runConversationsList(ctx context.Context, inv Invocation, io Io) int {
+	out, err := kubectlJSON(ctx, inv.Kubeconfig,
+		"get", "conversations", "-n", inv.Project, "-o", "json")
 	if err != nil {
 		return failKubectl(io, err, out)
 	}
@@ -41,7 +41,7 @@ func runConversationsList(ctx context.Context, cmd command, io Io) int {
 		return 1
 	}
 
-	if cmd.json {
+	if inv.JSON {
 		io.Out(string(out))
 		if !strings.HasSuffix(string(out), "\n") {
 			io.Out("\n")
@@ -50,7 +50,7 @@ func runConversationsList(ctx context.Context, cmd command, io Io) int {
 	}
 
 	if len(list.Items) == 0 {
-		io.Err("no conversations in project " + cmd.project + "\n")
+		io.Err("no conversations in project " + inv.Project + "\n")
 		return 0
 	}
 
@@ -71,22 +71,22 @@ func runConversationsList(ctx context.Context, cmd command, io Io) int {
 	}
 	_ = tw.Flush()
 	io.Out(b.String())
-	io.Err("\nresume one with:  patch chat --context-id <context-id> --project " + cmd.project + "\n")
+	io.Err("\nresume one with:  patch chat --context-id <context-id> --project " + inv.Project + "\n")
 	return 0
 }
 
 // runConversationsShow prints the full transcript of one conversation, fetched
 // from the `messages` subresource.
-func runConversationsShow(ctx context.Context, cmd command, io Io) int {
+func runConversationsShow(ctx context.Context, inv Invocation, io Io) int {
 	path := fmt.Sprintf(
 		"/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/conversations/%s/messages",
-		cmd.project, cmd.contextID)
-	out, err := kubectlJSON(ctx, cmd.kubeconfig, "get", "--raw", path)
+		inv.Project, inv.ContextID)
+	out, err := kubectlJSON(ctx, inv.Kubeconfig, "get", "--raw", path)
 	if err != nil {
 		return failKubectl(io, err, out)
 	}
 
-	if cmd.json {
+	if inv.JSON {
 		io.Out(string(out))
 		if !strings.HasSuffix(string(out), "\n") {
 			io.Out("\n")
@@ -101,11 +101,11 @@ func runConversationsShow(ctx context.Context, cmd command, io Io) int {
 	}
 
 	io.Err(fmt.Sprintf("conversation %s  (%s, %d messages)\n\n",
-		cmd.contextID, cmd.project, len(msgs.Items)))
+		inv.ContextID, inv.Project, len(msgs.Items)))
 	for _, m := range msgs.Items {
 		io.Out(fmt.Sprintf("[%d] %s:\n%s\n\n", m.Seq, m.Role, strings.TrimRight(m.Content, "\n")))
 	}
-	io.Err("resume with:  patch chat --context-id " + cmd.contextID + " --project " + cmd.project + "\n")
+	io.Err("resume with:  patch chat --context-id " + inv.ContextID + " --project " + inv.Project + "\n")
 	return 0
 }
 

@@ -1,4 +1,4 @@
-package main
+package patchcli
 
 import (
 	"context"
@@ -41,7 +41,7 @@ func newTestCompactService(t *testing.T, reply map[string]any, status int) (stri
 
 func TestRequestCompact_Success(t *testing.T) {
 	base, spy := newTestCompactService(t, map[string]any{"compacted": true}, http.StatusOK)
-	err := requestCompact(context.Background(), base, "good", "demo-project", "ctx-1")
+	err := requestCompact(context.Background(), base, StaticToken("good"), "demo-project", "ctx-1")
 	if err != nil {
 		t.Fatalf("requestCompact: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestRequestCompact_Success(t *testing.T) {
 
 func TestRequestCompact_NothingToCompact(t *testing.T) {
 	base, _ := newTestCompactService(t, map[string]any{"compacted": false, "reason": "nothing to compact"}, http.StatusOK)
-	err := requestCompact(context.Background(), base, "good", "demo-project", "ctx-1")
+	err := requestCompact(context.Background(), base, StaticToken("good"), "demo-project", "ctx-1")
 	if err != ErrNothingToCompact {
 		t.Fatalf("err = %v, want ErrNothingToCompact", err)
 	}
@@ -60,7 +60,7 @@ func TestRequestCompact_NothingToCompact(t *testing.T) {
 
 func TestRequestCompact_ServerError(t *testing.T) {
 	base, _ := newTestCompactService(t, map[string]any{"error": "boom"}, http.StatusInternalServerError)
-	err := requestCompact(context.Background(), base, "good", "demo-project", "ctx-1")
+	err := requestCompact(context.Background(), base, StaticToken("good"), "demo-project", "ctx-1")
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v, want it to mention the server's message", err)
 	}
@@ -68,7 +68,7 @@ func TestRequestCompact_ServerError(t *testing.T) {
 
 func TestRequestCompact_Unauthorized(t *testing.T) {
 	base, _ := newTestCompactService(t, map[string]any{"compacted": true}, http.StatusOK)
-	err := requestCompact(context.Background(), base, "wrong-token", "demo-project", "ctx-1")
+	err := requestCompact(context.Background(), base, StaticToken("wrong-token"), "demo-project", "ctx-1")
 	if err == nil {
 		t.Fatal("err = nil, want an error for a bad token")
 	}
