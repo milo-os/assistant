@@ -374,10 +374,27 @@ Options:
   -i, --interactive   Multi-turn chat session; the conversation id is kept
                       across turns (Ctrl-D or /quit to leave)
       --tui           Full-screen Bubble Tea chat UI: scrollable transcript
-                      (↑/↓, pgup/pgdn, or the mouse wheel; esc jumps back to
-                      the latest), live-streamed answers rendered as markdown,
-                      spinner while the assistant works, tab-completion for
-                      slash commands. Slash commands: /resume (search and
+                      (pgup/pgdn or the mouse wheel; esc jumps back to the
+                      latest when idle), live-streamed answers rendered as
+                      markdown, spinner while the assistant works,
+                      tab-completion for slash commands. While an answer is
+                      streaming, esc interrupts the turn (keeping what already
+                      arrived) and enter queues your message to be sent as its
+                      own turn once the running one finishes — up to 5, listed
+                      above the composer, and dropped by a first esc.
+                      Ctrl-C interrupts, then clears the draft, then leaves;
+                      twice within two seconds always leaves.
+                      The composer is multi-line: enter sends,
+                      shift+enter / ctrl+j / alt+enter (or a trailing
+                      backslash before enter) start a new line, and the box
+                      grows with the message. ↑/↓ recall past prompts while
+                      the composer is one line and unedited, move the cursor
+                      once it isn't, and scroll the transcript when there is
+                      no history left to recall; ctrl+r searches history.
+                      History is kept per project under your config dir. A
+                      paste over 3 lines or 800 characters collapses to a
+                      "[Pasted text #1 +42 lines]" chip that expands again on
+                      send. Slash commands: /resume (search and
                       resume a past conversation, with a live preview of each
                       one's transcript as you move the cursor), /clear (start a
                       fresh one), /compact (force history compaction now,
@@ -385,8 +402,13 @@ Options:
                       /rename <name> (name this conversation),
                       /export (save the transcript to a file),
                       /status (show project/conversation/turn count), /help
-                      (list commands), /quit or /exit (leave; Ctrl-C also
-                      leaves)
+                      (list commands), /quit or /exit (leave; Ctrl-D on an
+                      empty composer leaves too). "?" on an empty composer
+                      shows the key list. Each finished turn is closed out by
+                      a "Worked for 23s · 3 tools · done 6:05 PM" line and a
+                      bell (see PATCH_NOTIFY); the footer under the composer
+                      carries the state on the left and the conversation, turn
+                      count and scroll position on the right.
   --url <url>         Service base URL (overrides PATCH_URL)
   --token <token>     Bearer token (overrides PATCH_TOKEN)
   --kubeconfig <p>    Kubeconfig for the conversations apiserver (overrides
@@ -399,6 +421,11 @@ Environment:
   PATCH_URL          Service base URL, e.g. http://localhost:7820
   PATCH_TOKEN        Bearer token for the service
   KUBECONFIG         Kubeconfig used by 'conversations' (the apiserver read view)
+  PATCH_NOTIFY       How a finished turn announces itself in the full-screen
+                     chat: 'off', 'bell' (the default — the terminal bell), or
+                     'desktop' (the bell plus an OSC 9 desktop notification,
+                     ignored by terminals that don't implement it). Anything
+                     else is the default.
 
 Resume:
   'resume' opens the full-screen chat straight into the conversation picker:

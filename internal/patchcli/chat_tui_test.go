@@ -1,17 +1,21 @@
 package patchcli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	spin "charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
 )
@@ -20,16 +24,16 @@ import (
 // with no a2a client and no kubeconfig — tests here only exercise key
 // handling and state transitions, never the goroutines that would touch the
 // network (stream) or shell out (kubectl), since those Cmds are captured but
-// never invoked.
+// never invoked. histPath is left empty, so nothing here writes a history file.
 func newTestModel() *chatModel {
 	st := newStyles(false)
-	ti := textinput.New()
-	ti.SetVirtualCursor(true)
-	ti.Focus()
+	ta := newComposer(false)
+	ta.SetWidth(80)
+	ta.Focus()
 	sp := spin.New(spin.WithSpinner(spin.Dot))
 	return &chatModel{
 		project:    "demo-project",
-		ti:         ti,
+		ta:         ta,
 		sp:         sp,
 		st:         st,
 		width:      120,
@@ -96,8 +100,8 @@ func TestTabCompletesWithoutSubmitting(t *testing.T) {
 	m := newTestModel()
 	typeText(t, m, "/re")
 	m.onKey(key(tea.KeyTab, ""))
-	if m.ti.Value() != "/resume" {
-		t.Fatalf("tab should complete input to /resume, got %q", m.ti.Value())
+	if m.ta.Value() != "/resume" {
+		t.Fatalf("tab should complete input to /resume, got %q", m.ta.Value())
 	}
 	if m.picker.open {
 		t.Fatal("tab must only complete, never execute")
@@ -373,8 +377,8 @@ func TestPickerTypingNarrowsListAndPreviewsTopMatch(t *testing.T) {
 	if cmd == nil || !m.picker.previewPending["conv-b"] {
 		t.Fatal("narrowing onto conv-b should kick off its preview fetch")
 	}
-	if strings.TrimSpace(m.ti.Value()) != "" {
-		t.Fatalf("picker typing must not leak into the chat input, got %q", m.ti.Value())
+	if strings.TrimSpace(m.ta.Value()) != "" {
+		t.Fatalf("picker typing must not leak into the chat input, got %q", m.ta.Value())
 	}
 
 	// Enter resumes the highlighted match, not the first item of the full list.
@@ -849,6 +853,151 @@ func TestMouseWheelScrolls(t *testing.T) {
 	}
 }
 
+// ── tool activity ──────────────────────────────
+
+// started/finished build the decoded activity updates the stream goroutine
+// sends, so these tests exercise rendering without any transport.
+func started(id, name, summary string) streamActivityMsg {
+	return streamActivityMsg{act: toolActivity{Kind: "tool_call", Phase: "started", ID: id, Name: name, Summary: summary}}
+}
+
+func finished(id, name string, ok bool, ms int64) streamActivityMsg {
+	return streamActivityMsg{act: toolActivity{Kind: "tool_call", Phase: "finished", ID: id, Name: name, OK: ok, ElapsedMs: ms}}
+}
+
+// transcript is the viewport's current text, unstyled.
+func transcript(m *chatModel) string { return plain(m.vp.View()) }
+
+func TestActivityRowShowsRunningToolThenResult(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "list_workloads", "project=demo"))
+	if !strings.Contains(transcript(m), "• Running list_workloads…") {
+		t.Fatalf("an in-flight tool should show a running row: %q", transcript(m))
+	}
+
+	m.Update(finished("c1", "list_workloads", true, 1200))
+	got := transcript(m)
+	if !strings.Contains(got, "• Ran list_workloads · 1.2s") {
+		t.Fatalf("a completed tool should show its name and elapsed time: %q", got)
+	}
+	if strings.Contains(got, "Running") {
+		t.Errorf("the running row should have been replaced: %q", got)
+	}
+	if len(m.activity) != 1 || !m.activity[0].done {
+		t.Fatalf("activity = %+v, want one closed-out row", m.activity)
+	}
+}
+
+func TestActivityRowFailedUsesFailedVerb(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "load_skill", "skill=lag-triage"))
+	m.Update(finished("c1", "load_skill", false, 400))
+	if !strings.Contains(transcript(m), "• Failed load_skill · 0.4s") {
+		t.Fatalf("a failed tool should read as failed: %q", transcript(m))
+	}
+}
+
+// Rows stay expanded while the tools ARE the progress, and fold once the
+// answer starts arriving.
+func TestActivityFoldsWhenAnswerBegins(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	for _, id := range []string{"c1", "c2", "c3"} {
+		m.Update(started(id, "tool_"+id, ""))
+		m.Update(finished(id, "tool_"+id, true, 1000))
+	}
+	if !containsAll(transcript(m), "tool_c1", "tool_c2", "tool_c3") {
+		t.Fatalf("before the answer, every call should be listed: %q", transcript(m))
+	}
+
+	m.Update(streamChunkMsg{text: "here is the answer"})
+	got := transcript(m)
+	if !strings.Contains(got, "• Called 3 tools · 3.0s") {
+		t.Fatalf("completed calls should fold once the answer begins: %q", got)
+	}
+	if strings.Contains(got, "tool_c1") {
+		t.Errorf("folded rows should not list each call: %q", got)
+	}
+}
+
+func TestCtrlOExpandsAndCollapsesActivity(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "list_workloads", "project=demo"))
+	m.Update(finished("c1", "list_workloads", true, 1200))
+	m.Update(started("c2", "get_workload", "name=web"))
+	m.Update(finished("c2", "get_workload", true, 300))
+	m.Update(streamChunkMsg{text: "done"})
+
+	m.onKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if !m.expandActivity {
+		t.Fatal("ctrl+o should expand the activity rows")
+	}
+	got := transcript(m)
+	if !containsAll(got, "• Ran list_workloads · 1.2s", "project=demo", "• Ran get_workload · 0.3s", "name=web") {
+		t.Fatalf("expanded rows should show every call with its summary: %q", got)
+	}
+
+	m.onKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if m.expandActivity {
+		t.Fatal("ctrl+o should collapse again")
+	}
+	if !strings.Contains(transcript(m), "• Called 2 tools") {
+		t.Fatalf("collapsing should restore the folded line: %q", transcript(m))
+	}
+}
+
+// The finished turn keeps its rows, so the transcript still says what happened.
+func TestActivitySurvivesIntoTheFinishedTurn(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "list_workloads", "project=demo"))
+	m.Update(finished("c1", "list_workloads", true, 1200))
+	m.Update(streamChunkMsg{text: "all good"})
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+
+	if len(m.activity) != 0 {
+		t.Errorf("the in-progress rows should have moved onto the turn, got %+v", m.activity)
+	}
+	if rows := m.turnActivity[len(m.turns)-1]; len(rows) != 1 {
+		t.Fatalf("finished turn activity = %+v, want the one call", rows)
+	}
+	got := transcript(m)
+	if !containsAll(got, "Patch", "• Ran list_workloads · 1.2s", "all good") {
+		t.Fatalf("the finalized turn should keep its activity row above the answer: %q", got)
+	}
+	if strings.Index(got, "list_workloads") > strings.Index(got, "all good") {
+		t.Errorf("activity rows belong above the answer: %q", got)
+	}
+}
+
+// A finish with no matching start (a dropped or duplicated event) still shows.
+func TestActivityUnmatchedFinishStillRenders(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(finished("c9", "orphan_tool", true, 500))
+	if !strings.Contains(transcript(m), "• Ran orphan_tool · 0.5s") {
+		t.Fatalf("an unmatched finish should still be shown: %q", transcript(m))
+	}
+}
+
+// /clear wipes the transcript's activity along with its turns.
+func TestActivityClearedWithTheTranscript(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(started("c1", "list_workloads", ""))
+	m.Update(finished("c1", "list_workloads", true, 100))
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+
+	typeText(t, m, "/clear")
+	m.onKey(key(tea.KeyEnter, ""))
+	if m.turnActivity != nil {
+		t.Fatalf("/clear should drop the transcript's activity, got %+v", m.turnActivity)
+	}
+}
+
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if !strings.Contains(s, sub) {
@@ -856,4 +1005,991 @@ func containsAll(s string, subs ...string) bool {
 		}
 	}
 	return true
+}
+
+// ── composer ──────────────────────────────────────────────────
+
+// modKey builds a modified keypress (shift+enter, ctrl+j, …); those carry no
+// .Text, so onKey matches them by String() alone.
+func modKey(code rune, mod tea.KeyMod) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code, Mod: mod}
+}
+
+var (
+	shiftEnter = modKey(tea.KeyEnter, tea.ModShift)
+	altEnter   = modKey(tea.KeyEnter, tea.ModAlt)
+	ctrlJ      = modKey('j', tea.ModCtrl)
+	ctrlR      = modKey('r', tea.ModCtrl)
+	enterKey   = key(tea.KeyEnter, "")
+	upKey      = key(tea.KeyUp, "")
+	downKey    = key(tea.KeyDown, "")
+)
+
+// newSubmitTestModel is newTestModel wired up enough to survive a real submit:
+// that path spawns the streaming goroutine, which needs a client to call and a
+// program to send events to. Both contexts are already cancelled, so the turn
+// fails at once and its messages are dropped — these tests are about what
+// submit does to the composer, not about the turn.
+func newSubmitTestModel(t *testing.T) *chatModel {
+	t.Helper()
+	base := newTestServiceWith(t, &echoExecutor{})
+	ctx, cancel := context.WithCancel(context.Background())
+	client, err := newClient(ctx, base, StaticToken("good"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	m := newTestModel()
+	m.ctx = ctx
+	m.client = client
+	m.prog = tea.NewProgram(m, tea.WithContext(ctx))
+	m.layout(120, 40)
+	return m
+}
+
+func TestNewlineKeysInsertWithoutSending(t *testing.T) {
+	for name, k := range map[string]tea.KeyPressMsg{"shift+enter": shiftEnter, "ctrl+j": ctrlJ, "alt+enter": altEnter} {
+		m := newTestModel()
+		typeText(t, m, "one")
+		m.onKey(k)
+		typeText(t, m, "two")
+		if got := m.ta.Value(); got != "one\ntwo" {
+			t.Errorf("%s should break the line, got %q", name, got)
+		}
+		if len(m.raw) != 0 {
+			t.Errorf("%s must not send the message", name)
+		}
+	}
+}
+
+func TestTrailingBackslashBeforeEnterInsertsNewline(t *testing.T) {
+	m := newTestModel()
+	typeText(t, m, `one\`)
+	m.onKey(enterKey)
+	typeText(t, m, "two")
+	if got := m.ta.Value(); got != "one\ntwo" {
+		t.Fatalf("a trailing backslash should be consumed and break the line, got %q", got)
+	}
+	// A backslash anywhere but just before the cursor is ordinary text.
+	m2 := newSubmitTestModel(t)
+	typeText(t, m2, `a\b`)
+	m2.onKey(enterKey)
+	if len(m2.raw) != 1 || m2.raw[0].content != `a\b` {
+		t.Fatalf("enter should have sent the line verbatim, got %+v", m2.raw)
+	}
+}
+
+func TestEnterSendsAndClearsTheComposer(t *testing.T) {
+	m := newSubmitTestModel(t)
+	typeText(t, m, "one")
+	m.onKey(shiftEnter)
+	typeText(t, m, "two")
+	m.onKey(enterKey)
+
+	if len(m.raw) != 1 || m.raw[0].role != "user" || m.raw[0].content != "one\ntwo" {
+		t.Fatalf("enter should send the whole multi-line draft, got %+v", m.raw)
+	}
+	if m.ta.Value() != "" || m.ta.LineCount() != 1 {
+		t.Fatalf("the composer should be empty again, got %q over %d lines", m.ta.Value(), m.ta.LineCount())
+	}
+	if len(m.history) != 1 || m.history[0] != "one\ntwo" {
+		t.Fatalf("the sent prompt should be in history, got %v", m.history)
+	}
+}
+
+func TestComposerGrowsAndTakesRowsFromTheTranscript(t *testing.T) {
+	m := newTestModel()
+	m.layout(120, 40)
+	base := m.viewportHeight()
+	if m.composerRows() != 1 {
+		t.Fatalf("an empty composer is one row, got %d", m.composerRows())
+	}
+	m.onKey(ctrlJ)
+	if m.composerRows() != 2 || m.viewportHeight() != base-1 {
+		t.Fatalf("a second composer row should cost the viewport one: rows=%d height=%d (was %d)",
+			m.composerRows(), m.viewportHeight(), base)
+	}
+	for range maxComposerRows + 5 {
+		m.onKey(ctrlJ)
+	}
+	if m.composerRows() != maxComposerRows {
+		t.Fatalf("the composer should stop growing at %d rows, got %d", maxComposerRows, m.composerRows())
+	}
+	if m.viewportHeight() != base-(maxComposerRows-1) {
+		t.Fatalf("viewport height should track the cap, got %d", m.viewportHeight())
+	}
+}
+
+// ── prompt history ────────────────────────────────────────────
+
+func TestHistoryRecallWalksNewestFirstAndBack(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"first", "second"}
+	m.histIdx = len(m.history)
+
+	m.onKey(upKey)
+	if m.ta.Value() != "second" {
+		t.Fatalf("up should recall the newest prompt, got %q", m.ta.Value())
+	}
+	m.onKey(upKey)
+	if m.ta.Value() != "first" {
+		t.Fatalf("a second up should step further back, got %q", m.ta.Value())
+	}
+	m.onKey(downKey)
+	if m.ta.Value() != "second" {
+		t.Fatalf("down should step forward again, got %q", m.ta.Value())
+	}
+	m.onKey(downKey)
+	if m.ta.Value() != "" {
+		t.Fatalf("stepping past the newest entry should restore the draft, got %q", m.ta.Value())
+	}
+}
+
+func TestHistoryRecallKeepsTheDraftItInterrupted(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"older"}
+	m.histIdx = 1
+	m.setComposer("half typed") // as if recalled, so up/down still walk history
+	m.onKey(upKey)
+	if m.ta.Value() != "older" {
+		t.Fatalf("up should recall, got %q", m.ta.Value())
+	}
+	m.onKey(downKey)
+	if m.ta.Value() != "half typed" {
+		t.Fatalf("down should put the interrupted draft back, got %q", m.ta.Value())
+	}
+}
+
+func TestUpDownScrollWhenThereIsNoHistoryLeftToRecall(t *testing.T) {
+	m := newTestModel()
+	fillTranscript(m, 40)
+	m.onKey(upKey)
+	if m.follow {
+		t.Fatal("with no history, up should scroll the transcript")
+	}
+
+	m2 := newTestModel()
+	fillTranscript(m2, 40)
+	m2.history = []string{"only one"}
+	m2.histIdx = 1
+	m2.onKey(upKey) // consumes the one entry
+	if !m2.follow {
+		t.Fatal("a recall must not scroll the transcript")
+	}
+	m2.onKey(upKey) // nothing older left
+	if m2.follow {
+		t.Fatal("once history is exhausted, up should scroll again")
+	}
+	if m2.ta.Value() != "only one" {
+		t.Fatalf("scrolling must not disturb the recalled prompt, got %q", m2.ta.Value())
+	}
+}
+
+func TestUpDownMoveTheCursorOnceTheComposerIsMultiLineOrEdited(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"recallable"}
+	m.histIdx = 1
+	typeText(t, m, "a")
+	m.onKey(ctrlJ)
+	typeText(t, m, "b")
+	m.onKey(upKey)
+	if m.ta.Value() != "a\nb" {
+		t.Fatalf("up on a multi-line composer must not recall, got %q", m.ta.Value())
+	}
+	if m.ta.Line() != 0 {
+		t.Fatalf("up should have moved the cursor to the first line, got row %d", m.ta.Line())
+	}
+
+	m2 := newTestModel()
+	m2.history = []string{"recallable"}
+	m2.histIdx = 1
+	typeText(t, m2, "typed")
+	m2.onKey(upKey)
+	if m2.ta.Value() != "typed" {
+		t.Fatalf("up on an edited composer must not recall over it, got %q", m2.ta.Value())
+	}
+}
+
+func TestRecordHistoryDedupesAndPersists(t *testing.T) {
+	m := newTestModel()
+	m.histPath = filepath.Join(t.TempDir(), "history-demo.txt")
+	m.recordHistory("hello")
+	m.recordHistory("hello")
+	m.recordHistory("")
+	if len(m.history) != 1 {
+		t.Fatalf("a repeat of the last prompt should not be recorded twice, got %v", m.history)
+	}
+	if got := loadHistory(m.histPath); len(got) != 1 || got[0] != "hello" {
+		t.Fatalf("history should have been written, got %v", got)
+	}
+}
+
+func TestHistoryFileRoundTripsAwkwardPrompts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history-demo.txt")
+	want := []string{"one\ntwo", `a \ b`, `ends with \`, "plain"}
+	saveHistory(path, want)
+	got := loadHistory(path)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("history round trip = %q, want %q", got, want)
+	}
+}
+
+func TestHistoryIsPerProjectAndFailsQuietly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	path := historyPath("demo/project")
+	if path == "" {
+		t.Skip("no user config dir on this platform")
+	}
+	if !strings.HasSuffix(path, filepath.Join("patch", "history-demo_project.txt")) {
+		t.Fatalf("history path should be per project and filename-safe, got %q", path)
+	}
+	// Nothing written yet, and an unwritable path: both are silent no-ops.
+	if got := loadHistory(path); got != nil {
+		t.Fatalf("a missing history file should read as empty, got %v", got)
+	}
+	saveHistory("", []string{"dropped"})
+	if got := loadHistory(""); got != nil {
+		t.Fatalf("no path means no history, got %v", got)
+	}
+}
+
+// ── reverse search ────────────────────────────────────────────
+
+func TestReverseSearchFindsCyclesAndAccepts(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"deploy the api", "check quota for dfw", "deploy the worker"}
+	m.histIdx = len(m.history)
+
+	m.onKey(ctrlR)
+	if !m.rsearch {
+		t.Fatal("ctrl+r should open the search")
+	}
+	typeText(t, m, "DEPLOY") // case-insensitive
+	if got := m.searchHit(); got != "deploy the worker" {
+		t.Fatalf("the newest match should win, got %q", got)
+	}
+	if out := plain(m.composerBar()); !containsAll(out, "reverse-i-search", "DEPLOY", "deploy the worker") {
+		t.Fatalf("the search line should show the query and the match, got %q", out)
+	}
+	m.onKey(ctrlR)
+	if got := m.searchHit(); got != "deploy the api" {
+		t.Fatalf("another ctrl+r should step to the next older match, got %q", got)
+	}
+	m.onKey(ctrlR) // no third match; stay put
+	if got := m.searchHit(); got != "deploy the api" {
+		t.Fatalf("stepping past the last match should stay put, got %q", got)
+	}
+	m.onKey(enterKey)
+	if m.rsearch || m.ta.Value() != "deploy the api" {
+		t.Fatalf("enter should accept the match into the composer (open=%v value=%q)", m.rsearch, m.ta.Value())
+	}
+}
+
+func TestReverseSearchEscLeavesTheComposerAlone(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"deploy the api"}
+	m.histIdx = 1
+	typeText(t, m, "draft")
+	m.onKey(ctrlR)
+	typeText(t, m, "deploy")
+	m.onKey(key(tea.KeyEscape, ""))
+	if m.rsearch || m.ta.Value() != "draft" {
+		t.Fatalf("esc should cancel without touching the composer (open=%v value=%q)", m.rsearch, m.ta.Value())
+	}
+}
+
+func TestReverseSearchWithNoMatchSaysSo(t *testing.T) {
+	m := newTestModel()
+	m.history = []string{"deploy the api"}
+	m.histIdx = 1
+	m.onKey(ctrlR)
+	typeText(t, m, "zzz")
+	if out := plain(m.composerBar()); !strings.Contains(out, "(no match)") {
+		t.Fatalf("an unmatched query should say so, got %q", out)
+	}
+	m.onKey(enterKey)
+	if m.ta.Value() != "" {
+		t.Fatalf("accepting nothing should leave the composer empty, got %q", m.ta.Value())
+	}
+}
+
+// ── paste chips ───────────────────────────────────────────────
+
+func TestLargePasteCollapsesToChipsAndExpandsOnSubmit(t *testing.T) {
+	m := newSubmitTestModel(t)
+	first := strings.Repeat("alpha\n", 41) + "alpha" // 42 lines
+	second := "a\nb\nc\nd\ne"                        // 5 lines
+
+	m.Update(tea.PasteMsg{Content: first})
+	if got := m.ta.Value(); got != "[Pasted text #1 +42 lines]" {
+		t.Fatalf("a 42-line paste should collapse to a chip, got %q", got)
+	}
+	typeText(t, m, " and ")
+	m.Update(tea.PasteMsg{Content: second})
+	if got := m.ta.Value(); got != "[Pasted text #1 +42 lines] and [Pasted text #2 +5 lines]" {
+		t.Fatalf("a second paste should get its own chip, got %q", got)
+	}
+	if out := plain(m.composerBar()); !containsAll(out, "[Pasted text #1 +42 lines]", "[Pasted text #2 +5 lines]", "expands on send") {
+		t.Fatalf("the chip legend should name both pastes, got %q", out)
+	}
+
+	m.onKey(enterKey)
+	want := first + " and " + second
+	if len(m.raw) != 1 || m.raw[0].content != want {
+		t.Fatalf("chips should expand back into the sent message, got %q", m.raw[0].content)
+	}
+	if len(m.pastes) != 0 {
+		t.Fatalf("sending should retire the chips, got %v", m.pastes)
+	}
+}
+
+func TestSmallPasteGoesInVerbatim(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.PasteMsg{Content: "one\ntwo"})
+	if m.ta.Value() != "one\ntwo" || len(m.pastes) != 0 {
+		t.Fatalf("a small paste should land as text, got %q (%d chips)", m.ta.Value(), len(m.pastes))
+	}
+	m2 := newTestModel()
+	m2.Update(tea.PasteMsg{Content: strings.Repeat("x", pasteChipChars+1)})
+	if len(m2.pastes) != 1 || m2.ta.Value() != "[Pasted text #1 +1 line]" {
+		t.Fatalf("a long single line should still chip, got %q", m2.ta.Value())
+	}
+}
+
+func TestExpandPasteChipsLeavesUnknownChipsAlone(t *testing.T) {
+	got := expandPasteChips("[Pasted text #1 +2 lines] [Pasted text #9 +2 lines]", []string{"real"})
+	if got != "real [Pasted text #9 +2 lines]" {
+		t.Fatalf("an index with no paste behind it should stay literal, got %q", got)
+	}
+}
+
+// ── autocomplete alongside the composer ───────────────────────
+
+func TestSuggestionsOnlyEngageOnASingleSlashLine(t *testing.T) {
+	m := newTestModel()
+	typeText(t, m, "/res")
+	if len(m.currentSuggestions()) != 1 {
+		t.Fatal("setup: '/res' should suggest /resume alone")
+	}
+	m.onKey(ctrlJ) // now two lines
+	if got := m.currentSuggestions(); got != nil {
+		t.Fatalf("a multi-line draft is a message, not a command, got %v", got)
+	}
+	if out := plain(m.composerBar()); strings.Contains(out, "/resume") {
+		t.Fatalf("the suggestion bar should be gone too, got %q", out)
+	}
+}
+
+func TestHelpOverlayDocumentsTheComposerKeys(t *testing.T) {
+	m := newTestModel()
+	out := plain(m.helpView().Content)
+	if !containsAll(out, "shift+enter", "ctrl+j", "alt+enter", "ctrl+r", "recall past prompts",
+		"scroll the transcript when there is no history left to recall") {
+		t.Fatalf("/help should document the composer, got:\n%s", out)
+	}
+}
+
+// ── turn and session feedback ─────────────────────────────────
+
+// workingSince puts the model in a turn that started d ago, the way submit would
+// have, so the end-of-turn line and the footer have something to measure.
+func workingSince(m *chatModel, d time.Duration) {
+	m.working = true
+	m.turnStart = time.Now().Add(-d)
+}
+
+func TestEndOfTurnLineSummarizesTheTurn(t *testing.T) {
+	m := newTestModel()
+	workingSince(m, 23*time.Second)
+	for _, id := range []string{"c1", "c2", "c3"} {
+		m.Update(started(id, "tool_"+id, ""))
+		m.Update(finished(id, "tool_"+id, true, 1000))
+	}
+	m.Update(streamChunkMsg{text: "all done"})
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+
+	got := transcript(m)
+	if !strings.Contains(got, "✻ Worked for 23s · 3 tools · done ") {
+		t.Fatalf("the finished turn should be closed out by its summary: %q", got)
+	}
+	if !regexp.MustCompile(`done \d{1,2}:\d{2} [AP]M`).MatchString(got) {
+		t.Fatalf("the summary should end with a wall-clock time: %q", got)
+	}
+	// It belongs under the answer, as that turn's footer, not as a block of
+	// its own.
+	if strings.Index(got, "all done") > strings.Index(got, "Worked for") {
+		t.Errorf("the summary belongs under the answer: %q", got)
+	}
+	last := m.raw[len(m.raw)-1]
+	if last.role != "system" || !strings.Contains(last.content, "Worked for 23s · 3 tools") {
+		t.Fatalf("the summary should be recorded for /export, got %+v", last)
+	}
+}
+
+func TestEndOfTurnLineDropsTheToolsSegmentAtZero(t *testing.T) {
+	m := newTestModel()
+	workingSince(m, 2*time.Second)
+	m.Update(streamChunkMsg{text: "answered directly"})
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+	got := transcript(m)
+	if strings.Contains(got, "tools") {
+		t.Fatalf("a tool-less turn should not mention tools: %q", got)
+	}
+	if !strings.Contains(got, "✻ Worked for 2s · done ") {
+		t.Fatalf("summary = %q, want the elapsed and finish time only", got)
+	}
+}
+
+func TestEndOfTurnLineSingularTool(t *testing.T) {
+	m := newTestModel()
+	workingSince(m, time.Second)
+	m.Update(started("c1", "list_workloads", ""))
+	m.Update(finished("c1", "list_workloads", true, 100))
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+	if got := transcript(m); !strings.Contains(got, "· 1 tool ·") {
+		t.Fatalf("one call should read as '1 tool': %q", got)
+	}
+}
+
+// A failed turn is still a finished turn — it gets the same closing line.
+func TestEndOfTurnLineOnStreamError(t *testing.T) {
+	m := newTestModel()
+	m.client = &serviceClient{}
+	workingSince(m, 5*time.Second)
+	m.Update(streamErrMsg{err: errors.New("connection reset")})
+	if got := transcript(m); !containsAll(got, "connection reset", "✻ Worked for 5s · done ") {
+		t.Fatalf("a broken stream should still be closed out: %q", got)
+	}
+}
+
+func TestFormatWorkedFor(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{-time.Second, "0s"},
+		{23 * time.Second, "23s"},
+		{59500 * time.Millisecond, "59s"},
+		{66 * time.Second, "1m 06s"},
+		{150 * time.Second, "2m 30s"},
+	}
+	for _, c := range cases {
+		if got := formatWorkedFor(c.d); got != c.want {
+			t.Errorf("formatWorkedFor(%v) = %q, want %q", c.d, got, c.want)
+		}
+	}
+}
+
+// ── footer ────────────────────────────────────────────────────
+
+func TestFooterRightAlignsSessionBadges(t *testing.T) {
+	m := newTestModel()
+	m.contextID = "019f7293-3579-7d8e-8233-4da8bc900405"
+	m.raw = []transcriptTurn{
+		{role: "user", content: "one"}, {role: "assistant", content: "…"},
+		{role: "user", content: "two"}, {role: "assistant", content: "…"},
+	}
+	got := plain(m.footer())
+	if strings.Contains(got, "\n") {
+		t.Fatalf("the footer must stay one line (viewportHeight budgets one): %q", got)
+	}
+	if lipgloss.Width(got) != m.contentWidth() {
+		t.Fatalf("the badges should be flush right within %d columns, got %d: %q", m.contentWidth(), lipgloss.Width(got), got)
+	}
+	if !strings.HasPrefix(got, "enter send · / commands · ? keys") {
+		t.Fatalf("the idle hint belongs on the left: %q", got)
+	}
+	if !strings.HasSuffix(got, "019f7293 · 2 turns") {
+		t.Fatalf("footer should end with the short id and turn count, got %q", got)
+	}
+}
+
+// A named conversation is named in the footer rather than shown as an id.
+func TestFooterPrefersTheConversationName(t *testing.T) {
+	m := newTestModel()
+	m.contextID = "019f7293-3579-7d8e"
+	m.convName = "dfw quota escalation"
+	got := plain(m.footer())
+	if !strings.Contains(got, "dfw quota escalation") || strings.Contains(got, "019f7293") {
+		t.Fatalf("a named conversation should show its name, got %q", got)
+	}
+}
+
+func TestFooterShowsSpinnerAndElapsedWhileWorking(t *testing.T) {
+	m := newTestModel()
+	workingSince(m, 12*time.Second)
+	got := plain(m.footer())
+	if !strings.Contains(got, "thinking… 12s") {
+		t.Fatalf("a running turn should count up in the footer, got %q", got)
+	}
+	if strings.Contains(got, "enter send") {
+		t.Fatalf("the hint is replaced by the working state, got %q", got)
+	}
+}
+
+func TestFooterShowsScrolledBadgeWhenNotFollowing(t *testing.T) {
+	m := newTestModel()
+	fillTranscript(m, 40)
+	m.scrollBy(func() { m.vp.ScrollUp(5) })
+	if m.follow {
+		t.Fatal("setup: scrolling up should have stopped following")
+	}
+	got := plain(m.footer())
+	if !containsAll(got, "scrolled ·", "% · esc for the latest") {
+		t.Fatalf("scrolled-off-the-bottom should be a badge with the way out, got %q", got)
+	}
+	m.scrollBy(func() { m.vp.GotoBottom() })
+	if got := plain(m.footer()); strings.Contains(got, "scrolled") {
+		t.Fatalf("back at the bottom the badge should be gone, got %q", got)
+	}
+}
+
+// Too narrow for both halves: the state survives, the badges are dropped
+// rather than wrapping onto a row the height budget hasn't allowed for.
+func TestFooterDropsBadgesWhenTooNarrow(t *testing.T) {
+	m := newTestModel()
+	m.width = 24
+	m.contextID = "019f7293-3579-7d8e"
+	got := plain(m.footer())
+	if strings.Contains(got, "\n") {
+		t.Fatalf("the footer must stay one line at any width: %q", got)
+	}
+	if strings.Contains(got, "019f7293") {
+		t.Fatalf("badges should be dropped rather than wrapped, got %q", got)
+	}
+	if lipgloss.Width(got) > m.contentWidth() {
+		t.Fatalf("the footer overflows %d columns: %q", m.contentWidth(), got)
+	}
+}
+
+func TestQuestionMarkOnEmptyComposerOpensHelp(t *testing.T) {
+	m := newTestModel()
+	m.onKey(key('?', "?"))
+	if m.overlay != "help" {
+		t.Fatalf("'?' on an empty composer should open the help overlay, got %q", m.overlay)
+	}
+	// Any key dismisses an overlay, so a second '?' toggles it back off.
+	m.onKey(key('?', "?"))
+	if m.overlay != "" {
+		t.Fatalf("a second '?' should dismiss the overlay, got %q", m.overlay)
+	}
+	// With a draft in the composer it is just a character.
+	typeText(t, m, "why")
+	m.onKey(key('?', "?"))
+	if m.overlay != "" || m.ta.Value() != "why?" {
+		t.Fatalf("'?' in a draft should be typed, got overlay=%q value=%q", m.overlay, m.ta.Value())
+	}
+}
+
+func TestHelpOverlayDocumentsTheQuestionMark(t *testing.T) {
+	m := newTestModel()
+	if out := plain(m.helpView().Content); !strings.Contains(out, "on an empty composer") {
+		t.Fatalf("/help should document the '?' key, got:\n%s", out)
+	}
+}
+
+func TestWindowTitleTracksTheTurn(t *testing.T) {
+	m := newTestModel()
+	if got := m.windowTitle(); got != "patch · demo-project" {
+		t.Fatalf("idle title = %q", got)
+	}
+	m.working = true
+	if got := m.windowTitle(); got != "patch · working…" {
+		t.Fatalf("working title = %q", got)
+	}
+}
+
+// ── compaction marker ─────────────────────────────────────────
+
+func TestCompactDoneDrawsTheRule(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(compactDoneMsg{err: nil})
+	rule := plain(m.turns[0])
+	if !strings.Contains(rule, "─ history compacted ─") {
+		t.Fatalf("a successful /compact should draw the divider, got %q", rule)
+	}
+	if lipgloss.Width(rule) != m.contentWidth() {
+		t.Fatalf("the rule should span %d columns, got %d: %q", m.contentWidth(), lipgloss.Width(rule), rule)
+	}
+}
+
+func TestResumedSummaryCarriesTheRule(t *testing.T) {
+	m := newTestModel()
+	m.Update(pickerTranscriptMsg{
+		contextID: "conv-a",
+		items: []assistantv1alpha1.ConversationMessage{
+			{Role: "summary", Content: "compacted digest of earlier turns"},
+			{Role: "user", Content: "what's next"},
+		},
+	})
+	got := plain(m.turns[0])
+	if !containsAll(got, "─ history compacted ─", "Summary", "compacted digest of earlier turns") {
+		t.Fatalf("a resumed summary should sit under the same divider, got:\n%s", got)
+	}
+}
+
+// ── resume recap ──────────────────────────────────────────────
+
+func TestResumeAppendsARecapLine(t *testing.T) {
+	m := newTestModel()
+	m.Update(pickerTranscriptMsg{
+		contextID: "019f7293-3579-7d8e-8233-4da8bc900405",
+		items: []assistantv1alpha1.ConversationMessage{
+			{Role: "user", Content: "earlier question"},
+			{Role: "assistant", Content: "earlier answer", CreatedAt: metav1.NewTime(time.Now().Add(-3 * time.Hour))},
+		},
+	})
+	recap := plain(m.turns[len(m.turns)-1])
+	if recap != "resumed 019f7293 · 2 messages · last active 3h ago" {
+		t.Fatalf("recap = %q", recap)
+	}
+	// It is session state, not conversation content: /export and the turn
+	// count keep describing the conversation itself.
+	if len(m.raw) != 2 {
+		t.Fatalf("the recap must stay out of the transcript, raw = %+v", m.raw)
+	}
+}
+
+func TestResumeRecapUsesTheNameAndOmitsAnUnknownAge(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	named := titledConversation("conv-a", "api-backend not available")
+	named.Status.Name = "dfw quota escalation"
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{named}})
+	m.Update(pickerTranscriptMsg{
+		contextID: "conv-a",
+		items:     []assistantv1alpha1.ConversationMessage{{Role: "user", Content: "hi"}},
+	})
+	recap := plain(m.turns[len(m.turns)-1])
+	if recap != "resumed dfw quota escalation · 1 message" {
+		t.Fatalf("recap = %q, want the name and no age for an undated message", recap)
+	}
+}
+
+// ── notifications ─────────────────────────────────────────────
+
+func TestParseNotifyMode(t *testing.T) {
+	cases := map[string]notifyMode{
+		"":         notifyBell,
+		"bell":     notifyBell,
+		"  BELL  ": notifyBell,
+		"nonsense": notifyBell,
+		"off":      notifyOff,
+		"None":     notifyOff,
+		"desktop":  notifyDesktop,
+		"DESKTOP":  notifyDesktop,
+	}
+	for in, want := range cases {
+		if got := parseNotifyMode(in); got != want {
+			t.Errorf("parseNotifyMode(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestNotifyOnTurnEnd(t *testing.T) {
+	cases := []struct {
+		mode notifyMode
+		want string // "" means no command at all
+	}{
+		{notifyBell, "\a"},
+		{notifyOff, ""},
+		{notifyDesktop, "\a\x1b]9;Patch finished\x07"},
+	}
+	for _, c := range cases {
+		m := newTestModel()
+		m.notify = c.mode
+		m.working = true
+		_, cmd := m.Update(streamDoneMsg{contextID: "ctx-1"})
+		if c.want == "" {
+			if cmd != nil {
+				t.Errorf("%v should stay silent, got a command", c.mode)
+			}
+			continue
+		}
+		if cmd == nil {
+			t.Fatalf("%v should emit a notification", c.mode)
+		}
+		raw, ok := cmd().(tea.RawMsg)
+		if !ok {
+			t.Fatalf("%v should write through the program's output, got %T", c.mode, cmd())
+		}
+		if got := fmt.Sprint(raw.Msg); got != c.want {
+			t.Errorf("%v wrote %q, want %q", c.mode, got, c.want)
+		}
+	}
+}
+
+// ── interrupting a turn, and queuing input during one ──────────
+
+var (
+	escKey = key(tea.KeyEscape, "")
+	ctrlC  = modKey('c', tea.ModCtrl)
+	ctrlD  = modKey('d', tea.ModCtrl)
+)
+
+// quits reports whether a returned Cmd is tea.Quit, so the three-way ctrl+c
+// can be told apart from a press that only interrupted or cleared.
+func quits(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	_, ok := cmd().(tea.QuitMsg)
+	return ok
+}
+
+// working starts a real turn (so the model has a turn context to cancel) and
+// returns the model mid-answer.
+func workingModel(t *testing.T) *chatModel {
+	t.Helper()
+	m := newSubmitTestModel(t)
+	typeText(t, m, "explain")
+	m.onKey(enterKey)
+	if !m.interruptible() {
+		t.Fatal("setup: the model should have a turn to interrupt")
+	}
+	return m
+}
+
+func TestEscInterruptsAndKeepsThePartialAnswer(t *testing.T) {
+	m := workingModel(t)
+	m.Update(streamChunkMsg{text: "half an answer"})
+
+	m.onKey(escKey)
+	if m.working || m.interruptible() {
+		t.Fatal("esc should have ended the turn")
+	}
+	if got := transcript(m); !containsAll(got, "half an answer", interruptedMarker) {
+		t.Fatalf("an interrupted turn keeps its text and says it was stopped: %q", got)
+	}
+	last := m.raw[len(m.raw)-1]
+	if last.role != "assistant" || !strings.Contains(last.content, interruptedMarker) {
+		t.Fatalf("the exportable transcript should carry the marker too, got %+v", last)
+	}
+}
+
+// Anything the abandoned goroutine still had in flight must not reach the
+// next turn.
+func TestInterruptDropsLateStreamMessages(t *testing.T) {
+	m := workingModel(t)
+	m.Update(streamChunkMsg{text: "half"})
+	m.onKey(escKey)
+	turns := len(m.turns)
+
+	m.Update(streamChunkMsg{text: " and the rest"})
+	m.Update(started("c1", "late_tool", ""))
+	m.Update(streamIDsMsg{contextID: "ctx-late"})
+	m.Update(streamDoneMsg{contextID: "ctx-late"})
+
+	if len(m.turns) != turns {
+		t.Fatalf("late messages added %d turn(s)", len(m.turns)-turns)
+	}
+	if m.working || m.answer.Len() != 0 || len(m.activity) != 0 {
+		t.Fatalf("late messages restarted the turn: working=%v answer=%d activity=%+v",
+			m.working, m.answer.Len(), m.activity)
+	}
+	if strings.Contains(transcript(m), "and the rest") {
+		t.Fatalf("text from the abandoned turn leaked into the transcript: %q", transcript(m))
+	}
+	if m.contextID == "ctx-late" {
+		t.Fatal("a stale done should not thread the conversation forward")
+	}
+}
+
+func TestInterruptKeepsTheContextIDLearnedSoFar(t *testing.T) {
+	m := workingModel(t)
+	m.Update(streamIDsMsg{taskID: "task-1", contextID: "ctx-1"})
+	m.onKey(escKey)
+	if m.contextID != "ctx-1" {
+		t.Fatalf("the conversation an interrupted turn started should survive it, got %q", m.contextID)
+	}
+}
+
+func TestInterruptStopsRunningActivityRows(t *testing.T) {
+	m := workingModel(t)
+	m.Update(started("c1", "list_workloads", ""))
+	m.onKey(escKey)
+
+	rows := m.turnActivity[len(m.turns)-1]
+	if len(rows) != 1 || !rows[0].done || !rows[0].stopped {
+		t.Fatalf("the running row should be closed out as stopped, got %+v", rows)
+	}
+	got := transcript(m)
+	if !strings.Contains(got, "• Stopped list_workloads") || strings.Contains(got, "Running") {
+		t.Fatalf("the transcript should show a stopped row, not a running one: %q", got)
+	}
+}
+
+func TestEnterQueuesWhileWorking(t *testing.T) {
+	m := workingModel(t)
+	typeText(t, m, "and also this")
+	m.onKey(enterKey)
+
+	if len(m.queued) != 1 || m.queued[0] != "and also this" {
+		t.Fatalf("a message typed during a turn should queue, got %v", m.queued)
+	}
+	if m.ta.Value() != "" {
+		t.Fatalf("queuing should clear the composer, got %q", m.ta.Value())
+	}
+	if len(m.raw) != 1 {
+		t.Fatalf("a queued message is not part of the transcript yet, got %+v", m.raw)
+	}
+	if got := plain(m.composerBar()); !strings.Contains(got, "↳ queued: and also this") {
+		t.Fatalf("the queue should be listed above the composer: %q", got)
+	}
+}
+
+func TestQueuedRowsTakeHeightFromTheTranscript(t *testing.T) {
+	m := workingModel(t)
+	base := m.viewportHeight()
+	typeText(t, m, "one more")
+	m.onKey(enterKey)
+
+	if m.composerBarRows() != 2 || m.viewportHeight() != base-1 {
+		t.Fatalf("a queued row should cost the viewport one: bar=%d height=%d (was %d)",
+			m.composerBarRows(), m.viewportHeight(), base)
+	}
+	if got := len(strings.Split(m.composerBar(), "\n")); got != m.composerBarRows() {
+		t.Fatalf("the bar rendered %d lines, but the layout budgeted %d", got, m.composerBarRows())
+	}
+}
+
+func TestQueueDrainsInOrderOneTurnAtATime(t *testing.T) {
+	m := workingModel(t)
+	for _, s := range []string{"second", "third"} {
+		typeText(t, m, s)
+		m.onKey(enterKey)
+	}
+
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+	if len(m.queued) != 1 || m.queued[0] != "third" {
+		t.Fatalf("finishing a turn should send exactly one queued message, got %v", m.queued)
+	}
+	if !m.working {
+		t.Fatal("the drained message should be running as its own turn")
+	}
+	if last := m.raw[len(m.raw)-1]; last.role != "user" || last.content != "second" {
+		t.Fatalf("the oldest queued message goes first, got %+v", last)
+	}
+
+	m.Update(streamDoneMsg{contextID: "ctx-1"})
+	if len(m.queued) != 0 {
+		t.Fatalf("the queue should be empty now, got %v", m.queued)
+	}
+	if last := m.raw[len(m.raw)-1]; last.content != "third" {
+		t.Fatalf("the rest of the queue should follow in order, got %+v", last)
+	}
+}
+
+func TestEscDropsTheQueueBeforeInterrupting(t *testing.T) {
+	m := workingModel(t)
+	typeText(t, m, "never mind this")
+	m.onKey(enterKey)
+
+	m.onKey(escKey)
+	if len(m.queued) != 0 {
+		t.Fatalf("the first esc should drop the queue, got %v", m.queued)
+	}
+	if !m.working {
+		t.Fatal("the first esc should leave the running turn alone")
+	}
+	m.onKey(escKey)
+	if m.working {
+		t.Fatal("a second esc should interrupt the turn")
+	}
+}
+
+func TestQueueCapKeepsTheOverflowInTheComposer(t *testing.T) {
+	m := workingModel(t)
+	for i := range maxQueuedMessages {
+		typeText(t, m, fmt.Sprintf("q%d", i))
+		m.onKey(enterKey)
+	}
+	typeText(t, m, "overflow")
+	m.onKey(enterKey)
+
+	if len(m.queued) != maxQueuedMessages {
+		t.Fatalf("the queue should stop at %d, got %d", maxQueuedMessages, len(m.queued))
+	}
+	if m.ta.Value() != "overflow" {
+		t.Fatalf("an over-cap message should stay in the composer, got %q", m.ta.Value())
+	}
+}
+
+// Slash commands act on the session, so they are not held for later either.
+func TestSlashCommandIsNotQueued(t *testing.T) {
+	m := workingModel(t)
+	typeText(t, m, "/help")
+	m.onKey(enterKey)
+	if len(m.queued) != 0 || m.overlay != "" {
+		t.Fatalf("a command typed mid-turn should neither queue nor run: queued=%v overlay=%q", m.queued, m.overlay)
+	}
+}
+
+func TestCtrlCInterruptsThenClearsThenExits(t *testing.T) {
+	m := workingModel(t)
+	typeText(t, m, "queued")
+	m.onKey(enterKey)
+
+	if _, cmd := m.onKey(ctrlC); quits(cmd) {
+		t.Fatal("ctrl+c during a turn should interrupt, not exit")
+	}
+	if m.working || len(m.queued) != 0 {
+		t.Fatalf("ctrl+c should stop the turn and everything behind it: working=%v queued=%v", m.working, m.queued)
+	}
+
+	m.ctrlCAt = time.Time{} // past the double-press window
+	typeText(t, m, "a draft")
+	if _, cmd := m.onKey(ctrlC); quits(cmd) {
+		t.Fatal("ctrl+c with a draft should clear it, not exit")
+	}
+	if m.ta.Value() != "" {
+		t.Fatalf("the draft should be gone, got %q", m.ta.Value())
+	}
+
+	m.ctrlCAt = time.Time{}
+	if _, cmd := m.onKey(ctrlC); !quits(cmd) {
+		t.Fatal("ctrl+c with nothing running and nothing typed should exit")
+	}
+}
+
+func TestSecondCtrlCWithinTheWindowExits(t *testing.T) {
+	m := newSubmitTestModel(t)
+	typeText(t, m, "a draft")
+	if _, cmd := m.onKey(ctrlC); quits(cmd) {
+		t.Fatal("setup: the first ctrl+c should clear the draft")
+	}
+
+	typeText(t, m, "another draft")
+	if _, cmd := m.onKey(ctrlC); !quits(cmd) {
+		t.Fatal("a second ctrl+c inside the window should exit, draft or not")
+	}
+
+	m.ctrlCAt = time.Now().Add(-2 * ctrlCExitWindow)
+	if _, cmd := m.onKey(ctrlC); quits(cmd) {
+		t.Fatal("once the window has passed, ctrl+c should go back to clearing the draft")
+	}
+}
+
+func TestCtrlDLeavesOnlyOnAnEmptyComposer(t *testing.T) {
+	m := newTestModel()
+	typeText(t, m, "draft")
+	if _, cmd := m.onKey(ctrlD); quits(cmd) {
+		t.Fatal("ctrl+d with a draft should not exit")
+	}
+	m.resetComposer()
+	if _, cmd := m.onKey(ctrlD); !quits(cmd) {
+		t.Fatal("ctrl+d on an empty composer should exit")
+	}
+}
+
+func TestHelpOverlayDocumentsTheInterruptKeys(t *testing.T) {
+	m := newTestModel()
+	out := plain(m.helpView().Content)
+	if !containsAll(out, "esc", "interrupt the running turn", "ctrl+c", "ctrl+d") {
+		t.Fatalf("/help should document interrupting and queuing, got:\n%s", out)
+	}
 }
