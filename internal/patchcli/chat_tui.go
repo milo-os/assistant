@@ -304,6 +304,11 @@ type chatModel struct {
 	// changes so a fresh prefix always starts at the top match.
 	suggestIndex int
 
+	// mentions is the "@" resource picker's session cache and highlight (see
+	// chat_mentions.go); it shares the bar above the composer with the
+	// slash-command suggestions.
+	mentions mentionState
+
 	// history is this project's past prompts, oldest last-in, shared by ↑/↓
 	// recall and ctrl+r search. histIdx == len(history) means "not recalling":
 	// histDraft then holds whatever the composer had when recall started, and
@@ -581,6 +586,14 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scrollBy(func() { m.vp, _ = m.vp.Update(msg) })
 		return m, nil
 
+	case mentionKindsMsg:
+		m.applyMentionKinds(msg)
+		return m, nil
+
+	case mentionNamesMsg:
+		m.applyMentionNames(msg)
+		return m, nil
+
 	case pickerListMsg:
 		m.picker.loading = false
 		if msg.err != nil {
@@ -671,6 +684,13 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.rsearch {
 		return m.onSearchKey(msg)
+	}
+	// The "@" list owns tab/enter/↑/↓/esc while it is open, ahead of the
+	// composer's own bindings for them (see onMentionKey for what it declines).
+	if rows := m.mentionRows(); len(rows) > 0 {
+		if handled, cmd := m.onMentionKey(msg, rows); handled {
+			return m, cmd
+		}
 	}
 	switch msg.String() {
 	case "shift+enter", "ctrl+j", "alt+enter":
@@ -864,8 +884,9 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
-		m.suggestIndex = 0 // a new prefix invalidates the old highlighted index
-		return m, cmd
+		m.suggestIndex = 0   // a new prefix invalidates the old highlighted index
+		m.mentions.index = 0 // …and a new "@" token invalidates its highlight
+		return m, tea.Batch(cmd, m.ensureMentions())
 	}
 }
 
@@ -1071,6 +1092,7 @@ var composerHelpText = []struct{ keys, desc string }{
 	{"↑/↓", "recall past prompts while the composer is one line and unedited"},
 	{"", "…move the cursor once it has several lines or you have edited it"},
 	{"", "…scroll the transcript when there is no history left to recall"},
+	{"@", "mention a project resource — @workload/api-backend (tab/enter inserts, esc closes)"},
 	{"ctrl+r", "search past prompts (enter accepts, esc cancels)"},
 	{"paste", "over 3 lines or 800 characters collapses to a chip, expanded on send"},
 	{"pgup/pgdn, mouse wheel", "scroll the transcript · esc jumps back to the latest when idle"},
@@ -1214,6 +1236,9 @@ func (m *chatModel) suggestionBar() string {
 func (m *chatModel) composerBar() string {
 	rows := m.queuedBar()
 	if len(m.currentSuggestions()) == 0 {
+		if rows := m.mentionRows(); len(rows) > 0 {
+			return m.mentionBar(rows)
+		}
 		switch {
 		case m.rsearch:
 			return strings.Join(append(rows, m.searchBar()), "\n")
@@ -1658,7 +1683,7 @@ func (m *chatModel) submit(text string) tea.Cmd {
 	// this turn without tearing down the session's.
 	ctx, cancel := context.WithCancel(m.baseContext())
 	m.cancelTurn = cancel
-	go m.stream(ctx, m.turnGen, text, m.contextID)
+	go m.stream(ctx, m.turnGen, text, m.contextID, m.mentionsIn(text))
 	return m.sp.Tick
 }
 
@@ -1666,8 +1691,8 @@ func (m *chatModel) submit(text string) tea.Cmd {
 // via p.Send. It runs in its own goroutine (a Cmd yields a single message,
 // whereas a turn produces many), which is the supported Bubble Tea pattern for
 // long-lived producers.
-func (m *chatModel) stream(ctx context.Context, gen int, text, contextID string) {
-	req := &a2a.SendMessageRequest{Message: buildMessage(text, m.project, contextID)}
+func (m *chatModel) stream(ctx context.Context, gen int, text, contextID string, mentions []mention) {
+	req := &a2a.SendMessageRequest{Message: buildMessage(text, m.project, contextID, mentions)}
 	events := m.client.SendStreamingMessage(ctx, req)
 	seen := contextID
 	var task, sentTask a2a.TaskID
@@ -1914,6 +1939,9 @@ func (m *chatModel) suggestionRows() int {
 			return maxSuggestionRows
 		}
 		return n
+	}
+	if n := len(m.mentionRows()); n > 0 {
+		return min(n, maxMentionRows)
 	}
 	return 1
 }

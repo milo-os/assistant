@@ -86,6 +86,15 @@ func (r ReadView) direct() bool {
 // /apis/assistant.miloapis.com/v1alpha1/namespaces/<project>/conversations),
 // identical for both transports; only the prefix in front of it differs.
 func (r ReadView) get(ctx context.Context, project, path string) ([]byte, error) {
+	return r.getAccept(ctx, project, path, "")
+}
+
+// getAccept is [ReadView.get] asking for a particular representation. Only the
+// direct transport can send a header — `kubectl get --raw` has no equivalent —
+// so an accept the transport cannot honor is simply not sent, and callers must
+// recognize the default representation coming back rather than assume the one
+// they asked for (see discoverResourceKinds).
+func (r ReadView) getAccept(ctx context.Context, project, path, accept string) ([]byte, error) {
 	if !r.direct() {
 		return kubectlJSON(ctx, r.kubeconfig, "get", "--raw", path)
 	}
@@ -112,7 +121,10 @@ func (r ReadView) get(ctx context.Context, project, path string) ([]byte, error)
 		return nil, fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
+	if accept == "" {
+		accept = "application/json"
+	}
+	req.Header.Set("Accept", accept)
 
 	client := r.client
 	if client == nil {
