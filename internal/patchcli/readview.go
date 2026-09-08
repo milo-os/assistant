@@ -18,7 +18,7 @@
 // there is no second identity to honor — only a second way to be pointed
 // somewhere unintended. `kubectl` resolves its context from KUBECONFIG and
 // ~/.kube/config, neither of which has anything to do with the datumctl
-// context, so `datumctl patch conversations list` would happily ask whichever
+// context, so `datumctl assistant conversations list` would happily ask whichever
 // unrelated cluster happened to be current and report that the API does not
 // exist. That reads as "this feature is not deployed" when the truth is "you
 // asked the wrong server".

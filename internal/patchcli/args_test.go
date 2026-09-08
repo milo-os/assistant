@@ -34,14 +34,78 @@ func TestParseArgs(t *testing.T) {
 			want: command{kind: KindChat, project: "demo", tui: true, kubeconfig: "/kc"},
 		},
 		{
+			name: "resume opens the picker",
+			argv: []string{"resume", "--project", "demo", "--kubeconfig", "/kc"},
+			want: command{kind: KindResume, project: "demo", kubeconfig: "/kc"},
+		},
+		{
+			name: "resume with a context id",
+			argv: []string{"resume", "01a05ee5", "--project", "demo"},
+			want: command{kind: KindResume, project: "demo", contextID: "01a05ee5"},
+		},
+		{
+			name: "resume requires a project",
+			argv: []string{"resume"},
+			want: command{kind: kindError, errMsg: "resume: --project <name> is required"},
+		},
+		{
 			name: "chat missing message",
 			argv: []string{"chat", "--project", "demo"},
-			want: command{kind: kindError, errMsg: "chat: missing message argument (or use --interactive / --tui)"},
+			want: command{kind: kindError, errMsg: "chat: missing message argument (or use --interactive / --tui / --continue)"},
 		},
 		{
 			name: "chat missing project",
 			argv: []string{"chat", "hi"},
 			want: command{kind: kindError, errMsg: "chat: --project <name> is required"},
+		},
+		{
+			// -c with nothing else means "put me back in my last
+			// conversation", which is the full-screen chat.
+			name: "chat -c opens the full-screen chat on the last conversation",
+			argv: []string{"chat", "-c", "--project", "demo"},
+			want: command{kind: KindChat, project: "demo", continueLast: true, tui: true},
+		},
+		{
+			name: "chat --continue with a message stays one-shot",
+			argv: []string{"chat", "and the edge-cache one?", "--continue", "--project", "demo"},
+			want: command{kind: KindChat, project: "demo", message: "and the edge-cache one?", continueLast: true},
+		},
+		{
+			name: "chat -c -i stays the line-based session",
+			argv: []string{"chat", "-c", "-i", "--project", "demo"},
+			want: command{kind: KindChat, project: "demo", continueLast: true, interactive: true},
+		},
+		{
+			name: "resume --last skips the picker",
+			argv: []string{"resume", "--last", "--project", "demo"},
+			want: command{kind: KindResume, project: "demo", continueLast: true},
+		},
+		{
+			name: "resume -c is the same as --last",
+			argv: []string{"resume", "-c", "--project", "demo"},
+			want: command{kind: KindResume, project: "demo", continueLast: true},
+		},
+		{
+			name: "conversations rename",
+			argv: []string{"conversations", "rename", "ctx-1", "dfw quota escalation", "--project", "demo"},
+			want: command{kind: KindConvRename, project: "demo", contextID: "ctx-1", name: "dfw quota escalation"},
+		},
+		{
+			// An unquoted multi-word name arrives as several positionals; it
+			// should mean what it reads as, not just its first word.
+			name: "conversations rename joins unquoted words",
+			argv: []string{"conversations", "rename", "ctx-1", "dfw", "quota", "escalation", "--project", "demo"},
+			want: command{kind: KindConvRename, project: "demo", contextID: "ctx-1", name: "dfw quota escalation"},
+		},
+		{
+			name: "conversations rename missing name",
+			argv: []string{"conversations", "rename", "ctx-1", "--project", "demo"},
+			want: command{kind: kindError, errMsg: "conversations rename: missing <name> argument"},
+		},
+		{
+			name: "conversations rename missing id",
+			argv: []string{"conversations", "rename", "--project", "demo"},
+			want: command{kind: kindError, errMsg: "conversations rename: missing <context-id> argument"},
 		},
 		{
 			name: "compact",
@@ -91,7 +155,7 @@ func TestParseArgs(t *testing.T) {
 		{
 			name: "conversations bad subcommand",
 			argv: []string{"conversations", "delete", "--project", "demo"},
-			want: command{kind: kindError, errMsg: `conversations: expected "list" or "show", got "delete"`},
+			want: command{kind: kindError, errMsg: `conversations: expected "list", "show" or "rename", got "delete"`},
 		},
 		{
 			name: "gaps list",

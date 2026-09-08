@@ -1,4 +1,4 @@
-// The cobra command tree for `datumctl patch`, and the three seams where it
+// The cobra command tree for `datumctl assistant`, and the three seams where it
 // differs from the standalone CLI: the project comes from datumctl's injected
 // environment, the token from datumctl's credentials helper, and the service
 // URL from --url/PATCH_URL.
@@ -7,10 +7,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"go.datum.net/datumctl/plugin"
+	"golang.org/x/term"
 
 	"github.com/milo-os/assistant/internal/patchcli"
 )
@@ -23,13 +25,40 @@ const tokenTimeout = 10 * time.Second
 func newRootCmd() *cobra.Command {
 	// --org, --project and -o/--output come from the SDK, defaulted from the
 	// DATUM_* variables datumctl injects.
-	root := plugin.NewRootCmd("patch", "Chat with Patch, the Datum Cloud assistant")
+	root := plugin.NewRootCmd("assistant", "Chat with Patch, the Datum Cloud assistant")
 	root.Long = "Chat with Patch, the Datum Cloud assistant, from the terminal.\n\n" +
-		"Conversations are held by the assistant service and continued with --context-id.\n" +
+		"On its own, 'datumctl assistant' opens the full-screen chat; with -c it opens\n" +
+		"your most recent one instead. Conversations are held by the assistant\n" +
+		"service; pick one back up with 'resume', or continue it non-interactively\n" +
+		"with 'chat --context-id'.\n" +
 		"'conversations' and 'gaps' read the aggregated API for the same project,\n" +
 		"using the same datumctl credentials."
+	root.Example = "  datumctl assistant\n" +
+		"  datumctl assistant -c\n" +
+		"  datumctl assistant chat \"Why is the api-backend workload not available?\"\n" +
+		"  datumctl assistant resume"
 	root.SilenceUsage = true
 	root.SilenceErrors = true
+	// The bare verb is the chat, the way `claude` or `codex` on their own are:
+	// the full-screen UI is the primary experience, not a flag on a subcommand.
+	root.Args = cobra.NoArgs
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		if !onTerminal() {
+			return fmt.Errorf("the full-screen chat needs a terminal; pipe a message through 'datumctl assistant chat \"…\"' instead")
+		}
+		inv, err := serviceInvocation(cmd, patchcli.KindChat, true)
+		if err != nil {
+			return err
+		}
+		inv.TUI = true
+		inv.Continue, _ = cmd.Flags().GetBool("continue")
+		return run(cmd, inv)
+	}
+
+	// -c is on the root command itself, not persistent: it means "the
+	// conversation to open", which only the bare verb and 'chat' have.
+	root.Flags().BoolP("continue", "c", false,
+		"Open the most recently active conversation instead of a new one")
 
 	root.PersistentFlags().String("url", "",
 		"Assistant service base URL (defaults to PATCH_URL)")
@@ -39,6 +68,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(
 		newCardCmd(),
 		newChatCmd(),
+		newResumeCmd(),
 		newCompactCmd(),
 		newConversationsCmd(),
 		newGapsCmd(),
@@ -66,14 +96,18 @@ func newChatCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "chat [message]",
 		Short: "Send a message to the assistant",
-		Long: "Send one message and stream the answer, or hold a session with\n" +
-			"--interactive (line-based) or --tui (full-screen).\n\n" +
+		Long: "With a message, send it and stream the answer — the one-shot form for\n" +
+			"scripts and pipes. Without one, open the full-screen chat (the same UI\n" +
+			"as bare 'datumctl assistant'); --interactive keeps the line-based session\n" +
+			"for terminals that cannot run it.\n\n" +
 			"The conversation id is reported on stderr; pass it back with\n" +
-			"--context-id to continue that conversation.",
+			"--context-id to continue that conversation, or use -c to continue the\n" +
+			"most recent one without needing its id.",
 		Args: cobra.MaximumNArgs(1),
-		Example: "  datumctl patch chat \"Why is the api-backend workload not available?\"\n" +
-			"  datumctl patch chat --tui\n" +
-			"  datumctl patch chat \"and the edge-cache one?\" --context-id 01a05ee5-…",
+		Example: "  datumctl assistant chat \"Why is the api-backend workload not available?\"\n" +
+			"  datumctl assistant chat\n" +
+			"  datumctl assistant chat -c \"and the edge-cache one?\"\n" +
+			"  datumctl assistant chat \"and the edge-cache one?\" --context-id 01a05ee5-…",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			inv, err := serviceInvocation(cmd, patchcli.KindChat, true)
 			if err != nil {
@@ -85,15 +119,54 @@ func newChatCmd() *cobra.Command {
 			inv.Interactive, _ = cmd.Flags().GetBool("interactive")
 			inv.TUI, _ = cmd.Flags().GetBool("tui")
 			inv.ContextID, _ = cmd.Flags().GetString("context-id")
+			inv.Continue, _ = cmd.Flags().GetBool("continue")
 			if inv.Message == "" && !inv.Interactive && !inv.TUI {
-				return fmt.Errorf("chat: missing message argument (or use --interactive / --tui)")
+				if !onTerminal() {
+					return fmt.Errorf("chat: missing message argument (the full-screen chat needs a terminal; -i for a line-based session)")
+				}
+				inv.TUI = true
 			}
 			return run(cmd, inv)
 		},
 	}
-	cmd.Flags().BoolP("interactive", "i", false, "Hold a multi-turn session on one conversation")
-	cmd.Flags().Bool("tui", false, "Full-screen chat UI with a scrollable, markdown-rendered transcript")
+	cmd.Flags().BoolP("interactive", "i", false, "Hold a line-based multi-turn session instead of the full-screen chat")
+	cmd.Flags().Bool("tui", false, "Open the full-screen chat (the default without a message; kept for scripts that passed it)")
+	_ = cmd.Flags().MarkHidden("tui")
 	cmd.Flags().String("context-id", "", "Continue an existing conversation")
+	cmd.Flags().BoolP("continue", "c", false,
+		"Continue the most recently active conversation instead of starting a new one")
+	return cmd
+}
+
+func newResumeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "resume [context-id]",
+		Short: "Pick up a past conversation in the full-screen chat",
+		Long: "Open the full-screen chat straight into the conversation picker: type to\n" +
+			"search the project's conversations (newest first, each shown by its name\n" +
+			"or opening message), ↑/↓ to browse, ctrl+t to preview a transcript, enter\n" +
+			"to resume. With a context id it skips the picker and loads that\n" +
+			"conversation directly; with --last it skips straight to the most recently\n" +
+			"active one.\n\n" +
+			"Listing and loading go through the conversations apiserver with your\n" +
+			"Kubernetes identity (kubeconfig); chatting uses the assistant service.",
+		Args: cobra.MaximumNArgs(1),
+		Example: "  datumctl assistant resume\n" +
+			"  datumctl assistant resume --last\n" +
+			"  datumctl assistant resume 01a05ee5-…",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			inv, err := serviceInvocation(cmd, patchcli.KindResume, true)
+			if err != nil {
+				return err
+			}
+			if len(args) > 0 {
+				inv.ContextID = args[0]
+			}
+			inv.Continue, _ = cmd.Flags().GetBool("last")
+			return run(cmd, inv)
+		},
+	}
+	cmd.Flags().Bool("last", false, "Resume the most recently active conversation without the picker")
 	return cmd
 }
 
@@ -128,7 +201,8 @@ func newConversationsCmd() *cobra.Command {
 		Short:   "Browse your durable chat history",
 		Long: "Read the conversations the assistant has stored for a project, through\n" +
 			"the aggregated API — the same project and the same datumctl credentials\n" +
-			"the rest of these commands use.",
+			"the rest of these commands use. 'rename' is the exception: naming a\n" +
+			"conversation is a write, so it goes to the assistant service instead.",
 	}
 	list := &cobra.Command{
 		Use:   "list",
@@ -155,7 +229,32 @@ func newConversationsCmd() *cobra.Command {
 			return run(cmd, inv)
 		},
 	}
-	cmd.AddCommand(list, show)
+	// Unlike its siblings this one writes, so it goes to the assistant service
+	// rather than the read-only aggregated API — see internal/patchcli.
+	rename := &cobra.Command{
+		Use:   "rename <context-id> <name>",
+		Short: "Name a conversation",
+		Long: "Give a conversation a name of your own. It is shown in place of the\n" +
+			"derived title wherever conversations are listed — 'conversations list',\n" +
+			"the resume picker, /status — and is at most 80 characters.",
+		Args: cobra.MinimumNArgs(2),
+		Example: "  datumctl assistant conversations rename 01a05ee5-… \"dfw quota escalation\"\n" +
+			"  datumctl assistant conversations rename 01a05ee5-… dfw quota escalation",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			inv, err := serviceInvocation(cmd, patchcli.KindConvRename, true)
+			if err != nil {
+				return err
+			}
+			inv.ContextID = args[0]
+			// Joined, so an unquoted multi-word name works as typed.
+			inv.Name = strings.TrimSpace(strings.Join(args[1:], " "))
+			if inv.Name == "" {
+				return fmt.Errorf("conversations rename: <name> must not be empty")
+			}
+			return run(cmd, inv)
+		},
+	}
+	cmd.AddCommand(list, show, rename)
 	return cmd
 }
 
@@ -219,6 +318,13 @@ func newTaskCmd() *cobra.Command {
 	}
 	cmd.AddCommand(get, cancel)
 	return cmd
+}
+
+// onTerminal reports whether stdin and stdout are a terminal — the full-screen
+// chat cannot run otherwise, and Bubble Tea's own error for that case does not
+// say what to do instead.
+func onTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 // run executes a resolved invocation and folds its exit code into an error
@@ -361,7 +467,15 @@ func jsonOutput(cmd *cobra.Command) (bool, error) {
 // It is resolved per request rather than once at startup because the helper
 // mints short-lived tokens: a `chat --tui` session outlives the token it
 // started with, and asking again is the only way to stay authenticated.
+//
+// PATCH_TOKEN, when set, wins over the helper. It exists for the dev loop:
+// the kind playground authenticates with a static dev token that datumctl
+// cannot mint, and without this the plugin could only ever be tried against
+// a service that validates real Datum Cloud tokens.
 func tokenSource() patchcli.TokenSource {
+	if static := os.Getenv("PATCH_TOKEN"); static != "" {
+		return patchcli.StaticToken(static)
+	}
 	return func() (string, error) {
 		type result struct {
 			token string

@@ -29,8 +29,14 @@ const (
 	KindConvList
 	// KindConvShow prints one conversation's transcript.
 	KindConvShow
+	// KindConvRename names one conversation.
+	KindConvRename
 	// KindGapList lists a provider project's capability-gap reports.
 	KindGapList
+	// KindResume opens the full-screen chat straight into the conversation
+	// picker, or — with ContextID set — into that conversation with its
+	// transcript loaded.
+	KindResume
 	// KindTaskGet fetches one task.
 	KindTaskGet
 	// KindTaskCancel cancels one task.
@@ -60,8 +66,14 @@ type Invocation struct {
 	// Project is the Milo project the task runs against — for the gaps read
 	// view, the PROVIDER's own project.
 	Project string
-	// ContextID continues an existing conversation.
+	// ContextID continues an existing conversation (KindChat, KindCompact,
+	// KindConvRename); for KindResume it is optional and skips the picker.
 	ContextID string
+	// Continue resumes the project's most recently active conversation
+	// (-c/--continue, resume's --last) when ContextID is empty.
+	Continue bool
+	// Name is the conversation name KindConvRename sets.
+	Name string
 	// Interactive selects the line-based REPL, TUI the full-screen chat UI.
 	Interactive bool
 	TUI         bool
@@ -101,6 +113,8 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 		Message:     cmd.message,
 		Project:     cmd.project,
 		ContextID:   cmd.contextID,
+		Continue:    cmd.continueLast,
+		Name:        cmd.name,
 		Interactive: cmd.interactive,
 		TUI:         cmd.tui,
 		Kubeconfig:  cmd.kubeconfig,
@@ -148,6 +162,8 @@ func (inv Invocation) Execute(ctx context.Context, io Io) int {
 		return runConversationsList(ctx, inv, io)
 	case KindConvShow:
 		return runConversationsShow(ctx, inv, io)
+	case KindConvRename:
+		return runConversationsRename(ctx, inv, io)
 	case KindGapList:
 		return runGapsList(ctx, inv, io)
 
@@ -165,13 +181,21 @@ func (inv Invocation) Execute(ctx context.Context, io Io) int {
 			return fail(io, err, nil)
 		}
 		defer client.Destroy()
+		// -c resolves to a conversation id before anything else happens, so
+		// every form of chat (TUI, REPL, one-shot) continues the same one; the
+		// TUI additionally loads its transcript, exactly as `resume <id>` does.
+		start, resumeOnStart := inv.ContextID, ""
+		if start == "" && inv.Continue {
+			start = continueContextID(ctx, inv, io)
+			resumeOnStart = start
+		}
 		if inv.TUI {
-			return runChatTUI(ctx, client, inv.Project, inv.ContextID, inv.Message, inv.BaseURL, inv.Token, ReadViewFor(inv))
+			return runChatTUI(ctx, client, inv.Project, start, inv.Message, inv.BaseURL, inv.Token, ReadViewFor(inv), resumeOnStart)
 		}
 		if inv.Interactive {
-			return runRepl(ctx, client, inv.Project, inv.ContextID, inv.Message, io)
+			return runRepl(ctx, client, inv.Project, start, inv.Message, io)
 		}
-		code, contextID, streamErr := chatTurn(ctx, client, inv.Message, inv.Project, inv.ContextID, inv.JSON, io)
+		code, contextID, streamErr := chatTurn(ctx, client, inv.Message, inv.Project, start, inv.JSON, io)
 		if streamErr != nil {
 			return fail(io, streamErr, client.errs)
 		}
@@ -181,6 +205,26 @@ func (inv Invocation) Execute(ctx context.Context, io Io) int {
 			io.Err("context: " + contextID + "  (continue with --context-id)\n")
 		}
 		return code
+
+	case KindResume:
+		client, err := newClient(ctx, inv.BaseURL, inv.Token)
+		if err != nil {
+			return fail(io, err, nil)
+		}
+		defer client.Destroy()
+		contextID := inv.ContextID
+		start := pickerOnStart
+		if contextID == "" && inv.Continue {
+			// --last with nothing to continue opens a fresh chat rather than
+			// the picker: the picker would only show the same empty listing
+			// continueContextID just reported on.
+			contextID = continueContextID(ctx, inv, io)
+			start = ""
+		}
+		if contextID != "" {
+			start = contextID
+		}
+		return runChatTUI(ctx, client, inv.Project, contextID, "", inv.BaseURL, inv.Token, ReadViewFor(inv), start)
 
 	case KindCompact:
 		err := requestCompact(ctx, inv.BaseURL, inv.Token, inv.Project, inv.ContextID)

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -62,10 +63,10 @@ func TestSuggestionsForBareSlash(t *testing.T) {
 
 func TestSuggestionsNarrowOnPrefix(t *testing.T) {
 	m := newTestModel()
-	typeText(t, m, "/re")
+	typeText(t, m, "/res")
 	got := m.currentSuggestions()
 	if len(got) != 1 || got[0] != "/resume" {
-		t.Fatalf("'/re' should suggest only /resume, got %v", got)
+		t.Fatalf("'/res' should suggest only /resume, got %v", got)
 	}
 }
 
@@ -173,6 +174,104 @@ func TestSuggestionBarRendersAndDismissesCorrectly(t *testing.T) {
 	}
 }
 
+// ── /rename ───────────────────────────────────────────────────
+
+// The input is one line, so /rename's argument arrives on it — bare, with an
+// argument, and (not a match) as a prefix of some other word.
+func TestCommandArgSplitsOnTheSameLine(t *testing.T) {
+	cases := []struct {
+		text    string
+		wantArg string
+		wantOK  bool
+	}{
+		{"/rename", "", true},
+		{"/rename dfw quota escalation", "dfw quota escalation", true},
+		{"/rename   spaced  ", "spaced", true},
+		{"/renamed", "", false},
+		{"rename x", "", false},
+		{"tell me about /rename", "", false},
+	}
+	for _, c := range cases {
+		arg, ok := commandArg(c.text, "/rename")
+		if ok != c.wantOK || arg != c.wantArg {
+			t.Errorf("commandArg(%q) = %q, %v; want %q, %v", c.text, arg, ok, c.wantArg, c.wantOK)
+		}
+	}
+}
+
+// The three ways /rename can't proceed are answered locally: none of them
+// needs the service to know they are wrong, and a request would only come back
+// with the same answer more slowly.
+func TestRenameGuardsAnswerWithoutARequest(t *testing.T) {
+	cases := []struct {
+		name      string
+		contextID string
+		arg       string
+		want      string
+	}{
+		{"no argument", "ctx-1", "", "usage: /rename <name>"},
+		{"too long", "ctx-1", strings.Repeat("é", maxConversationNameLen+1), "too long"},
+		{"no conversation yet", "", "a name", "nothing to rename"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := newTestModel()
+			m.contextID = c.contextID
+			cmd := m.startRename(c.arg)
+			if cmd != nil {
+				t.Fatal("want no request kicked off")
+			}
+			if m.working {
+				t.Fatal("want the model idle, not waiting on a rename")
+			}
+			if len(m.turns) != 1 || !strings.Contains(m.turns[0], c.want) {
+				t.Fatalf("turns = %q, want one mentioning %q", m.turns, c.want)
+			}
+		})
+	}
+}
+
+// A rename lands in the transcript and in /status; a failure says so and
+// leaves the old name in place.
+func TestRenameDoneUpdatesTheSessionName(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(renameDoneMsg{name: "dfw quota escalation"})
+	if m.convName != "dfw quota escalation" {
+		t.Fatalf("convName = %q", m.convName)
+	}
+	if m.working {
+		t.Fatal("the rename should have cleared working")
+	}
+	m.Update(renameDoneMsg{name: "later", err: errors.New("boom")})
+	if m.convName != "dfw quota escalation" {
+		t.Fatalf("a failed rename changed the name to %q", m.convName)
+	}
+}
+
+// Resuming picks the name up from the listing the picker already holds, so a
+// named conversation is still named after /resume.
+func TestResumingCarriesTheConversationName(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	named := titledConversation("conv-a", "api-backend not available")
+	named.Status.Name = "dfw quota escalation"
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{named, titledConversation("conv-b", "other")}})
+	m.Update(pickerTranscriptMsg{contextID: "conv-a"})
+	if m.convName != "dfw quota escalation" {
+		t.Fatalf("convName = %q, want the listed name", m.convName)
+	}
+
+	// And a conversation with no name resumes unnamed rather than keeping the
+	// previous one's.
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{titledConversation("conv-b", "other")}})
+	m.Update(pickerTranscriptMsg{contextID: "conv-b"})
+	if m.convName != "" {
+		t.Fatalf("convName = %q, want empty", m.convName)
+	}
+}
+
 // ── picker preview ────────────────────────────────────────────
 
 func testConversation(name string) assistantv1alpha1.Conversation {
@@ -181,9 +280,254 @@ func testConversation(name string) assistantv1alpha1.Conversation {
 	return c
 }
 
+func titledConversation(name, title string) assistantv1alpha1.Conversation {
+	c := testConversation(name)
+	c.Status.Title = title
+	c.Status.MessageCount = 4
+	return c
+}
+
+// ── picker search ─────────────────────────────────────────────
+
+func TestFilterConversationsMatchesEveryTermInTitleOrID(t *testing.T) {
+	items := []assistantv1alpha1.Conversation{
+		titledConversation("01a05ee5-aaaa", "Why is the api-backend workload not available?"),
+		titledConversation("0b77c2d1-bbbb", "DFW quota is blocking the test instance"),
+		titledConversation("0c99e3f2-cccc", ""),
+	}
+	cases := []struct {
+		query string
+		want  []int
+	}{
+		{"", []int{0, 1, 2}},
+		{"quota", []int{1}},
+		{"QUOTA dfw", []int{1}},
+		{"api workload", []int{0}},
+		{"0c99", []int{2}},
+		{"nothing-here", []int{}},
+	}
+	for _, c := range cases {
+		got := filterConversations(items, c.query)
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("filter %q = %v, want %v", c.query, got, c.want)
+		}
+	}
+}
+
+// The row headline prefers what the user chose to call the conversation, then
+// the derived title, and falls back to the id so a row is never blank.
+func TestConversationTitlePrefersTheUserGivenName(t *testing.T) {
+	named := titledConversation("01a05ee5-aaaa", "Why is the api-backend workload not available?")
+	named.Status.Name = "dfw quota escalation"
+	cases := []struct {
+		name string
+		in   assistantv1alpha1.Conversation
+		want string
+	}{
+		{"name wins over title", named, "dfw quota escalation"},
+		{"title when unnamed", titledConversation("0b77c2d1-bbbb", "quota triage"), "quota triage"},
+		{"id when neither", testConversation("0c99e3f2-cccc"), "0c99e3f2-cccc"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := conversationTitle(c.in); got != c.want {
+				t.Errorf("conversationTitle = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// Renaming must not hide a conversation from a search for what it was
+// originally about, so the name is searched alongside the title, not instead.
+func TestFilterConversationsMatchesNamesToo(t *testing.T) {
+	named := titledConversation("01a05ee5-aaaa", "Why is the api-backend workload not available?")
+	named.Status.Name = "dfw quota escalation"
+	items := []assistantv1alpha1.Conversation{named, titledConversation("0b77c2d1-bbbb", "unrelated")}
+	for _, query := range []string{"escalation", "api-backend", "escalation api-backend"} {
+		if got := filterConversations(items, query); fmt.Sprint(got) != "[0]" {
+			t.Errorf("filter %q = %v, want [0]", query, got)
+		}
+	}
+}
+
+func TestPickerTypingNarrowsListAndPreviewsTopMatch(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	m.picker.transcript = true
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{
+		titledConversation("conv-a", "api-backend not available"),
+		titledConversation("conv-b", "quota triage for dfw"),
+	}})
+	m.Update(pickerPreviewMsg{contextID: "conv-a"}) // settle the initial fetch
+
+	var cmd tea.Cmd
+	for _, r := range "quota" {
+		_, cmd = m.onPickerKey(key(r, string(r)))
+	}
+	if len(m.picker.filtered) != 1 || m.picker.filtered[0] != 1 {
+		t.Fatalf("typing \"quota\" should leave only conv-b, got filtered=%v", m.picker.filtered)
+	}
+	if got, _ := m.picker.selected(); got.Name != "conv-b" {
+		t.Fatalf("cursor should sit on the top match, got %q", got.Name)
+	}
+	if cmd == nil || !m.picker.previewPending["conv-b"] {
+		t.Fatal("narrowing onto conv-b should kick off its preview fetch")
+	}
+	if strings.TrimSpace(m.ti.Value()) != "" {
+		t.Fatalf("picker typing must not leak into the chat input, got %q", m.ti.Value())
+	}
+
+	// Enter resumes the highlighted match, not the first item of the full list.
+	_, cmd = m.onPickerKey(key(tea.KeyEnter, ""))
+	if cmd == nil || !m.picker.loading {
+		t.Fatal("enter on a match should start loading that conversation")
+	}
+}
+
+func TestPickerViewEmptyStates(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{})
+	if out := plain(m.pickerView().Content); !containsAll(out, "No conversations found in this project.") {
+		t.Fatalf("empty project should say so, got:\n%s", out)
+	}
+
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{titledConversation("conv-a", "hello there")}})
+	typePicker(m, "zzz")
+	if out := plain(m.pickerView().Content); !containsAll(out, `No conversations match "zzz".`) {
+		t.Fatalf("no-match should name the query, got:\n%s", out)
+	}
+}
+
+func TestPickerRowsAreOneLineUntilComfortableView(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{
+		titledConversation("01a05ee5-1234-5678", "Why is the api-backend workload not available?"),
+		testConversation("0b77c2d1-summary-only"),
+	}})
+	out := plain(m.pickerView().Content)
+	if !containsAll(out, "Resume a previous conversation", "Type to search", "Sort: [Updated] Created",
+		"❯ no activity  Why is the api-backend workload not available?", "0b77c2d1-summary-only",
+		" 1 / 2 ", "enter resume", "ctrl+t transcript") {
+		t.Fatalf("picker missing expected pieces, got:\n%s", out)
+	}
+	if strings.Contains(out, "4 messages") || strings.Contains(out, "01a05ee5-1234-5678") {
+		t.Fatalf("compact rows should not carry the size or id, got:\n%s", out)
+	}
+	m.onPickerKey(key(tea.KeyTab, "")) // focus sort, then flip it
+	m.onPickerKey(key(tea.KeyRight, ""))
+	m.onPickerKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	out = plain(m.pickerView().Content)
+	if !containsAll(out, "Sort: Updated [Created]", "4 messages · 01a05ee5-1234-5678") {
+		t.Fatalf("comfortable view + Created sort missing, got:\n%s", out)
+	}
+	if !containsAll(out, "\n") || m.picker.search.Value() != "" {
+		t.Fatalf("tab/arrows/ctrl+o must not type into the search box, got %q", m.picker.search.Value())
+	}
+}
+
+func TestPickerTranscriptToggleShowsPreview(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{titledConversation("conv-a", "hello")}})
+	if m.picker.previewPending["conv-a"] {
+		t.Fatal("no preview fetch until the transcript pane is opened")
+	}
+	_, cmd := m.onPickerKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	if cmd == nil || !m.picker.previewPending["conv-a"] {
+		t.Fatal("ctrl+t should open the pane and fetch the highlighted transcript")
+	}
+	m.Update(pickerPreviewMsg{contextID: "conv-a", items: []assistantv1alpha1.ConversationMessage{{Role: "user", Content: "hello"}, {Role: "assistant", Content: "hi back"}}})
+	if out := plain(m.pickerView().Content); !containsAll(out, "preview", "Patch: hi back") {
+		t.Fatalf("transcript pane should render under the rows, got:\n%s", out)
+	}
+}
+
+func TestPickerEscCancels(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{titledConversation("conv-a", "x")}})
+	m.onKey(key(tea.KeyEscape, ""))
+	if m.picker.open {
+		t.Fatal("esc should close the picker")
+	}
+}
+
+// plain strips ANSI styling so assertions can match text the renderer split
+// across styled spans (e.g. the placeholder's cursor cell).
+func plain(s string) string {
+	return ansiRE.ReplaceAllString(s, "")
+}
+
+var ansiRE = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]")
+
+func typePicker(m *chatModel, s string) {
+	for _, r := range s {
+		m.onPickerKey(key(r, string(r)))
+	}
+}
+
+// ── resume on start ───────────────────────────────────────────
+
+func TestResumeOnStartOpensPickerAtFirstLayout(t *testing.T) {
+	m := newTestModel()
+	m.resumeOnStart = pickerOnStart
+	cmd := m.layout(120, 40)
+	if cmd == nil || !m.picker.open || !m.picker.loading {
+		t.Fatalf("first layout should open a loading picker and fetch the list (cmd=%v open=%v loading=%v)", cmd != nil, m.picker.open, m.picker.loading)
+	}
+	if m.resumeOnStart != "" {
+		t.Fatal("resumeOnStart must be consumed so a later resize doesn't reopen the picker")
+	}
+	if m.layout(100, 40) != nil {
+		t.Fatal("a second layout must not re-trigger the resume")
+	}
+}
+
+func TestResumeOnStartWithIDLoadsTranscriptDirectly(t *testing.T) {
+	m := newTestModel()
+	m.resumeOnStart = "ctx-42"
+	if cmd := m.layout(120, 40); cmd == nil || !m.picker.direct || !m.picker.loading {
+		t.Fatal("first layout should start a direct transcript load")
+	}
+	if out := plain(m.pickerView().Content); !containsAll(out, "loading conversation") || strings.Contains(out, "Type to search") {
+		t.Fatalf("direct load shows a spinner and no search box, got:\n%s", out)
+	}
+	// Typing while a direct load is pending goes nowhere — there is no list to filter.
+	m.onPickerKey(key('q', "q"))
+	if m.picker.search.Value() != "" {
+		t.Fatal("direct mode has no search box to type into")
+	}
+
+	m.Update(pickerTranscriptMsg{contextID: "ctx-42", items: []assistantv1alpha1.ConversationMessage{
+		{Role: "user", Content: "earlier question"},
+		{Role: "assistant", Content: "earlier answer"},
+	}})
+	if m.picker.open || m.contextID != "ctx-42" || len(m.raw) != 2 {
+		t.Fatalf("transcript should land in the chat and close the overlay (open=%v ctx=%q turns=%d)", m.picker.open, m.contextID, len(m.raw))
+	}
+}
+
+func TestResumeDirectErrorOffersFreshChat(t *testing.T) {
+	m := newTestModel()
+	m.resumeOnStart = "ctx-missing"
+	m.layout(120, 40)
+	m.Update(pickerTranscriptMsg{err: errors.New("kubectl: not found")})
+	out := plain(m.pickerView().Content)
+	if !containsAll(out, "kubectl: not found", "esc to start a fresh conversation") {
+		t.Fatalf("direct-load failure should show the error and the way out, got:\n%s", out)
+	}
+	m.onKey(key(tea.KeyEscape, ""))
+	if m.picker.open {
+		t.Fatal("esc should drop into a fresh chat")
+	}
+}
+
 func TestPickerListLoadTriggersInitialPreviewFetch(t *testing.T) {
 	m := newTestModel()
-	m.picker = newPickerState()
+	m.picker = newPickerState(false)
+	m.picker.transcript = true
 	_, cmd := m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{
 		testConversation("conv-a"), testConversation("conv-b"),
 	}})
@@ -200,8 +544,10 @@ func TestPickerListLoadTriggersInitialPreviewFetch(t *testing.T) {
 
 func TestPickerCursorMoveTriggersPreviewFetchOnce(t *testing.T) {
 	m := newTestModel()
-	m.picker = newPickerState()
+	m.picker = newPickerState(false)
+	m.picker.transcript = true
 	m.picker.items = []assistantv1alpha1.Conversation{testConversation("conv-a"), testConversation("conv-b")}
+	m.picker.refilter()
 	m.picker.loading = false
 
 	_, cmd := m.onPickerKey(key(tea.KeyDown, ""))
@@ -229,8 +575,9 @@ func TestPickerCursorMoveTriggersPreviewFetchOnce(t *testing.T) {
 
 func TestPickerPreviewErrorIsCachedNotRetried(t *testing.T) {
 	m := newTestModel()
-	m.picker = newPickerState()
+	m.picker = newPickerState(false)
 	m.picker.items = []assistantv1alpha1.Conversation{testConversation("conv-a")}
+	m.picker.refilter()
 	m.picker.loading = false
 	m.picker.previewPending["conv-a"] = true
 
@@ -245,13 +592,14 @@ func TestPickerPreviewErrorIsCachedNotRetried(t *testing.T) {
 
 func TestPreviewPaneRendersCachedMessages(t *testing.T) {
 	m := newTestModel()
-	m.picker = newPickerState()
+	m.picker = newPickerState(false)
 	m.picker.items = []assistantv1alpha1.Conversation{testConversation("conv-a")}
+	m.picker.refilter()
 	m.picker.preview["conv-a"] = []assistantv1alpha1.ConversationMessage{
 		{Role: "user", Content: "diagnose pipeline p-7"},
 		{Role: "assistant", Content: "found the issue"},
 	}
-	out := m.previewPane()
+	out := m.previewPane(60)
 	if !containsAll(out, "diagnose pipeline p-7", "found the issue") {
 		t.Fatalf("preview pane should show the cached transcript, got:\n%s", out)
 	}
@@ -259,13 +607,14 @@ func TestPreviewPaneRendersCachedMessages(t *testing.T) {
 
 func TestPreviewPaneRendersSummaryDistinctly(t *testing.T) {
 	m := newTestModel()
-	m.picker = newPickerState()
+	m.picker = newPickerState(false)
 	m.picker.items = []assistantv1alpha1.Conversation{testConversation("conv-a")}
+	m.picker.refilter()
 	m.picker.preview["conv-a"] = []assistantv1alpha1.ConversationMessage{
 		{Role: "summary", Content: "compacted digest of earlier turns"},
 		{Role: "user", Content: "what's next"},
 	}
-	out := m.previewPane()
+	out := m.previewPane(60)
 	if !containsAll(out, "Summary", "compacted digest of earlier turns") {
 		t.Fatalf("preview pane should label a summary message distinctly, got:\n%s", out)
 	}
@@ -321,10 +670,11 @@ func TestExportTranscriptLabelsSummaryDistinctly(t *testing.T) {
 
 func TestPreviewPaneShowsLoadingThenContent(t *testing.T) {
 	m := newTestModel()
-	m.picker = newPickerState()
+	m.picker = newPickerState(false)
 	m.picker.items = []assistantv1alpha1.Conversation{testConversation("conv-a")}
+	m.picker.refilter()
 	m.picker.previewPending["conv-a"] = true
-	if out := m.previewPane(); !containsAll(out, "loading") {
+	if out := m.previewPane(60); !containsAll(out, "loading") {
 		t.Fatalf("pending preview should show a loading state, got:\n%s", out)
 	}
 }

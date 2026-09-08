@@ -1,6 +1,6 @@
 // Package patchcli is the Datum Cloud assistant (A2A) client shared by the two
 // binaries that ship it: `patch` (cmd/patch, the standalone CLI the e2e harness
-// drives) and `datumctl patch` (cmd/milo-patch, the datumctl plugin). It is
+// drives) and `datumctl assistant` (cmd/milo-assistant, the datumctl plugin). It is
 // a thin client over the official a2a-go client, proving the "the service is
 // just one client away" architecture with a second consumer.
 //
@@ -21,9 +21,12 @@
 //	patch card [--json]
 //	patch chat "<message>" --project <p> [--context-id <c>] [--json]
 //	patch chat -i --project <p> [--context-id <c>]
+//	patch chat -c --project <p>
+//	patch resume [<context-id>] --project <p> [--last] [--kubeconfig <k>]
 //	patch compact --project <p> --context-id <c> [--json]
 //	patch conversations list --project <p> [--json]
 //	patch conversations show <context-id> --project <p> [--json]
+//	patch conversations rename <context-id> <name> --project <p> [--json]
 //	patch gaps list --project <p> [--json]
 //	patch task get <id> [--json]
 //	patch task cancel <id> [--json]
@@ -57,6 +60,12 @@ type command struct {
 	contextID   string
 	interactive bool
 	tui         bool
+	// continueLast resumes the project's most recently active conversation
+	// without the picker (-c / --continue, and resume's --last).
+	continueLast bool
+
+	// conversations rename
+	name string
 
 	// conversations (kubectl against the aggregated apiserver)
 	kubeconfig string
@@ -88,8 +97,8 @@ func parseArgs(argv []string) command {
 		return common
 
 	case "chat":
-		if !flags.interactive && !flags.tui && (len(rest) == 0 || rest[0] == "") {
-			return command{kind: kindError, errMsg: "chat: missing message argument (or use --interactive / --tui)"}
+		if !flags.interactive && !flags.tui && !flags.continueLast && (len(rest) == 0 || rest[0] == "") {
+			return command{kind: kindError, errMsg: "chat: missing message argument (or use --interactive / --tui / --continue)"}
 		}
 		if flags.project == "" {
 			return command{kind: kindError, errMsg: "chat: --project <name> is required"}
@@ -101,8 +110,32 @@ func parseArgs(argv []string) command {
 		common.project = flags.project
 		common.contextID = flags.contextID
 		common.interactive = flags.interactive
-		common.tui = flags.tui
+		common.continueLast = flags.continueLast
+		// `chat -c` on its own means "put me back in my last conversation",
+		// which is the full-screen chat — the same thing `resume` opens. With
+		// a message (or -i) it stays the form the user asked for and only
+		// supplies the conversation to continue.
+		common.tui = flags.tui || (flags.continueLast && !flags.interactive && common.message == "")
 		common.kubeconfig = flags.kubeconfig
+		return common
+
+	case "resume":
+		// The full-screen chat, opened straight into the conversation
+		// picker — or, with a context id, into that conversation with its
+		// transcript loaded. Needs both the service (to chat) and the
+		// apiserver read view (to list/load), like chat --tui's /resume.
+		if flags.project == "" {
+			return command{kind: kindError, errMsg: "resume: --project <name> is required"}
+		}
+		common.kind = KindResume
+		common.project = flags.project
+		common.kubeconfig = flags.kubeconfig
+		common.continueLast = flags.last || flags.continueLast
+		if len(rest) > 0 {
+			common.contextID = rest[0]
+		} else {
+			common.contextID = flags.contextID
+		}
 		return common
 
 	case "compact":
@@ -125,8 +158,8 @@ func parseArgs(argv []string) command {
 		if len(rest) > 1 {
 			id = rest[1]
 		}
-		if sub != "list" && sub != "show" {
-			return command{kind: kindError, errMsg: `conversations: expected "list" or "show", got "` + sub + `"`}
+		if sub != "list" && sub != "show" && sub != "rename" {
+			return command{kind: kindError, errMsg: `conversations: expected "list", "show" or "rename", got "` + sub + `"`}
 		}
 		if flags.project == "" {
 			return command{kind: kindError, errMsg: "conversations " + sub + ": --project <name> is required"}
@@ -138,7 +171,19 @@ func parseArgs(argv []string) command {
 			return common
 		}
 		if id == "" {
-			return command{kind: kindError, errMsg: "conversations show: missing <context-id> argument"}
+			return command{kind: kindError, errMsg: "conversations " + sub + ": missing <context-id> argument"}
+		}
+		if sub == "rename" {
+			// The name is the rest of the positionals joined, so an unquoted
+			// multi-word name works the way it reads on the command line.
+			name := strings.TrimSpace(strings.Join(rest[2:], " "))
+			if name == "" {
+				return command{kind: kindError, errMsg: "conversations rename: missing <name> argument"}
+			}
+			common.kind = KindConvRename
+			common.contextID = id
+			common.name = name
+			return common
 		}
 		common.kind = KindConvShow
 		common.contextID = id
@@ -193,16 +238,18 @@ func parseArgs(argv []string) command {
 
 // flags holds the split of argv into recognized flags and leftover positionals.
 type flags struct {
-	json        bool
-	help        bool
-	interactive bool
-	tui         bool
-	url         string
-	token       string
-	project     string
-	contextID   string
-	kubeconfig  string
-	positionals []string
+	json         bool
+	help         bool
+	interactive  bool
+	tui          bool
+	continueLast bool
+	last         bool
+	url          string
+	token        string
+	project      string
+	contextID    string
+	kubeconfig   string
+	positionals  []string
 }
 
 // extractFlags splits argv into flags + positionals. Both `--flag value` and
@@ -221,6 +268,10 @@ func extractFlags(argv []string) (flags, string) {
 			f.interactive = true
 		case arg == "--tui":
 			f.tui = true
+		case arg == "--continue" || arg == "-c":
+			f.continueLast = true
+		case arg == "--last":
+			f.last = true
 		case arg == "--url" || strings.HasPrefix(arg, "--url="):
 			val, consumed, ok := valueFor(arg, argv, i)
 			if !ok {
@@ -299,9 +350,12 @@ Usage:
   patch chat "<message>" --project <name> [--context-id <c>] [--json]
   patch chat -i --project <name> [--context-id <c>]
   patch chat --tui --project <name> [--context-id <c>] ["<message>"]
+  patch chat -c --project <name>
+  patch resume [<context-id>] --project <name> [--last]
   patch compact --project <name> --context-id <c> [--json]
   patch conversations list --project <name> [--json]
   patch conversations show <context-id> --project <name> [--json]
+  patch conversations rename <context-id> "<name>" --project <name> [--json]
   patch gaps list --project <name> [--json]
   patch task get <id> [--json]
   patch task cancel <id> [--json]
@@ -312,17 +366,23 @@ Options:
                       below, not the project a conversation ran in)
   --context-id <c>    Continue an existing conversation (chat); the service
                       replays that conversation's history into the turn
+  -c, --continue      Continue the project's most recently active conversation
+                      instead of starting a new one — the picker's top row,
+                      without the picker (chat; 'resume --last' is the same
+                      thing)
+      --last          Same as --continue, for 'resume'
   -i, --interactive   Multi-turn chat session; the conversation id is kept
                       across turns (Ctrl-D or /quit to leave)
       --tui           Full-screen Bubble Tea chat UI: scrollable transcript
                       (↑/↓, pgup/pgdn, or the mouse wheel; esc jumps back to
                       the latest), live-streamed answers rendered as markdown,
                       spinner while the assistant works, tab-completion for
-                      slash commands. Slash commands: /resume (browse/resume a past
-                      conversation, with a live preview of each one's
-                      transcript as you move the cursor), /clear (start a
+                      slash commands. Slash commands: /resume (search and
+                      resume a past conversation, with a live preview of each
+                      one's transcript as you move the cursor), /clear (start a
                       fresh one), /compact (force history compaction now,
                       instead of waiting for the automatic threshold),
+                      /rename <name> (name this conversation),
                       /export (save the transcript to a file),
                       /status (show project/conversation/turn count), /help
                       (list commands), /quit or /exit (leave; Ctrl-C also
@@ -340,6 +400,17 @@ Environment:
   PATCH_TOKEN        Bearer token for the service
   KUBECONFIG         Kubeconfig used by 'conversations' (the apiserver read view)
 
+Resume:
+  'resume' opens the full-screen chat straight into the conversation picker:
+  a search box over the project's conversations, newest first, each shown by
+  its opening message with a live preview of the highlighted one; enter
+  resumes it, esc cancels into a fresh chat. With a <context-id> it skips the
+  picker and loads that conversation's transcript directly; with --last it
+  skips the picker straight into the most recently active conversation, and
+  says so instead when the project has none. Needs PATCH_URL/
+  PATCH_TOKEN (to chat) and KUBECONFIG (to list and load, like
+  'conversations'); the chat --tui has the same picker as /resume.
+
 Compact:
   'compact' forces the assistant to summarize an existing conversation's older
   history right now, instead of waiting for the automatic threshold trigger.
@@ -354,6 +425,10 @@ Conversations:
   conversations aggregated apiserver (assistant.miloapis.com) via kubectl —
   a read view under platform authz, separate from the chat transport. Pick a
   context id here, then resume it with 'patch chat --context-id <id>'.
+  'rename' is the exception: naming a conversation is a write, so it calls the
+  assistant service (PATCH_URL/PATCH_TOKEN) rather than the read view. A name
+  is at most 80 characters and shows in place of the derived title wherever
+  conversations are listed.
 
 Gaps:
   'gaps' lists capability-gap reports: records a provider service's own team
@@ -367,6 +442,9 @@ Examples:
   PATCH_URL=http://localhost:7820 PATCH_TOKEN=dev-token \
     patch chat "Diagnose pipeline p-1 for StreamCo" --project demo-project
   patch chat -i --project demo-project
+  patch resume --project demo-project
+  patch resume --last --project demo-project
+  patch chat -c --project demo-project
   patch card --url http://localhost:7820
   patch conversations list --project demo-project
   patch conversations show 019f7293-3579-7d8e-8233-4da8bc900405 --project demo-project
