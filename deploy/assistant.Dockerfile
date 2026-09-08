@@ -42,7 +42,10 @@ ENTRYPOINT ["/usr/local/bin/assistant"]
 
 # ── Builder: compile ./cmd/assistant statically ────────────────────────
 # Pinned to the `go` directive in go.mod — bump both together.
-FROM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+# Build natively, cross-compile to TARGETARCH: emulating the whole Go toolchain
+# under QEMU makes `go mod download` die with heap corruption.
+ARG TARGETARCH
 WORKDIR /src
 
 # Module graph first, so a source-only edit reuses the cached download layer.
@@ -50,9 +53,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" \
       -o /out/assistant ./cmd/assistant
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" \
       -o /out/assistant-apiserver ./cmd/assistant-apiserver
 
 # ── Runtime (default): the freshly compiled binary ─────────────────────
