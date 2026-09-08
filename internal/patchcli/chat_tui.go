@@ -36,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"slices"
 	"strings"
@@ -92,6 +93,25 @@ type (
 	streamErrMsg struct {
 		gen int
 		err error
+	}
+	// streamBrokeMsg says the stream ended without the service ever reporting
+	// a terminal task state — the connection dropped while the turn was still
+	// running. err is the reader's error, or nil for the graceful close that
+	// looks exactly like a finished stream. The turn is not over: the work
+	// continues server-side, so this starts the recovery poll rather than
+	// committing a truncated answer.
+	streamBrokeMsg struct {
+		gen    int
+		taskID a2a.TaskID
+		err    error
+	}
+	// recoverDoneMsg ends the recovery poll started by a streamBrokeMsg:
+	// task is the last snapshot read back (nil if none was), and err is nil
+	// once it reached a terminal state.
+	recoverDoneMsg struct {
+		gen  int
+		task *a2a.Task
+		err  error
 	}
 	// compactDoneMsg ends a /compact request (POST /v1alpha1/compact, outside the
 	// a2a client): err is nil on success, [ErrNothingToCompact] when the
@@ -272,6 +292,13 @@ type chatModel struct {
 	turnGen    int
 	cancelTurn context.CancelFunc
 	taskID     a2a.TaskID
+
+	// recovering is set while a turn whose stream broke is being polled out of
+	// the durable task store (see [chatModel.recover]). The turn is still
+	// working — this only changes what the footer says, so the pane is never
+	// silently frozen. recoverOpts overrides the poll schedule in tests.
+	recovering  bool
+	recoverOpts recoverOptions
 
 	// queued holds messages typed while a turn was running, listed above the
 	// composer and sent one per turn as each finishes. Capped at
@@ -502,31 +529,36 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.contextID != "" {
 			m.contextID = msg.contextID
 		}
-		answer := m.renderMarkdown(m.answer.String())
+		note := ""
 		if msg.failed {
-			note := msg.failMsg
+			note = msg.failMsg
 			if note == "" {
 				note = "the task failed"
 			}
-			answer = strings.TrimRight(answer, "\n") + "\n" + m.st.err.Render("⚠ "+note)
 		}
-		tools := len(m.activity)
-		m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), answer))
-		m.keepActivity(len(m.turns) - 1)
-		rawAnswer := m.answer.String()
-		if msg.failed {
-			note := msg.failMsg
-			if note == "" {
-				note = "the task failed"
-			}
-			rawAnswer = strings.TrimRight(rawAnswer, "\n") + "\n⚠ " + note
+		return m, m.commitAnswer(note)
+
+	case streamBrokeMsg:
+		if msg.gen != m.turnGen {
+			return m, nil
 		}
-		m.raw = append(m.raw, transcriptTurn{role: "assistant", content: rawAnswer})
-		m.answer.Reset()
-		m.endTurn()
-		m.closeOutTurn(tools)
-		m.rebuildViewport()
-		return m, tea.Batch(m.notifyDone(), m.drainQueue())
+		// Stay in the working state: the service is still running this turn.
+		// The partial answer keeps rendering; recovery replaces it wholesale
+		// when the task finishes.
+		m.recovering = true
+		m.taskID = msg.taskID
+		if m.cancelTurn != nil {
+			m.cancelTurn() // the stream goroutine is done with its context
+		}
+		ctx, cancel := context.WithCancel(m.baseContext())
+		m.cancelTurn = cancel
+		return m, m.recoverCmd(ctx, msg.gen, msg.taskID)
+
+	case recoverDoneMsg:
+		if msg.gen != m.turnGen {
+			return m, nil
+		}
+		return m, m.finishRecovered(msg)
 
 	case streamErrMsg:
 		if msg.gen != m.turnGen {
@@ -1459,6 +1491,11 @@ func (m *chatModel) footer() string {
 	case m.ctrlCArmed():
 		// A ctrl+c that did something other than leave has to say how to leave.
 		left = m.st.hint.Render("ctrl+c again to exit")
+	case m.recovering:
+		// The connection went, the turn did not. Say so plainly, or the
+		// spinner reads as a hang.
+		left = m.sp.View() + " " + m.st.subtle.Render("reconnected · waiting for the turn to finish"+m.workingFor()) +
+			m.st.hint.Render("  ·  esc gives up")
 	case m.working:
 		left = m.sp.View() + " " + m.st.subtle.Render("thinking…"+m.workingFor()) +
 			m.st.hint.Render("  ·  esc interrupts · type to queue")
@@ -1676,6 +1713,7 @@ func (m *chatModel) submit(text string) tea.Cmd {
 	m.activity = nil
 	m.taskID = ""
 	m.working = true
+	m.recovering = false
 	m.follow = true
 	m.rebuildViewport()
 
@@ -1693,13 +1731,33 @@ func (m *chatModel) submit(text string) tea.Cmd {
 // long-lived producers.
 func (m *chatModel) stream(ctx context.Context, gen int, text, contextID string, mentions []mention) {
 	req := &a2a.SendMessageRequest{Message: buildMessage(text, m.project, contextID, mentions)}
-	events := m.client.SendStreamingMessage(ctx, req)
+	consumeStream(ctx, m.client.SendStreamingMessage(ctx, req), gen, contextID, m.prog.Send)
+}
+
+// consumeStream translates one turn's A2A event stream into model messages,
+// and decides how the turn ended. That decision is the whole point of the
+// split: only a terminal task state means the turn finished. A stream that
+// stops without one stopped because the connection did, and the answer so far
+// is a fragment — so it yields a streamBrokeMsg for recovery instead of a
+// streamDoneMsg that would commit the fragment as the answer.
+func consumeStream(ctx context.Context, events iter.Seq2[a2a.Event, error], gen int, contextID string, send func(tea.Msg)) {
 	seen := contextID
 	var task, sentTask a2a.TaskID
 	sentCtx := contextID
+	// finished records that the service reported a terminal state. Without it
+	// there is no way to tell a finished stream from a dropped one: a graceful
+	// close ends the iterator with no error at all.
+	finished := false
 	for ev, err := range events {
 		if err != nil {
-			m.prog.Send(streamErrMsg{gen: gen, err: err})
+			// A break with a task id behind it is recoverable — the turn is
+			// still running on the server. Without one there is nothing to
+			// poll, so it stays a plain error.
+			if task != "" && ctx.Err() == nil {
+				send(streamBrokeMsg{gen: gen, taskID: task, err: err})
+				return
+			}
+			send(streamErrMsg{gen: gen, err: err})
 			return
 		}
 		if id := eventContextID(ev); id != "" {
@@ -1710,22 +1768,22 @@ func (m *chatModel) stream(ctx context.Context, gen int, text, contextID string,
 		}
 		if task != sentTask || seen != sentCtx {
 			sentTask, sentCtx = task, seen
-			m.prog.Send(streamIDsMsg{gen: gen, taskID: task, contextID: seen})
+			send(streamIDsMsg{gen: gen, taskID: task, contextID: seen})
 		}
 		switch e := ev.(type) {
 		case *a2a.TaskArtifactUpdateEvent:
 			if t := textOf(e.Artifact.Parts); t != "" {
-				m.prog.Send(streamChunkMsg{gen: gen, text: t})
+				send(streamChunkMsg{gen: gen, text: t})
 			}
 		case *a2a.Message:
 			if t := textOf(e.Parts); t != "" {
-				m.prog.Send(streamChunkMsg{gen: gen, text: t})
+				send(streamChunkMsg{gen: gen, text: t})
 			}
 		case *a2a.TaskStatusUpdateEvent:
 			// Tool activity rides on working-state updates (see
 			// internal/a2a/activity.go); everything else is a state change.
 			if act, ok := toolActivityFrom(e.Status.Message); ok {
-				m.prog.Send(streamActivityMsg{gen: gen, act: act})
+				send(streamActivityMsg{gen: gen, act: act})
 				continue
 			}
 			if e.Status.State == a2a.TaskStateFailed {
@@ -1733,12 +1791,33 @@ func (m *chatModel) stream(ctx context.Context, gen int, text, contextID string,
 				if e.Status.Message != nil {
 					note = textOf(e.Status.Message.Parts)
 				}
-				m.prog.Send(streamDoneMsg{gen: gen, contextID: seen, failed: true, failMsg: note})
+				send(streamDoneMsg{gen: gen, contextID: seen, failed: true, failMsg: note})
 				return
+			}
+			if terminalTaskState(e.Status.State) {
+				finished = true
 			}
 		}
 	}
-	m.prog.Send(streamDoneMsg{gen: gen, contextID: seen})
+	// The stream ended. Without a terminal state it did not end because the
+	// turn did — it ended because the connection did, and the answer so far is
+	// a fragment. Recover it rather than committing the fragment as the answer.
+	if !finished && task != "" && ctx.Err() == nil {
+		send(streamBrokeMsg{gen: gen, taskID: task})
+		return
+	}
+	send(streamDoneMsg{gen: gen, contextID: seen})
+}
+
+// recoverCmd polls the durable task store for a turn whose stream broke. It is
+// a Cmd rather than a goroutine (the shape [chatModel.stream] needs) because
+// recovery yields exactly one message: the turn's outcome.
+func (m *chatModel) recoverCmd(ctx context.Context, gen int, id a2a.TaskID) tea.Cmd {
+	client, opts := m.client, m.recoverOpts
+	return func() tea.Msg {
+		task, err := pollTask(ctx, client, id, opts)
+		return recoverDoneMsg{gen: gen, task: task, err: err}
+	}
 }
 
 // interruptedMarker ends a turn the user stopped. It is rendered subtle, not
@@ -1793,10 +1872,61 @@ func (m *chatModel) interrupt() {
 	}
 }
 
+// commitAnswer finalizes the current turn: whatever is in m.answer becomes a
+// Patch block in the transcript, optionally footed with a note (a failed task,
+// or a turn recovery could not finish). It is the one place a turn ends
+// normally, shared by the streamed and the recovered paths so both produce the
+// same transcript, activity rows and end-of-turn bell.
+func (m *chatModel) commitAnswer(note string) tea.Cmd {
+	answer := m.renderMarkdown(m.answer.String())
+	rawAnswer := m.answer.String()
+	if note != "" {
+		answer = strings.TrimRight(answer, "\n") + "\n" + m.st.err.Render("⚠ "+note)
+		rawAnswer = strings.TrimRight(rawAnswer, "\n") + "\n⚠ " + note
+	}
+	tools := len(m.activity)
+	m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), answer))
+	m.keepActivity(len(m.turns) - 1)
+	m.raw = append(m.raw, transcriptTurn{role: "assistant", content: rawAnswer})
+	m.answer.Reset()
+	m.endTurn()
+	m.closeOutTurn(tools)
+	m.rebuildViewport()
+	return tea.Batch(m.notifyDone(), m.drainQueue())
+}
+
+// finishRecovered ends a turn whose stream broke, using what the durable task
+// store gave back. On a terminal task the recovered text REPLACES the partial
+// answer wholesale — deltas append into one artifact, so the store holds the
+// whole answer and there is no offset to splice at. A recovery that ran out of
+// budget (or hit a context cancellation) keeps whatever text it did read and
+// says so, naming the task so the user can come back for it.
+func (m *chatModel) finishRecovered(msg recoverDoneMsg) tea.Cmd {
+	m.recovering = false
+	if msg.task != nil {
+		if msg.task.ContextID != "" {
+			m.contextID = msg.task.ContextID
+		}
+		if text := answerFromTask(msg.task); text != "" {
+			m.answer.Reset()
+			m.answer.WriteString(text)
+		}
+	}
+	if msg.err == nil {
+		return m.commitAnswer(failureFromTask(msg.task))
+	}
+	note := "the connection dropped and the answer could not be recovered: " + msg.err.Error()
+	if m.taskID != "" {
+		note += " — try `patch task get " + string(m.taskID) + "`"
+	}
+	return m.commitAnswer(note)
+}
+
 // endTurn clears the per-turn state a finished or abandoned turn leaves
 // behind. Cancelling even a completed turn's context is what releases it.
 func (m *chatModel) endTurn() {
 	m.working = false
+	m.recovering = false
 	m.taskID = ""
 	if m.cancelTurn != nil {
 		m.cancelTurn()

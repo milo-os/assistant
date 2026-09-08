@@ -172,3 +172,29 @@ Behaviour:
 - Auth/transport failures print a clear `patch: …` message to stderr and
   exit non-zero (401 → "unauthorized", 403 → "forbidden").
 
+### A dropped connection does not lose the turn
+
+Streaming is the default and the good case is untouched. Only a **terminal
+task state** ends a turn: a stream that stops without one stopped because
+the connection did, and the answer so far is a fragment. That distinction
+matters because a graceful close looks identical to a finished stream —
+a2a-go parses SSE with a `bufio.Scanner`, and a clean EOF yields no error.
+
+The work continues server-side and lands in the durable task store either
+way, so the recovery path is a poll rather than a re-attach:
+
+- **The chat TUI** keeps the turn open, says *"reconnected · waiting for
+  the turn to finish"*, and polls `GetTask` with backoff (first look after
+  1s, capped at 8s, bounded at 5 minutes). Text deltas append into one
+  `response` artifact, so the recovered answer **replaces** the fragment
+  wholesale — there is no offset to resume from. `esc` gives up. Giving up
+  names the task so the answer is still reachable.
+- **The line-based modes** cannot un-print a fragment they already wrote to
+  stdout, so they report the break on stderr, name the task, and exit 1.
+  Recover the answer with `patch task get <id>`.
+
+`SubscribeToTask` is *not* the recovery path even though A2A offers it:
+a2a-go answers it from an in-memory execution registry, so a turn that has
+already finished — the exact case here — gets "no active execution". It
+also cannot survive a pod restart. Polling can do both.
+
