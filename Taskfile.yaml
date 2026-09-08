@@ -362,7 +362,11 @@ tasks:
         fi
 
   dev:card:
-    desc: Print the assistant's agent card (capability discovery). Auto-forwards.
+    desc: >-
+      Print the assistant's agent card (capability discovery). EXTENDED=1 asks
+      for the authenticated per-project card for PROJECT instead — the public
+      card plus a skill per provider service that project is entitled to.
+      Auto-forwards.
     silent: true
     env:
       KUBECONFIG: '{{.KUBECONFIG_PATH}}'
@@ -377,7 +381,11 @@ tasks:
           kubectl -n {{.NS}} port-forward svc/assistant 1986:7820 >/dev/null 2>&1 &
           for i in $(seq 1 30); do curl -sf -m 2 -o /dev/null "$PATCH_URL/healthz" 2>/dev/null && break; sleep 0.5; done
         fi
-        go run ./cmd/patch card --url "$PATCH_URL"
+        if [ -n "{{.EXTENDED}}" ]; then
+          go run ./cmd/patch card --url "$PATCH_URL" --project {{.PROJECT}}
+        else
+          go run ./cmd/patch card --url "$PATCH_URL"
+        fi
 
   dev:patch:
     desc: >-

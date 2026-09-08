@@ -156,6 +156,16 @@ func (inv Invocation) needsService() bool {
 	return true
 }
 
+// token reads the invocation's [TokenSource], treating an unset source as no
+// token. Commands that need credentials up front check this before building a
+// client, so the user gets guidance instead of the service's bare 401.
+func (inv Invocation) token() (string, error) {
+	if inv.Token == nil {
+		return "", nil
+	}
+	return inv.Token()
+}
+
 // Execute runs one resolved command and returns the process exit code, using
 // the same 0/1/2 convention as [Run].
 func (inv Invocation) Execute(ctx context.Context, io Io) int {
@@ -172,9 +182,31 @@ func (inv Invocation) Execute(ctx context.Context, io Io) int {
 		return runGapReportsList(ctx, inv, io)
 
 	case KindCard:
-		card, err := resolveCard(ctx, inv.BaseURL)
+		if inv.Project == "" {
+			card, err := resolveCard(ctx, inv.BaseURL)
+			if err != nil {
+				return fail(io, err, nil)
+			}
+			renderCard(card, inv.JSON, io)
+			return 0
+		}
+		// The extended card is authenticated; say so up front rather than
+		// letting the server answer with a bare 401.
+		if tok, err := inv.token(); err != nil || tok == "" {
+			io.Err("patch: card --project needs a token \u2014 set PATCH_TOKEN or pass --token\n")
+			return 2
+		}
+		client, err := newClient(ctx, inv.BaseURL, inv.Token)
 		if err != nil {
 			return fail(io, err, nil)
+		}
+		defer client.Destroy()
+		// The project travels ONLY in this request. Setting a client- or
+		// context-level tenant would make a2a-go stamp it onto every later
+		// call, including SendMessage.
+		card, err := client.GetExtendedAgentCard(ctx, &a2a.GetExtendedAgentCardRequest{Tenant: inv.Project})
+		if err != nil {
+			return fail(io, err, client.errs)
 		}
 		renderCard(card, inv.JSON, io)
 		return 0
@@ -288,6 +320,8 @@ func friendlyError(err error, errs *httpErrRecorder) string {
 		return "unauthorized: " + err.Error() + " (" + AuthHint + ")"
 	case errors.Is(err, a2a.ErrUnauthorized):
 		return "forbidden: " + err.Error() + " (token does not grant this project)"
+	case errors.Is(err, a2a.ErrExtendedCardNotConfigured):
+		return "this service does not offer a per-project agent card (drop --project)"
 	case errors.Is(err, a2a.ErrTaskNotCancelable):
 		return "task cannot be canceled (it is already in a terminal state)"
 	}

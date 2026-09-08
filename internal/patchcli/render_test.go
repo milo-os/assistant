@@ -162,6 +162,80 @@ func TestRenderCard(t *testing.T) {
 	}
 }
 
+// TestRenderCardBareGolden pins the unauthenticated `patch card` output
+// byte-for-byte: --project is additive, so the public card must render exactly
+// as it always has.
+func TestRenderCardBareGolden(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name:        "Patch",
+		Description: "Patch is the Datum Cloud assistant.",
+		Version:     "0.1.0",
+		SupportedInterfaces: []*a2a.AgentInterface{
+			{URL: "http://x/a2a", ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: "1.0"},
+		},
+		Provider:     &a2a.AgentProvider{Org: "Datum", URL: "https://www.datum.net"},
+		Capabilities: a2a.AgentCapabilities{Streaming: true, ExtendedAgentCard: true},
+		SecuritySchemes: a2a.NamedSecuritySchemes{
+			"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "bearer"},
+		},
+		Skills: []a2a.AgentSkill{{ID: "project-assistant", Name: "Project assistant", Description: "d"}},
+	}
+
+	want := "Patch  (A2A protocol 1.0, v0.1.0)\n" +
+		"Patch is the Datum Cloud assistant.\n" +
+		"\n" +
+		"Endpoint:   http://x/a2a  [JSONRPC]\n" +
+		"Provider:   Datum  https://www.datum.net\n" +
+		"Streaming:  yes\n" +
+		"Auth:       http bearer\n" +
+		"Skills:     project-assistant\n"
+
+	var out capture
+	renderCard(card, false, &out)
+	if got := out.out.String(); got != want {
+		t.Errorf("bare card output changed:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderCardExtendedListsSkills covers the extended card: per-service
+// skills are listed, not squashed into the one-line summary.
+func TestRenderCardExtendedListsSkills(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name:        "Patch",
+		Description: "desc",
+		Version:     "0.1.0",
+		SupportedInterfaces: []*a2a.AgentInterface{
+			{URL: "http://x/a2a", ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: "1.0"},
+		},
+		Capabilities: a2a.AgentCapabilities{Streaming: true, ExtendedAgentCard: true},
+		Skills: []a2a.AgentSkill{
+			{ID: "project-assistant", Name: "Project assistant", Description: "generic"},
+			{
+				ID:          "streamco",
+				Name:        "streaming.streamco.example",
+				Description: "Provider service streaming.streamco.example, entitled to this project. Tools: streamco__streams_list.",
+			},
+		},
+	}
+
+	var out capture
+	renderCard(card, false, &out)
+	got := out.out.String()
+	if strings.Contains(got, "Skills:     ") {
+		t.Errorf("extended card should list skills, not summarize them:\n%s", got)
+	}
+	for _, want := range []string{
+		"Skills:\n",
+		"  project-assistant  (Project assistant)\n",
+		"  streamco  (streaming.streamco.example)\n",
+		"    Provider service streaming.streamco.example, entitled to this project. Tools: streamco__streams_list.\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("extended card missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRenderTask(t *testing.T) {
 	task := &a2a.Task{
 		ID:        "t-1",

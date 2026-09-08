@@ -36,7 +36,7 @@ curl -s localhost:7820/a2a \
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
 | `GET` | `/healthz` | none | `{"status":"ok"}` |
-| `GET` | `/.well-known/agent-card.json` | none | A2A v1.0 agent card (also at `/.well-known/agent.json`) |
+| `GET` | `/.well-known/agent-card.json` | none | A2A v1.0 agent card — generic, no project detail (also at `/.well-known/agent.json`) |
 | `POST` | `/a2a` | bearer | JSON-RPC 2.0 endpoint |
 
 ### JSON-RPC methods (`POST /a2a`)
@@ -56,6 +56,16 @@ A2A v1.0 method names are **PascalCase** (a2a-go binding):
 - **`CancelTask`** — `{ id }` → cancels a non-terminal task; a terminal
   task returns error `-32002` (TaskNotCancelable); an unknown id returns
   `-32001` (TaskNotFound).
+- **`GetExtendedAgentCard`** — `{ tenant }` → the authenticated card for
+  one project: the public card plus one skill per provider service that
+  project's capability documents entitle it to (service name, allow-listed
+  tool names, MCP endpoints). `tenant` is A2A's own field, **overloaded
+  here to carry the Milo project** — the request carries no other field,
+  and it is the same field authorization checks. `params` must be
+  present: send `{"tenant":"demo-project"}`, or `{}` for the generic
+  public card; omitting `params` entirely fails with `-32602`. The card
+  states what the project is entitled to, not whether those services are
+  reachable.
 
 ### A2A v1.0 wire
 

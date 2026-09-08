@@ -537,6 +537,16 @@ func (c *Conversation) loadDocuments(ctx context.Context, params Params) []capab
 	return docs
 }
 
+// Entitlements returns the provider services projectName is entitled to,
+// through the SAME Source fetch and [capability.ScopeDocuments] gate a turn's
+// Compose runs, so the agent card can never promise a service the next turn
+// would not compose. It performs no MCP connect: a card claims entitlement,
+// not health.
+func (c *Conversation) Entitlements(ctx context.Context, projectName string) []capability.ServiceEntitlement {
+	docs := c.loadDocuments(ctx, Params{ProjectName: projectName})
+	return capability.Entitlements(capability.ScopeDocuments(docs, projectName, c.logger))
+}
+
 // attributionHeaders returns the gateway attribution headers, or nil in any
 // non-gateway mode (we never leak project/conversation ids to a real provider).
 func attributionHeaders(mode, projectName, contextID string) map[string]string {

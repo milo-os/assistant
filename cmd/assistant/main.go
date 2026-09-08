@@ -114,17 +114,22 @@ func run() error {
 	// field so a future AgentRunner implementation without compaction support
 	// degrades to "compaction unavailable" instead of failing to build.
 	compactor, _ := runner.(assistanta2a.Compactor)
+	// Same optional-interface shape for the authenticated extended agent card:
+	// a runner that can't describe a project's entitlement simply doesn't offer
+	// one (the method then answers EXTENDED_AGENT_CARD_NOT_CONFIGURED).
+	advertiser, _ := runner.(assistanta2a.SkillAdvertiser)
 
 	deps := server.Deps{
-		Config:        cfg,
-		Logger:        log,
-		Authenticator: authenticator,
-		Authorizer:    authorizer,
-		Runner:        runner,
-		Compactor:     compactor,
-		Renamer:       convStore,
-		ReadyCheck:    readyCheck(cfg, durableTasks, log),
-		Metrics:       metrics,
+		Config:          cfg,
+		Logger:          log,
+		Authenticator:   authenticator,
+		Authorizer:      authorizer,
+		Runner:          runner,
+		Compactor:       compactor,
+		Renamer:         convStore,
+		SkillAdvertiser: advertiser,
+		ReadyCheck:      readyCheck(cfg, durableTasks, log),
+		Metrics:         metrics,
 	}
 	if durableTasks != nil {
 		deps.TaskStore = durableTasks

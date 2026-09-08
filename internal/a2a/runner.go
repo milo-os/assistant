@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/a2aproject/a2a-go/v2/a2a"
 )
 
 // RunState is the terminal outcome of an agent run.
@@ -107,4 +109,24 @@ var ErrNothingToCompact = errors.New("a2a: nothing to compact")
 // tests of the run path have no reason to).
 type Compactor interface {
 	Compact(ctx context.Context, req CompactRequest) error
+}
+
+// CardRequest identifies one authenticated extended-agent-card lookup.
+//
+// ProjectName arrives on the A2A wire as GetExtendedAgentCardRequest.Tenant.
+// NOTE the overload: A2A defines "tenant" as the ID of the agent owner, and
+// internal/tenant uses "tenant" for the milo project scoping an apiserver read.
+// Here it is neither — it is the milo PROJECT the caller is asking about,
+// because GetExtendedAgentCardRequest carries no other field and the project is
+// what scopes every capability in this service. The middleware authorizes the
+// same field it is read from, so the two cannot disagree.
+type CardRequest struct {
+	ProjectName string
+}
+
+// SkillAdvertiser is implemented by an [AgentRunner] that can describe what a
+// project is entitled to. Optional, exactly like [Compactor]: a nil advertiser
+// means the extended card is simply not offered.
+type SkillAdvertiser interface {
+	ProjectSkills(ctx context.Context, req CardRequest) ([]a2a.AgentSkill, error)
 }

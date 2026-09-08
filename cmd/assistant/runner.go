@@ -9,6 +9,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/agent"
 	"github.com/milo-os/assistant/internal/capability"
@@ -279,4 +281,13 @@ func (r conversationRunner) Compact(ctx context.Context, req assistanta2a.Compac
 		return assistanta2a.ErrNothingToCompact
 	}
 	return err
+}
+
+// ProjectSkills implements [assistanta2a.SkillAdvertiser] over the same
+// [agent.Conversation] this runner drives turns against, so the card and the
+// next turn read the same documents through the same scope gate. Entitlement
+// derivation degrades to nothing on a source failure (see
+// Conversation.Entitlements), hence no error path here.
+func (r conversationRunner) ProjectSkills(ctx context.Context, req assistanta2a.CardRequest) ([]a2a.AgentSkill, error) {
+	return assistanta2a.ServiceSkills(r.conv.Entitlements(ctx, req.ProjectName)), nil
 }
