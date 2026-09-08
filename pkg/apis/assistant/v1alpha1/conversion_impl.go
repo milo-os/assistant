@@ -125,8 +125,15 @@ func convert_v1alpha1_CapabilityGapReport_To_assistant(in *CapabilityGapReport, 
 		ServiceName:     in.Status.ServiceName,
 		ConsumerProject: in.Status.ConsumerProject,
 		ContextID:       in.Status.ContextID,
+		CapabilityKey:   in.Status.CapabilityKey,
 		Capability:      in.Status.Capability,
 		Summary:         in.Status.Summary,
+		Kind:            string(in.Status.Kind),
+	}
+	if e := in.Status.Evidence; e != nil {
+		out.Status.Evidence = &assistant.CapabilityGapReportEvidence{
+			Tool: e.Tool, Observed: e.Observed, ContradictedBy: e.ContradictedBy,
+		}
 	}
 	return nil
 }
@@ -138,8 +145,15 @@ func convert_assistant_CapabilityGapReport_To_v1alpha1(in *assistant.CapabilityG
 		ServiceName:     in.Status.ServiceName,
 		ConsumerProject: in.Status.ConsumerProject,
 		ContextID:       in.Status.ContextID,
+		CapabilityKey:   in.Status.CapabilityKey,
 		Capability:      in.Status.Capability,
 		Summary:         in.Status.Summary,
+		Kind:            CapabilityGapKind(in.Status.Kind),
+	}
+	if e := in.Status.Evidence; e != nil {
+		out.Status.Evidence = &CapabilityGapReportEvidence{
+			Tool: e.Tool, Observed: e.Observed, ContradictedBy: e.ContradictedBy,
+		}
 	}
 	return nil
 }
@@ -165,6 +179,70 @@ func convert_assistant_CapabilityGapReportList_To_v1alpha1(in *assistant.Capabil
 		out.Items = make([]CapabilityGapReport, len(in.Items))
 		for i := range in.Items {
 			if err := convert_assistant_CapabilityGapReport_To_v1alpha1(&in.Items[i], &out.Items[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ----------------------------------------------------------------------------
+// CapabilityGap
+// ----------------------------------------------------------------------------
+
+func convert_v1alpha1_CapabilityGap_To_assistant(in *CapabilityGap, out *assistant.CapabilityGap) error {
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Status = assistant.CapabilityGapStatus{
+		ServiceName:   in.Status.ServiceName,
+		CapabilityKey: in.Status.CapabilityKey,
+		Capability:    in.Status.Capability,
+		Kind:          string(in.Status.Kind),
+		Conversations: in.Status.Conversations,
+		Occurrences:   in.Status.Occurrences,
+		FirstSeen:     in.Status.FirstSeen,
+		LastSeen:      in.Status.LastSeen,
+	}
+	return nil
+}
+
+func convert_assistant_CapabilityGap_To_v1alpha1(in *assistant.CapabilityGap, out *CapabilityGap) error {
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Status = CapabilityGapStatus{
+		ServiceName:   in.Status.ServiceName,
+		CapabilityKey: in.Status.CapabilityKey,
+		Capability:    in.Status.Capability,
+		Kind:          CapabilityGapKind(in.Status.Kind),
+		Conversations: in.Status.Conversations,
+		Occurrences:   in.Status.Occurrences,
+		FirstSeen:     in.Status.FirstSeen,
+		LastSeen:      in.Status.LastSeen,
+	}
+	return nil
+}
+
+func convert_v1alpha1_CapabilityGapList_To_assistant(in *CapabilityGapList, out *assistant.CapabilityGapList) error {
+	out.TypeMeta = in.TypeMeta
+	out.ListMeta = in.ListMeta
+	if in.Items != nil {
+		out.Items = make([]assistant.CapabilityGap, len(in.Items))
+		for i := range in.Items {
+			if err := convert_v1alpha1_CapabilityGap_To_assistant(&in.Items[i], &out.Items[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func convert_assistant_CapabilityGapList_To_v1alpha1(in *assistant.CapabilityGapList, out *CapabilityGapList) error {
+	out.TypeMeta = in.TypeMeta
+	out.ListMeta = in.ListMeta
+	if in.Items != nil {
+		out.Items = make([]CapabilityGap, len(in.Items))
+		for i := range in.Items {
+			if err := convert_assistant_CapabilityGap_To_v1alpha1(&in.Items[i], &out.Items[i]); err != nil {
 				return err
 			}
 		}

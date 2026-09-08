@@ -24,7 +24,8 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("round-trip", func(t *testing.T) {
 		s := newStore(t)
 		provider := fresh("rt")
-		r, err := s.Insert(ctx, provider, "streaming.streamco.example", "demo-project", "ctx-1", "list pipelines", "user needed a pipeline id")
+		r, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "streaming.streamco.example",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "list pipelines", Summary: "user needed a pipeline id"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -51,7 +52,8 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("provider project isolation", func(t *testing.T) {
 		s := newStore(t)
 		provider := fresh("iso")
-		if _, err := s.Insert(ctx, provider, "svc", "demo-project", "ctx-1", "cap", "summary"); err != nil {
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "summary"}); err != nil {
 			t.Fatal(err)
 		}
 		reports, err := s.List(ctx, provider+"-other")
@@ -63,10 +65,12 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("consumer project attribution does not affect the write key", func(t *testing.T) {
 		s := newStore(t)
 		provider := fresh("attr")
-		if _, err := s.Insert(ctx, provider, "svc", "consumer-a", "ctx-1", "cap", "summary"); err != nil {
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "consumer-a", ContextID: "ctx-1", Capability: "cap", Summary: "summary"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Insert(ctx, provider, "svc", "consumer-b", "ctx-2", "cap", "summary"); err != nil {
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "consumer-b", ContextID: "ctx-2", Capability: "cap", Summary: "summary"}); err != nil {
 			t.Fatal(err)
 		}
 		reports, err := s.List(ctx, provider)
@@ -78,10 +82,12 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("newest first", func(t *testing.T) {
 		s := newStore(t)
 		provider := fresh("order")
-		if _, err := s.Insert(ctx, provider, "svc", "demo-project", "ctx-1", "first", "s"); err != nil {
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "first", Summary: "s"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Insert(ctx, provider, "svc", "demo-project", "ctx-1", "second", "s"); err != nil {
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "second", Summary: "s"}); err != nil {
 			t.Fatal(err)
 		}
 		reports, err := s.List(ctx, provider)
@@ -96,7 +102,8 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("capability too long is rejected", func(t *testing.T) {
 		s := newStore(t)
 		provider := fresh("capbig")
-		_, err := s.Insert(ctx, provider, "svc", "demo-project", "ctx-1", strings.Repeat("x", MaxCapabilityLen+1), "s")
+		_, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: strings.Repeat("x", MaxCapabilityLen+1), Summary: "s"})
 		if !errors.Is(err, ErrCapabilityTooLong) {
 			t.Fatalf("Insert = %v; want ErrCapabilityTooLong", err)
 		}
@@ -109,7 +116,8 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("summary too long is rejected", func(t *testing.T) {
 		s := newStore(t)
 		provider := fresh("sumbig")
-		_, err := s.Insert(ctx, provider, "svc", "demo-project", "ctx-1", "cap", strings.Repeat("x", MaxSummaryLen+1))
+		_, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: strings.Repeat("x", MaxSummaryLen+1)})
 		if !errors.Is(err, ErrSummaryTooLong) {
 			t.Fatalf("Insert = %v; want ErrSummaryTooLong", err)
 		}
@@ -119,12 +127,381 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		s := newStore(t)
 		provider := fresh("full")
 		for i := range MaxReportsPerProject {
-			if _, err := s.Insert(ctx, provider, "svc", "demo-project", "ctx-1", fmt.Sprintf("cap%d", i), "s"); err != nil {
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: fmt.Sprintf("cap%d", i), Summary: "s"}); err != nil {
 				t.Fatalf("insert %d: %v", i, err)
 			}
 		}
-		if _, err := s.Insert(ctx, provider, "svc", "demo-project", "ctx-1", "one-too-many", "s"); !errors.Is(err, ErrProjectFull) {
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "one-too-many", Summary: "s"}); !errors.Is(err, ErrProjectFull) {
 			t.Fatalf("Insert over cap = %v; want ErrProjectFull", err)
+		}
+	})
+
+	t.Run("kind omitted defaults to MissingCapability", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("defaultkind")
+		r, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "s"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind != KindMissingCapability {
+			t.Fatalf("Insert returned Kind = %q; want %q", r.Kind, KindMissingCapability)
+		}
+		reports, err := s.List(ctx, provider)
+		if err != nil || len(reports) != 1 {
+			t.Fatalf("List = %v, %v; want 1", reports, err)
+		}
+		if reports[0].Kind != KindMissingCapability {
+			t.Fatalf("stored Kind = %q; want %q", reports[0].Kind, KindMissingCapability)
+		}
+		if !reports[0].Evidence.IsZero() {
+			t.Fatalf("Evidence = %+v; want zero for a report filed without any", reports[0].Evidence)
+		}
+	})
+
+	t.Run("every kind round-trips with its evidence", func(t *testing.T) {
+		for _, kind := range Kinds {
+			s := newStore(t)
+			provider := fresh("kind-" + string(kind))
+			want := Evidence{
+				Tool:           "workloads_list",
+				Observed:       "actionability: transient",
+				ContradictedBy: "instance unchanged for 9d",
+			}
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "s",
+				Kind: kind, Evidence: want}); err != nil {
+				t.Fatalf("%s: %v", kind, err)
+			}
+			reports, err := s.List(ctx, provider)
+			if err != nil || len(reports) != 1 {
+				t.Fatalf("%s: List = %v, %v; want 1", kind, reports, err)
+			}
+			if reports[0].Kind != kind {
+				t.Fatalf("Kind = %q; want %q", reports[0].Kind, kind)
+			}
+			if reports[0].Evidence != want {
+				t.Fatalf("%s: Evidence = %+v; want %+v", kind, reports[0].Evidence, want)
+			}
+		}
+	})
+
+	t.Run("unknown kind is rejected", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("badkind")
+		_, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "s",
+			Kind: Kind("SlightlyOff")})
+		if !errors.Is(err, ErrUnknownKind) {
+			t.Fatalf("Insert = %v; want ErrUnknownKind", err)
+		}
+		reports, _ := s.List(ctx, provider)
+		if len(reports) != 0 {
+			t.Fatal("rejected insert must not write a partial report")
+		}
+	})
+
+	// The deliberate choice: an under-evidenced report still names the tool
+	// and the kind, which is actionable; rejecting it would drop the signal
+	// and push the caller toward relabelling it MissingCapability, which is
+	// a worse record than a thin one. The nudge lives in the tool result.
+	t.Run("a kind that wants evidence is still accepted without it", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("noevidence")
+		r, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "s",
+			Kind: KindMisleadingOutput})
+		if err != nil {
+			t.Fatalf("Insert = %v; a kind with no evidence must be accepted, not rejected", err)
+		}
+		if r.Kind != KindMisleadingOutput || !r.Evidence.IsZero() {
+			t.Fatalf("unexpected report: %+v", r)
+		}
+		reports, err := s.List(ctx, provider)
+		if err != nil || len(reports) != 1 || reports[0].Kind != KindMisleadingOutput {
+			t.Fatalf("List = %v, %v; want the report stored as %s", reports, err, KindMisleadingOutput)
+		}
+	})
+
+	t.Run("evidence fields over their bounds are rejected", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			evidence Evidence
+		}{
+			{"tool", Evidence{Tool: strings.Repeat("x", MaxEvidenceToolLen+1)}},
+			{"observed", Evidence{Observed: strings.Repeat("x", MaxEvidenceTextLen+1)}},
+			{"contradictedBy", Evidence{ContradictedBy: strings.Repeat("x", MaxEvidenceTextLen+1)}},
+		} {
+			s := newStore(t)
+			provider := fresh("evbig-" + tc.name)
+			_, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "s",
+				Kind: KindInsufficientDetail, Evidence: tc.evidence})
+			if !errors.Is(err, ErrEvidenceTooLong) {
+				t.Fatalf("%s: Insert = %v; want ErrEvidenceTooLong", tc.name, err)
+			}
+			reports, _ := s.List(ctx, provider)
+			if len(reports) != 0 {
+				t.Fatalf("%s: rejected insert must not write a partial report", tc.name)
+			}
+		}
+	})
+
+	t.Run("evidence at exactly its bound is accepted", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("evexact")
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "s",
+			Kind: KindMisleadingOutput, Evidence: Evidence{
+				Tool:           strings.Repeat("x", MaxEvidenceToolLen),
+				Observed:       strings.Repeat("y", MaxEvidenceTextLen),
+				ContradictedBy: strings.Repeat("z", MaxEvidenceTextLen),
+			}}); err != nil {
+			t.Fatalf("Insert at the bound = %v; want accepted", err)
+		}
+	})
+
+	t.Run("capability key round-trips", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("key")
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", CapabilityKey: "workload-metrics",
+			Capability: "CPU/memory usage metrics for workloads", Summary: "s"}); err != nil {
+			t.Fatal(err)
+		}
+		reports, err := s.List(ctx, provider)
+		if err != nil || len(reports) != 1 || reports[0].CapabilityKey != "workload-metrics" {
+			t.Fatalf("List = %+v, %v; want the key preserved", reports, err)
+		}
+	})
+
+	t.Run("junk capability key is rejected", func(t *testing.T) {
+		for _, bad := range []string{"Workload Metrics", "workload_metrics", "-nope", "a/b"} {
+			s := newStore(t)
+			provider := fresh("badkey")
+			_, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: "ctx-1", CapabilityKey: bad,
+				Capability: "cap", Summary: "s"})
+			if !errors.Is(err, ErrInvalidCapabilityKey) {
+				t.Fatalf("Insert(key=%q) = %v; want ErrInvalidCapabilityKey", bad, err)
+			}
+			if reports, _ := s.List(ctx, provider); len(reports) != 0 {
+				t.Fatalf("%q: rejected insert must not write a partial report", bad)
+			}
+		}
+	})
+
+	// The report_capability_gap TOOL requires a key, because a keyless report
+	// cannot group and leaves the next conversation with an empty list to
+	// recognise from. The STORE must not: four rows in the live staging
+	// database predate keys, and a required tool field is not a required
+	// column. Anything that tightened this would delete them from the
+	// provider's view on the next read.
+	t.Run("an empty capability key is accepted by the store", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("nokey")
+		r, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "s"})
+		if err != nil {
+			t.Fatalf("Insert with no key = %v; the store must stay tolerant of keyless rows", err)
+		}
+		if r.CapabilityKey != "" {
+			t.Errorf("CapabilityKey = %q; want empty", r.CapabilityKey)
+		}
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 1 || groups[0].Key != r.ID {
+			t.Fatalf("Aggregate = %+v, %v; want the keyless row as its own entry", groups, err)
+		}
+	})
+
+	t.Run("capability key over its bound is rejected", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("bigkey")
+		_, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+			ConsumerProject: "demo-project", ContextID: "ctx-1",
+			CapabilityKey: strings.Repeat("a", MaxCapabilityKeyLen+1), Capability: "cap", Summary: "s"})
+		if !errors.Is(err, ErrCapabilityKeyTooLong) {
+			t.Fatalf("Insert = %v; want ErrCapabilityKeyTooLong", err)
+		}
+	})
+
+	// The whole point of the feature: three conversations describing one gap
+	// in three different sentences collapse to a single entry the provider
+	// can prioritise, with the count that makes it worth prioritising.
+	t.Run("occurrences sharing a key aggregate to one entry", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("agg")
+		prose := []string{
+			"time-series CPU/memory utilization metrics",
+			"Instance/Workload resource usage metrics (CPU, memory) over a time window",
+		}
+		for i, cap := range prose {
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: fmt.Sprintf("consumer-%d", i), ContextID: fmt.Sprintf("ctx-%d", i),
+				CapabilityKey: "workload-metrics", Capability: cap, Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 1 {
+			t.Fatalf("Aggregate = %+v, %v; want exactly 1 entry", groups, err)
+		}
+		g := groups[0]
+		if g.Key != "workload-metrics" || g.CapabilityKey != "workload-metrics" {
+			t.Errorf("Key/CapabilityKey = %q/%q", g.Key, g.CapabilityKey)
+		}
+		if g.Conversations != 2 || g.Occurrences != 2 {
+			t.Errorf("Conversations/Occurrences = %d/%d; want 2/2", g.Conversations, g.Occurrences)
+		}
+		if g.Capability != prose[len(prose)-1] {
+			t.Errorf("Capability = %q; want the most recent occurrence's prose %q", g.Capability, prose[len(prose)-1])
+		}
+		if g.Kind != KindMissingCapability {
+			t.Errorf("Kind = %q; want %q", g.Kind, KindMissingCapability)
+		}
+		if !g.FirstSeen.Before(g.LastSeen) && !g.FirstSeen.Equal(g.LastSeen) {
+			t.Errorf("FirstSeen %v must not be after LastSeen %v", g.FirstSeen, g.LastSeen)
+		}
+		// The occurrence rows are still there behind the aggregate — that is
+		// where the per-occurrence evidence lives.
+		if reports, err := s.List(ctx, provider); err != nil || len(reports) != 2 {
+			t.Fatalf("List = %+v, %v; want both occurrences still readable", reports, err)
+		}
+	})
+
+	// count(DISTINCT context_id), not count(*): one conversation that files
+	// the same gap twice is one conversation that hit it.
+	t.Run("one conversation filing twice counts once", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("dupe")
+		for range 2 {
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: "ctx-same",
+				CapabilityKey: "workload-metrics", Capability: "cap", Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 1 {
+			t.Fatalf("Aggregate = %+v, %v; want 1 entry", groups, err)
+		}
+		if groups[0].Conversations != 1 {
+			t.Errorf("Conversations = %d; want 1 — the same conversation filed twice", groups[0].Conversations)
+		}
+		if groups[0].Occurrences != 2 {
+			t.Errorf("Occurrences = %d; want 2", groups[0].Occurrences)
+		}
+	})
+
+	// Keyless reports are the four rows already in staging. They must show up
+	// in the provider's view, and they must NOT be merged with each other:
+	// prose is exactly what cannot tell us whether they are the same gap.
+	t.Run("keyless reports each stand alone in the aggregate", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("keyless")
+		for i := range 3 {
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: fmt.Sprintf("ctx-%d", i),
+				Capability: fmt.Sprintf("cap %d", i), Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 3 {
+			t.Fatalf("Aggregate = %+v, %v; want 3 unmerged entries", groups, err)
+		}
+		reports, err := s.List(ctx, provider)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := map[string]bool{}
+		for _, r := range reports {
+			ids[r.ID] = true
+		}
+		for _, g := range groups {
+			if g.CapabilityKey != "" {
+				t.Errorf("CapabilityKey = %q; want empty", g.CapabilityKey)
+			}
+			if !ids[g.Key] {
+				t.Errorf("Key = %q; a keyless group must be named by its own report id", g.Key)
+			}
+			if g.Conversations != 1 || g.Occurrences != 1 {
+				t.Errorf("Conversations/Occurrences = %d/%d; want 1/1", g.Conversations, g.Occurrences)
+			}
+		}
+	})
+
+	t.Run("aggregate orders most-hit first", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("order-agg")
+		file := func(key, ctxID string) {
+			t.Helper()
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+				ConsumerProject: "demo-project", ContextID: ctxID, CapabilityKey: key,
+				Capability: "cap", Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		file("rare", "ctx-1")
+		file("common", "ctx-2")
+		file("common", "ctx-3")
+		file("common", "ctx-4")
+		groups, err := s.Aggregate(ctx, provider)
+		if err != nil || len(groups) != 2 {
+			t.Fatalf("Aggregate = %+v, %v; want 2", groups, err)
+		}
+		if groups[0].CapabilityKey != "common" || groups[0].Conversations != 3 {
+			t.Fatalf("Aggregate[0] = %+v; want the 3-conversation gap first", groups[0])
+		}
+	})
+
+	t.Run("capability keys are per service, most-hit first, and capped", func(t *testing.T) {
+		s := newStore(t)
+		provider := fresh("keys")
+		file := func(service, key, ctxID string) {
+			t.Helper()
+			if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: service,
+				ConsumerProject: "demo-project", ContextID: ctxID, CapabilityKey: key,
+				Capability: "cap", Summary: "s"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		file("svc-a", "rare", "ctx-1")
+		file("svc-a", "common", "ctx-2")
+		file("svc-a", "common", "ctx-3")
+		file("svc-b", "other-service-key", "ctx-4")
+		// A keyless report contributes nothing to reuse.
+		if _, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc-a",
+			ConsumerProject: "demo-project", ContextID: "ctx-5", Capability: "cap", Summary: "s"}); err != nil {
+			t.Fatal(err)
+		}
+
+		keys, err := s.CapabilityKeys(ctx, provider, "svc-a", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(keys) != 2 || keys[0] != "common" || keys[1] != "rare" {
+			t.Fatalf("CapabilityKeys = %v; want [common rare] — most-hit first, no other service's key, no empty", keys)
+		}
+		capped, err := s.CapabilityKeys(ctx, provider, "svc-a", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(capped) != 1 || capped[0] != "common" {
+			t.Fatalf("CapabilityKeys(limit 1) = %v; want [common] — a cap drops the least-hit", capped)
+		}
+		if keys, err := s.CapabilityKeys(ctx, provider, "svc-unknown", 0); err != nil || len(keys) != 0 {
+			t.Fatalf("CapabilityKeys(unknown service) = %v, %v; want empty", keys, err)
+		}
+	})
+
+	t.Run("aggregate of an unknown provider project is empty, not error", func(t *testing.T) {
+		s := newStore(t)
+		groups, err := s.Aggregate(ctx, fresh("agg-empty"))
+		if err != nil || len(groups) != 0 {
+			t.Fatalf("Aggregate = %v, %v; want empty", groups, err)
 		}
 	})
 
@@ -138,7 +515,8 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) Store) {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				_, err := s.Insert(ctx, provider, "svc", "demo-project", "ctx-1", fmt.Sprintf("cap%d", i), "s")
+				_, err := s.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+					ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: fmt.Sprintf("cap%d", i), Summary: "s"})
 				errs <- err
 			}(i)
 		}
@@ -190,6 +568,87 @@ func TestPostgresStoreConformance(t *testing.T) {
 		t.Cleanup(s.Close)
 		return s
 	})
+}
+
+// TestPostgresStoreLegacyRowReadsBackAsMissingCapability covers the one case
+// no in-memory store can reproduce: a row written before the kind and
+// evidence columns existed. Inserting with only the original seven columns
+// leaves the new ones at their ALTER TABLE defaults, which is exactly the
+// state the migration leaves every pre-existing row in.
+func TestPostgresStoreLegacyRowReadsBackAsMissingCapability(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping Postgres store tests (memory conformance still ran)")
+	}
+	ctx := context.Background()
+	s, err := NewPostgresStore(ctx, url, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(s.Close)
+
+	provider := "provider-legacy-" + uniqueSuffix(t)
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO capability_gap_report
+		   (id, provider_project, service_name, consumer_project, context_id, capability, summary)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		newReportID(), provider, "svc", "demo-project", "ctx-1", "list pipelines", "user needed a pipeline id",
+	); err != nil {
+		t.Fatalf("insert legacy-shaped row: %v", err)
+	}
+
+	reports, err := s.List(ctx, provider)
+	if err != nil || len(reports) != 1 {
+		t.Fatalf("List = %v, %v; want 1", reports, err)
+	}
+	if reports[0].Kind != KindMissingCapability {
+		t.Fatalf("legacy row Kind = %q; want %q", reports[0].Kind, KindMissingCapability)
+	}
+	if !reports[0].Evidence.IsZero() {
+		t.Fatalf("legacy row Evidence = %+v; want zero", reports[0].Evidence)
+	}
+	if reports[0].Capability != "list pipelines" || reports[0].Summary != "user needed a pipeline id" {
+		t.Fatalf("legacy row lost its content: %+v", reports[0])
+	}
+}
+
+// TestPostgresStoreSchemaIsIdempotent re-applies the schema against a
+// database that already has it — the migrate-on-open path every process
+// start takes against the shared staging database.
+func TestPostgresStoreSchemaIsIdempotent(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping Postgres store tests (memory conformance still ran)")
+	}
+	ctx := context.Background()
+	first, err := NewPostgresStore(ctx, url, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(first.Close)
+
+	provider := "provider-idem-" + uniqueSuffix(t)
+	want := Evidence{Tool: "workloads_list", Observed: "actionability: transient", ContradictedBy: "unchanged for 9d"}
+	if _, err := first.Insert(ctx, InsertParams{ProviderProject: provider, ServiceName: "svc",
+		ConsumerProject: "demo-project", ContextID: "ctx-1", Capability: "cap", Summary: "s",
+		Kind: KindMisleadingOutput, Evidence: want}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Opening again re-runs every schema statement, including the ALTERs.
+	second, err := NewPostgresStore(ctx, url, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("re-applying the schema must succeed and must not disturb data: %v", err)
+	}
+	t.Cleanup(second.Close)
+
+	reports, err := second.List(ctx, provider)
+	if err != nil || len(reports) != 1 {
+		t.Fatalf("List after re-open = %v, %v; want 1", reports, err)
+	}
+	if reports[0].Kind != KindMisleadingOutput || reports[0].Evidence != want {
+		t.Fatalf("re-applying the schema changed stored data: %+v", reports[0])
+	}
 }
 
 func TestPostgresStoreBadURLFailsFast(t *testing.T) {

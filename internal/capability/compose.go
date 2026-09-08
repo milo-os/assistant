@@ -25,6 +25,10 @@ const (
 	ToolNamespaceSeparator = "__"
 	// defaultMCPClientName is announced to MCP servers during initialization.
 	defaultMCPClientName = "datum-assistant-service"
+	// gapKeyLookupTimeout bounds the per-service capability-key read Compose
+	// does on every turn. The key list only improves de-duplication in a
+	// provider's feed, so a slow store must never hold up the user's answer.
+	gapKeyLookupTimeout = 2 * time.Second
 )
 
 // ProviderToolInvocation is reported once per provider-tool execution (the
@@ -142,6 +146,30 @@ type ComposeOptions struct {
 	Metrics *appmetrics.Metrics
 	// resolver is the DNS seam for the SSRF guard. Nil uses net.DefaultResolver.
 	resolver ipResolver
+}
+
+// knownCapabilityKeys reads the capability keys already filed against one
+// service, for injection into that service's gap-report tool schema. It
+// DEGRADES to nil on any failure, like every other store read in composition: a
+// conversation must not fail because a bookkeeping lookup did.
+//
+// Only bare keys cross this boundary. The result lands in one consumer's
+// conversation and the keys were coined in others' — a key is a bounded slug
+// naming the PROVIDER's own capability, whereas the report prose beside it is
+// text about someone else's session and has no business travelling.
+func knownCapabilityKeys(ctx context.Context, store gapreport.Store, doc CapabilityDocument, logger *slog.Logger) []string {
+	if doc.Spec.ReportingProject == "" || doc.Spec.ServiceName == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, gapKeyLookupTimeout)
+	defer cancel()
+	keys, err := store.CapabilityKeys(ctx, doc.Spec.ReportingProject, doc.Spec.ServiceName, MaxInjectedCapabilityKeys)
+	if err != nil {
+		logger.Warn("capability.gapreport.keys_failed",
+			"service", doc.Spec.ServiceName, "provider_project", doc.Spec.ReportingProject, "error", err.Error())
+		return nil
+	}
+	return keys
 }
 
 // Composed is the result of [Compose]: the knowledge addendum for the system
@@ -271,6 +299,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 				providerProject: doc.Spec.ReportingProject,
 				consumerProject: opts.ExpectedProject,
 				contextID:       opts.ContextID,
+				knownKeys:       knownCapabilityKeys(ctx, opts.GapReports, doc, logger),
 				metrics:         opts.Metrics,
 			}
 		}

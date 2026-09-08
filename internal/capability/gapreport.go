@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/gapreport"
@@ -18,6 +20,13 @@ import (
 // service actually present in the current conversation, never an
 // arbitrary provider it names in free text.
 const GapReportToolBaseName = "report_capability_gap"
+
+// MaxInjectedCapabilityKeys caps how many of a service's existing capability
+// keys are shown to the model in the gap-report tool schema, which sits in
+// EVERY turn's prompt for an entitled service. Truncating is safe because the
+// list is most-hit first — a cap can only drop the keys least likely to be
+// filed again.
+const MaxInjectedCapabilityKeys = 40
 
 // GapReportToolName renders the model-facing name for one provider's gap-
 // report tool, "report_capability_gap__<serviceRef>", sanitized the same
@@ -45,6 +54,11 @@ type reportCapabilityGapTool struct {
 	// conversation the gap was hit, not where the report is written to.
 	consumerProject string
 	contextID       string
+	// knownKeys are the capability keys already filed against this service,
+	// most-hit first, injected into the schema so the model RECOGNIZES an
+	// existing gap instead of naming one. Nil is the correct degraded state —
+	// the model coins a key as it would have anyway.
+	knownKeys []string
 	// metrics records assistant_gap_report_total. Nil (e.g. in tests that
 	// don't set ComposeOptions.Metrics) is a safe no-op — see
 	// [appmetrics.Metrics]'s nil-receiver methods.
@@ -52,12 +66,20 @@ type reportCapabilityGapTool struct {
 }
 
 func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
+	kinds := make([]string, 0, len(gapreport.Kinds))
+	for _, k := range gapreport.Kinds {
+		kinds = append(kinds, string(k))
+	}
 	schema, _ := json.Marshal(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"capabilityKey": map[string]any{
+				"type":        "string",
+				"description": t.capabilityKeyDescription(),
+			},
 			"capability": map[string]any{
 				"type":        "string",
-				"description": "A short description of the missing capability, e.g. \"list pipelines for StreamCo\".",
+				"description": "A short description of the capability at fault, e.g. \"list pipelines for StreamCo\".",
 			},
 			"summary": map[string]any{
 				"type": "string",
@@ -65,29 +87,123 @@ func (t *reportCapabilityGapTool) Definition() agentcore.ToolDefinition {
 					"never quote or paraphrase the user's actual message content, names, identifiers, credentials, " +
 					"or other sensitive/personal details.",
 			},
+			"kind": map[string]any{
+				"type": "string",
+				"enum": kinds,
+				"description": "What kind of shortfall this was. Omit for a genuinely absent capability " +
+					"(defaults to " + string(gapreport.KindMissingCapability) + ").",
+			},
+			"evidence": map[string]any{
+				"type": "object",
+				"description": "The tool output this report is about. Expected whenever kind is not " +
+					string(gapreport.KindMissingCapability) + ". TOOL OUTPUT AND OBJECT STATE ONLY — never the user's message text.",
+				"properties": map[string]any{
+					"tool": map[string]any{
+						"type":        "string",
+						"description": "The tool whose output was at fault, e.g. \"workloads_list\".",
+					},
+					"observed": map[string]any{
+						"type":        "string",
+						"description": "What that tool returned, quoted or closely paraphrased, e.g. \"actionability: transient\".",
+					},
+					"contradictedBy": map[string]any{
+						"type":        "string",
+						"description": "The fact that makes it wrong, thin, or impossible to act on, e.g. \"instance unchanged for 9d\".",
+					},
+				},
+			},
 		},
-		"required": []string{"capability", "summary"},
+		// capabilityKey is required, unlike kind and evidence: an omitted
+		// evidence block yields a thinner report, but a service whose first
+		// report is keyless shows the next conversation an empty list, so
+		// de-duplication never starts. Only PRESENCE and SHAPE are required,
+		// never membership in the injected list — forcing a genuinely new gap
+		// into an existing bucket would be worse than a fresh synonym, which
+		// the injected list corrects from occurrence two on.
+		"required": []string{"capabilityKey", "capability", "summary"},
 	})
 	return agentcore.ToolDefinition{
-		Name: t.name,
-		Description: fmt.Sprintf(
-			"Report to %s's own team that this service is missing a tool, lookup, or piece of knowledge a user "+
-				"needed. Use this when a request cannot be fulfilled because %s's capabilities don't cover it — not "+
-				"for user mistakes, not for gaps in a different provider's service, and not for gaps unrelated to any "+
-				"single provider. This does not help the current user answer their question; it only helps %s improve "+
-				"its tooling. Still answer the user as best you can (e.g. point them to a manual workaround) in "+
-				"addition to filing this report. "+
-				"PRIVACY: %s's own team will read this report and has no access to this conversation — the summary "+
-				"is the only context they get. Describe the gap ABSTRACTLY: what kind of tool, lookup, or data was "+
-				"missing, and why it mattered. Do NOT quote, paraphrase, or otherwise include the user's actual "+
-				"message text, names, account or record identifiers, credentials, or any other sensitive or "+
-				"personal detail from the conversation. Bad: quoting the user's literal pasted text (e.g. "+
-				"\"user pasted 'acct #48213, need the Q3 churn number for jane.doe@bigco.com'\") — this leaks the "+
-				"user's real content into another team's project. Good: \"user needed to list active pipelines for "+
-				"their account to diagnose lag — no list-pipelines tool was available.\"",
-			t.serviceName, t.serviceName, t.serviceName, t.serviceName),
+		Name:        t.name,
+		Description: gapReportToolDescription(t.serviceName),
 		InputSchema: schema,
 	}
+}
+
+// capabilityKeyDescription renders the capabilityKey field's description,
+// including the keys this service already has: showing them turns naming into
+// recognition, which is the only thing that reliably de-duplicates prose nobody
+// writes the same way twice. With no keys yet the field is still offered — a
+// service's first gap has to be able to coin one.
+func (t *reportCapabilityGapTool) capabilityKeyDescription() string {
+	return "REQUIRED. A short, stable key naming the capability at fault: lowercase words joined by single " +
+		"dashes, at most " + strconv.Itoa(gapreport.MaxCapabilityKeyLen) + " characters, e.g. " +
+		"\"workload-metrics\". This, not the prose in `capability`, is what groups repeat reports of the SAME " +
+		"gap into one entry for " + t.serviceName + "'s team, so it is the field worth getting right. " +
+		t.capabilityKeyHint()
+}
+
+// capabilityKeyHint is the half of the guidance that depends on what has already
+// been filed. Shared by the field description and by the rejection for an
+// omitted key, so the correction carries the same list the schema offered.
+func (t *reportCapabilityGapTool) capabilityKeyHint() string {
+	if len(t.knownKeys) == 0 {
+		return "No keys have been filed against " + t.serviceName + " yet, so coin one."
+	}
+	return "REUSE one of the keys already filed against " + t.serviceName +
+		" whenever this is the same underlying gap, even if you would have worded it differently: " +
+		strings.Join(t.knownKeys, ", ") + ". Coin a new key only when none of those names this gap."
+}
+
+// gapReportToolDescription is the only thing steering the model's choice of kind
+// and its handling of evidence, and it sits in every turn's prompt for an
+// entitled service.
+func gapReportToolDescription(service string) string {
+	return fmt.Sprintf(
+		"Report to %[1]s's own team that this service fell short for a user: either no tool covered what they "+
+			"needed, or a tool ran and handed back something too thin, misleading, or impossible to act on. Use "+
+			"this when the shortfall is %[1]s's — not for user mistakes, not for another provider's service, and "+
+			"not for gaps unrelated to any single provider. This does not help the current user answer their "+
+			"question; it only helps %[1]s fix its tooling. Still answer the user as best you can (e.g. point them "+
+			"to a manual workaround) in addition to filing this report.\n"+
+			"KEY — capabilityKey is REQUIRED, and prefer a key %[1]s already has over a new one meaning the same "+
+			"thing: it is what collapses repeat reports of one gap into a single prioritisable entry, and the "+
+			"same gap described in three different sentences is three items on %[1]s's list unless the key "+
+			"matches. See the capabilityKey field for the keys already filed.\n"+
+			"KIND — name what actually went wrong; omit it only for a genuinely absent capability (default %[2]s):\n"+
+			"- %[2]s: no tool exists for what was needed. e.g. needed to list active pipelines to diagnose lag — "+
+			"no list-pipelines tool was available.\n"+
+			"- %[3]s: a tool answered, but left out a field the answer needed. e.g. workloads_list returned state "+
+			"but no duration, so a 9-day outage looked identical to a 9-second one.\n"+
+			"- %[4]s: a tool answered, and its output pointed at the wrong conclusion. You will rarely catch this "+
+			"in the moment — the signal is your own retraction: if you told the user something was normal, "+
+			"expected, or not worth acting on because a tool said so, and you later take that back, the output "+
+			"misled you; file it at the moment you take it back. e.g. a 9-day stall was labelled actionability "+
+			"\"transient\" with remediation \"Wait.\", so the user was told to wait on a workload that was never "+
+			"going to recover.\n"+
+			"- %[5]s: a tool told the user to do something they cannot do. e.g. remediation said \"pull container "+
+			"logs\", but those nodes serve HTTPS on the log port, so there are no logs to pull.\n"+
+			"EVIDENCE — supply it for every kind except %[2]s, which has no output to quote: evidence.tool (the "+
+			"tool at fault), evidence.observed (what it returned), evidence.contradictedBy (the fact that makes "+
+			"that wrong). Without it %[1]s's team gets a complaint they cannot check.\n"+
+			"PRIVACY: %[1]s's own team will read this report and has no access to this conversation — what you "+
+			"write here is the only context they get. Describe the gap ABSTRACTLY: what was missing, thin, wrong, "+
+			"or unactionable, and why it mattered. Do NOT quote, paraphrase, or otherwise include the user's actual "+
+			"message text, names, account or record identifiers, credentials, or any other sensitive or personal "+
+			"detail from the conversation. Bad: quoting the user's literal pasted text (e.g. \"user pasted 'acct "+
+			"#48213, need the Q3 churn number for jane.doe@bigco.com'\") — this leaks the user's real content into "+
+			"another team's project. Good: \"user needed to list active pipelines for their account to diagnose "+
+			"lag — no list-pipelines tool was available.\"\n"+
+			"evidence.observed and evidence.contradictedBy are the ONE narrow exception, and only because of where "+
+			"the data came from: quote %[1]s's OWN tool output and the state of the objects it returned — that is "+
+			"%[1]s's data going home to the team that produced it. It is NOT permission to quote the user. Never "+
+			"put the user's message text in evidence, and never carry a value into evidence just because a tool "+
+			"echoed back something the user typed.",
+		service,
+		gapreport.KindMissingCapability,
+		gapreport.KindInsufficientDetail,
+		gapreport.KindMisleadingOutput,
+		gapreport.KindUnactionableGuidance,
+	)
 }
 
 func (t *reportCapabilityGapTool) Execute(ctx context.Context, input json.RawMessage) (result string, err error) {
@@ -104,24 +220,87 @@ func (t *reportCapabilityGapTool) Execute(ctx context.Context, input json.RawMes
 	}()
 
 	var args struct {
-		Capability string `json:"capability"`
-		Summary    string `json:"summary"`
+		CapabilityKey string `json:"capabilityKey"`
+		Capability    string `json:"capability"`
+		Summary       string `json:"summary"`
+		Kind          string `json:"kind"`
+		Evidence      struct {
+			Tool           string `json:"tool"`
+			Observed       string `json:"observed"`
+			ContradictedBy string `json:"contradictedBy"`
+		} `json:"evidence"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil || args.Capability == "" || args.Summary == "" {
-		return "", fmt.Errorf("%s: input must be {\"capability\": \"...\", \"summary\": \"...\"}", t.name)
+		return "", fmt.Errorf("%s: input must be {\"capabilityKey\": \"...\", \"capability\": \"...\", \"summary\": \"...\"}", t.name)
 	}
 
-	if _, err := t.store.Insert(ctx, t.providerProject, t.serviceName, t.consumerProject, t.contextID, args.Capability, args.Summary); err != nil {
+	if args.CapabilityKey == "" {
+		// Rejected rather than filed-and-nudged: the model can add a key and
+		// retry in the same turn, and a keyless row is unusable for grouping
+		// AND poisons the next conversation's key list.
+		return "", fmt.Errorf("%s: capabilityKey is required — %s", t.name, t.capabilityKeyHint())
+	}
+
+	kind, err := gapreport.ParseKind(args.Kind)
+	if err != nil {
+		return "", fmt.Errorf("%s: unknown kind %q — use one of %s", t.name, args.Kind, strings.Join(kindNames(), ", "))
+	}
+	evidence := gapreport.Evidence{
+		Tool:           args.Evidence.Tool,
+		Observed:       args.Evidence.Observed,
+		ContradictedBy: args.Evidence.ContradictedBy,
+	}
+
+	if _, err := t.store.Insert(ctx, gapreport.InsertParams{
+		ProviderProject: t.providerProject,
+		ServiceName:     t.serviceName,
+		ConsumerProject: t.consumerProject,
+		ContextID:       t.contextID,
+		CapabilityKey:   args.CapabilityKey,
+		Capability:      args.Capability,
+		Summary:         args.Summary,
+		Kind:            kind,
+		Evidence:        evidence,
+	}); err != nil {
 		if errors.Is(err, gapreport.ErrCapabilityTooLong) {
 			return "", fmt.Errorf("%s: that capability description is too long — try a shorter one", t.name)
 		}
+		// Both key errors are recoverable in place, so the message states the
+		// rule the model has to satisfy on the retry.
+		if errors.Is(err, gapreport.ErrInvalidCapabilityKey) {
+			return "", fmt.Errorf("%s: capabilityKey %q is not a valid key — use lowercase words joined by single dashes, e.g. \"workload-metrics\"", t.name, args.CapabilityKey)
+		}
+		if errors.Is(err, gapreport.ErrCapabilityKeyTooLong) {
+			return "", fmt.Errorf("%s: that capabilityKey is too long — keep it under %d characters", t.name, gapreport.MaxCapabilityKeyLen)
+		}
 		if errors.Is(err, gapreport.ErrSummaryTooLong) {
 			return "", fmt.Errorf("%s: that summary is too long — try a shorter one", t.name)
+		}
+		if errors.Is(err, gapreport.ErrEvidenceTooLong) {
+			return "", fmt.Errorf("%s: that evidence is too long — quote the smallest fragment of tool output that shows the problem", t.name)
 		}
 		if errors.Is(err, gapreport.ErrProjectFull) {
 			return "", fmt.Errorf("%s: gap reporting is temporarily at capacity for %s", t.name, t.serviceName)
 		}
 		return "", fmt.Errorf("%s: gap reporting is temporarily unavailable", t.name)
 	}
-	return fmt.Sprintf("Reported to %s: %s", t.serviceName, args.Capability), nil
+
+	// A kind that wants evidence but arrived without it is still stored —
+	// dropping it would lose the signal — so the nudge goes back to the model,
+	// the only party that can still fix it.
+	msg := fmt.Sprintf("Reported to %s (%s/%s): %s", t.serviceName, args.CapabilityKey, kind, args.Capability)
+	if gapreport.NeedsEvidence(kind) && evidence.IsZero() {
+		msg += fmt.Sprintf(" — filed without evidence; a %s report is hard for %s's team to act on without "+
+			"evidence.tool/observed/contradictedBy. Include them next time.", kind, t.serviceName)
+	}
+	return msg, nil
+}
+
+// kindNames renders the valid kinds for an error message aimed at the model.
+func kindNames() []string {
+	out := make([]string, 0, len(gapreport.Kinds))
+	for _, k := range gapreport.Kinds {
+		out = append(out, string(k))
+	}
+	return out
 }

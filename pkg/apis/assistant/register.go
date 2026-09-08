@@ -34,6 +34,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&Conversation{}, &ConversationList{},
 		&ConversationMessages{},
 		&CapabilityGapReport{}, &CapabilityGapReportList{},
+		&CapabilityGap{}, &CapabilityGapList{},
 		&AssistantEndpoint{}, &AssistantEndpointList{},
 	)
 	return nil

@@ -168,6 +168,11 @@ func TestParseArgs(t *testing.T) {
 			want: command{kind: KindGapList, project: "streamco-platform", json: true, kubeconfig: "/kc"},
 		},
 		{
+			name: "gaps reports",
+			argv: []string{"gaps", "reports", "--project", "streamco-platform"},
+			want: command{kind: KindGapReports, project: "streamco-platform"},
+		},
+		{
 			name: "gaps missing project",
 			argv: []string{"gaps", "list"},
 			want: command{kind: kindError, errMsg: "gaps list: --project <name> is required"},
@@ -175,7 +180,7 @@ func TestParseArgs(t *testing.T) {
 		{
 			name: "gaps bad subcommand",
 			argv: []string{"gaps", "delete", "--project", "streamco-platform"},
-			want: command{kind: kindError, errMsg: `gaps: expected "list", got "delete"`},
+			want: command{kind: kindError, errMsg: `gaps: expected "list" or "reports", got "delete"`},
 		},
 		{
 			name: "task get",

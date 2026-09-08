@@ -31,7 +31,7 @@ func TestGapReportRecordsSuccessMetric(t *testing.T) {
 	defer composed.Close()
 
 	tool := composed.Tools[GapReportToolName("streamco")]
-	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"capability":"list pipelines for StreamCo","summary":"user needed a pipeline id"}`)); err != nil {
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"capabilityKey":"list-pipelines","capability":"list pipelines for StreamCo","summary":"user needed a pipeline id"}`)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -63,7 +63,7 @@ func TestGapReportRecordsErrorMetric(t *testing.T) {
 
 	tool := composed.Tools[GapReportToolName("streamco")]
 	tooLong := strings.Repeat("x", gapreport.MaxCapabilityLen+1)
-	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"capability":"`+tooLong+`","summary":"s"}`)); err == nil {
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"capabilityKey":"cap","capability":"`+tooLong+`","summary":"s"}`)); err == nil {
 		t.Fatal("want a too-long error")
 	}
 
@@ -91,7 +91,7 @@ func TestGapReportNilMetricsDoesNotPanic(t *testing.T) {
 	defer composed.Close()
 
 	tool := composed.Tools[GapReportToolName("streamco")]
-	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"capability":"c","summary":"s"}`)); err != nil {
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"capabilityKey":"cap","capability":"c","summary":"s"}`)); err != nil {
 		t.Fatalf("Execute with nil Metrics: %v", err)
 	}
 }

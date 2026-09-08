@@ -17,71 +17,75 @@ import (
 
 func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
 	return map[string]common.OpenAPIDefinition{
-		v1alpha1.AssistantEndpoint{}.OpenAPIModelName():         schema_pkg_apis_assistant_v1alpha1_AssistantEndpoint(ref),
-		v1alpha1.AssistantEndpointList{}.OpenAPIModelName():     schema_pkg_apis_assistant_v1alpha1_AssistantEndpointList(ref),
-		v1alpha1.AssistantEndpointSpec{}.OpenAPIModelName():     schema_pkg_apis_assistant_v1alpha1_AssistantEndpointSpec(ref),
-		v1alpha1.CapabilityGapReport{}.OpenAPIModelName():       schema_pkg_apis_assistant_v1alpha1_CapabilityGapReport(ref),
-		v1alpha1.CapabilityGapReportList{}.OpenAPIModelName():   schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportList(ref),
-		v1alpha1.CapabilityGapReportStatus{}.OpenAPIModelName(): schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref),
-		v1alpha1.Conversation{}.OpenAPIModelName():              schema_pkg_apis_assistant_v1alpha1_Conversation(ref),
-		v1alpha1.ConversationList{}.OpenAPIModelName():          schema_pkg_apis_assistant_v1alpha1_ConversationList(ref),
-		v1alpha1.ConversationMessage{}.OpenAPIModelName():       schema_pkg_apis_assistant_v1alpha1_ConversationMessage(ref),
-		v1alpha1.ConversationMessages{}.OpenAPIModelName():      schema_pkg_apis_assistant_v1alpha1_ConversationMessages(ref),
-		v1alpha1.ConversationStatus{}.OpenAPIModelName():        schema_pkg_apis_assistant_v1alpha1_ConversationStatus(ref),
-		resource.Quantity{}.OpenAPIModelName():                  schema_apimachinery_pkg_api_resource_Quantity(ref),
-		v1.APIGroup{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_APIGroup(ref),
-		v1.APIGroupList{}.OpenAPIModelName():                    schema_pkg_apis_meta_v1_APIGroupList(ref),
-		v1.APIResource{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_APIResource(ref),
-		v1.APIResourceList{}.OpenAPIModelName():                 schema_pkg_apis_meta_v1_APIResourceList(ref),
-		v1.APIVersions{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_APIVersions(ref),
-		v1.ApplyOptions{}.OpenAPIModelName():                    schema_pkg_apis_meta_v1_ApplyOptions(ref),
-		v1.Condition{}.OpenAPIModelName():                       schema_pkg_apis_meta_v1_Condition(ref),
-		v1.CreateOptions{}.OpenAPIModelName():                   schema_pkg_apis_meta_v1_CreateOptions(ref),
-		v1.DeleteOptions{}.OpenAPIModelName():                   schema_pkg_apis_meta_v1_DeleteOptions(ref),
-		v1.Duration{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_Duration(ref),
-		v1.FieldSelectorRequirement{}.OpenAPIModelName():        schema_pkg_apis_meta_v1_FieldSelectorRequirement(ref),
-		v1.FieldsV1{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_FieldsV1(ref),
-		v1.GetOptions{}.OpenAPIModelName():                      schema_pkg_apis_meta_v1_GetOptions(ref),
-		v1.GroupKind{}.OpenAPIModelName():                       schema_pkg_apis_meta_v1_GroupKind(ref),
-		v1.GroupResource{}.OpenAPIModelName():                   schema_pkg_apis_meta_v1_GroupResource(ref),
-		v1.GroupVersion{}.OpenAPIModelName():                    schema_pkg_apis_meta_v1_GroupVersion(ref),
-		v1.GroupVersionForDiscovery{}.OpenAPIModelName():        schema_pkg_apis_meta_v1_GroupVersionForDiscovery(ref),
-		v1.GroupVersionKind{}.OpenAPIModelName():                schema_pkg_apis_meta_v1_GroupVersionKind(ref),
-		v1.GroupVersionResource{}.OpenAPIModelName():            schema_pkg_apis_meta_v1_GroupVersionResource(ref),
-		v1.InternalEvent{}.OpenAPIModelName():                   schema_pkg_apis_meta_v1_InternalEvent(ref),
-		v1.LabelSelector{}.OpenAPIModelName():                   schema_pkg_apis_meta_v1_LabelSelector(ref),
-		v1.LabelSelectorRequirement{}.OpenAPIModelName():        schema_pkg_apis_meta_v1_LabelSelectorRequirement(ref),
-		v1.List{}.OpenAPIModelName():                            schema_pkg_apis_meta_v1_List(ref),
-		v1.ListMeta{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_ListMeta(ref),
-		v1.ListOptions{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_ListOptions(ref),
-		v1.ManagedFieldsEntry{}.OpenAPIModelName():              schema_pkg_apis_meta_v1_ManagedFieldsEntry(ref),
-		v1.MicroTime{}.OpenAPIModelName():                       schema_pkg_apis_meta_v1_MicroTime(ref),
-		v1.ObjectMeta{}.OpenAPIModelName():                      schema_pkg_apis_meta_v1_ObjectMeta(ref),
-		v1.OwnerReference{}.OpenAPIModelName():                  schema_pkg_apis_meta_v1_OwnerReference(ref),
-		v1.PartialObjectMetadata{}.OpenAPIModelName():           schema_pkg_apis_meta_v1_PartialObjectMetadata(ref),
-		v1.PartialObjectMetadataList{}.OpenAPIModelName():       schema_pkg_apis_meta_v1_PartialObjectMetadataList(ref),
-		v1.Patch{}.OpenAPIModelName():                           schema_pkg_apis_meta_v1_Patch(ref),
-		v1.PatchOptions{}.OpenAPIModelName():                    schema_pkg_apis_meta_v1_PatchOptions(ref),
-		v1.Preconditions{}.OpenAPIModelName():                   schema_pkg_apis_meta_v1_Preconditions(ref),
-		v1.RootPaths{}.OpenAPIModelName():                       schema_pkg_apis_meta_v1_RootPaths(ref),
-		v1.ServerAddressByClientCIDR{}.OpenAPIModelName():       schema_pkg_apis_meta_v1_ServerAddressByClientCIDR(ref),
-		v1.Status{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_Status(ref),
-		v1.StatusCause{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_StatusCause(ref),
-		v1.StatusDetails{}.OpenAPIModelName():                   schema_pkg_apis_meta_v1_StatusDetails(ref),
-		v1.Table{}.OpenAPIModelName():                           schema_pkg_apis_meta_v1_Table(ref),
-		v1.TableColumnDefinition{}.OpenAPIModelName():           schema_pkg_apis_meta_v1_TableColumnDefinition(ref),
-		v1.TableOptions{}.OpenAPIModelName():                    schema_pkg_apis_meta_v1_TableOptions(ref),
-		v1.TableRow{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_TableRow(ref),
-		v1.TableRowCondition{}.OpenAPIModelName():               schema_pkg_apis_meta_v1_TableRowCondition(ref),
-		v1.Time{}.OpenAPIModelName():                            schema_pkg_apis_meta_v1_Time(ref),
-		v1.Timestamp{}.OpenAPIModelName():                       schema_pkg_apis_meta_v1_Timestamp(ref),
-		v1.TypeMeta{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_TypeMeta(ref),
-		v1.UpdateOptions{}.OpenAPIModelName():                   schema_pkg_apis_meta_v1_UpdateOptions(ref),
-		v1.WatchEvent{}.OpenAPIModelName():                      schema_pkg_apis_meta_v1_WatchEvent(ref),
-		runtime.RawExtension{}.OpenAPIModelName():               schema_k8sio_apimachinery_pkg_runtime_RawExtension(ref),
-		runtime.TypeMeta{}.OpenAPIModelName():                   schema_k8sio_apimachinery_pkg_runtime_TypeMeta(ref),
-		runtime.Unknown{}.OpenAPIModelName():                    schema_k8sio_apimachinery_pkg_runtime_Unknown(ref),
-		version.Info{}.OpenAPIModelName():                       schema_k8sio_apimachinery_pkg_version_Info(ref),
+		v1alpha1.AssistantEndpoint{}.OpenAPIModelName():           schema_pkg_apis_assistant_v1alpha1_AssistantEndpoint(ref),
+		v1alpha1.AssistantEndpointList{}.OpenAPIModelName():       schema_pkg_apis_assistant_v1alpha1_AssistantEndpointList(ref),
+		v1alpha1.AssistantEndpointSpec{}.OpenAPIModelName():       schema_pkg_apis_assistant_v1alpha1_AssistantEndpointSpec(ref),
+		v1alpha1.CapabilityGap{}.OpenAPIModelName():               schema_pkg_apis_assistant_v1alpha1_CapabilityGap(ref),
+		v1alpha1.CapabilityGapList{}.OpenAPIModelName():           schema_pkg_apis_assistant_v1alpha1_CapabilityGapList(ref),
+		v1alpha1.CapabilityGapReport{}.OpenAPIModelName():         schema_pkg_apis_assistant_v1alpha1_CapabilityGapReport(ref),
+		v1alpha1.CapabilityGapReportEvidence{}.OpenAPIModelName(): schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportEvidence(ref),
+		v1alpha1.CapabilityGapReportList{}.OpenAPIModelName():     schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportList(ref),
+		v1alpha1.CapabilityGapReportStatus{}.OpenAPIModelName():   schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref),
+		v1alpha1.CapabilityGapStatus{}.OpenAPIModelName():         schema_pkg_apis_assistant_v1alpha1_CapabilityGapStatus(ref),
+		v1alpha1.Conversation{}.OpenAPIModelName():                schema_pkg_apis_assistant_v1alpha1_Conversation(ref),
+		v1alpha1.ConversationList{}.OpenAPIModelName():            schema_pkg_apis_assistant_v1alpha1_ConversationList(ref),
+		v1alpha1.ConversationMessage{}.OpenAPIModelName():         schema_pkg_apis_assistant_v1alpha1_ConversationMessage(ref),
+		v1alpha1.ConversationMessages{}.OpenAPIModelName():        schema_pkg_apis_assistant_v1alpha1_ConversationMessages(ref),
+		v1alpha1.ConversationStatus{}.OpenAPIModelName():          schema_pkg_apis_assistant_v1alpha1_ConversationStatus(ref),
+		resource.Quantity{}.OpenAPIModelName():                    schema_apimachinery_pkg_api_resource_Quantity(ref),
+		v1.APIGroup{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_APIGroup(ref),
+		v1.APIGroupList{}.OpenAPIModelName():                      schema_pkg_apis_meta_v1_APIGroupList(ref),
+		v1.APIResource{}.OpenAPIModelName():                       schema_pkg_apis_meta_v1_APIResource(ref),
+		v1.APIResourceList{}.OpenAPIModelName():                   schema_pkg_apis_meta_v1_APIResourceList(ref),
+		v1.APIVersions{}.OpenAPIModelName():                       schema_pkg_apis_meta_v1_APIVersions(ref),
+		v1.ApplyOptions{}.OpenAPIModelName():                      schema_pkg_apis_meta_v1_ApplyOptions(ref),
+		v1.Condition{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_Condition(ref),
+		v1.CreateOptions{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_CreateOptions(ref),
+		v1.DeleteOptions{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_DeleteOptions(ref),
+		v1.Duration{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_Duration(ref),
+		v1.FieldSelectorRequirement{}.OpenAPIModelName():          schema_pkg_apis_meta_v1_FieldSelectorRequirement(ref),
+		v1.FieldsV1{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_FieldsV1(ref),
+		v1.GetOptions{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_GetOptions(ref),
+		v1.GroupKind{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_GroupKind(ref),
+		v1.GroupResource{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_GroupResource(ref),
+		v1.GroupVersion{}.OpenAPIModelName():                      schema_pkg_apis_meta_v1_GroupVersion(ref),
+		v1.GroupVersionForDiscovery{}.OpenAPIModelName():          schema_pkg_apis_meta_v1_GroupVersionForDiscovery(ref),
+		v1.GroupVersionKind{}.OpenAPIModelName():                  schema_pkg_apis_meta_v1_GroupVersionKind(ref),
+		v1.GroupVersionResource{}.OpenAPIModelName():              schema_pkg_apis_meta_v1_GroupVersionResource(ref),
+		v1.InternalEvent{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_InternalEvent(ref),
+		v1.LabelSelector{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_LabelSelector(ref),
+		v1.LabelSelectorRequirement{}.OpenAPIModelName():          schema_pkg_apis_meta_v1_LabelSelectorRequirement(ref),
+		v1.List{}.OpenAPIModelName():                              schema_pkg_apis_meta_v1_List(ref),
+		v1.ListMeta{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_ListMeta(ref),
+		v1.ListOptions{}.OpenAPIModelName():                       schema_pkg_apis_meta_v1_ListOptions(ref),
+		v1.ManagedFieldsEntry{}.OpenAPIModelName():                schema_pkg_apis_meta_v1_ManagedFieldsEntry(ref),
+		v1.MicroTime{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_MicroTime(ref),
+		v1.ObjectMeta{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_ObjectMeta(ref),
+		v1.OwnerReference{}.OpenAPIModelName():                    schema_pkg_apis_meta_v1_OwnerReference(ref),
+		v1.PartialObjectMetadata{}.OpenAPIModelName():             schema_pkg_apis_meta_v1_PartialObjectMetadata(ref),
+		v1.PartialObjectMetadataList{}.OpenAPIModelName():         schema_pkg_apis_meta_v1_PartialObjectMetadataList(ref),
+		v1.Patch{}.OpenAPIModelName():                             schema_pkg_apis_meta_v1_Patch(ref),
+		v1.PatchOptions{}.OpenAPIModelName():                      schema_pkg_apis_meta_v1_PatchOptions(ref),
+		v1.Preconditions{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_Preconditions(ref),
+		v1.RootPaths{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_RootPaths(ref),
+		v1.ServerAddressByClientCIDR{}.OpenAPIModelName():         schema_pkg_apis_meta_v1_ServerAddressByClientCIDR(ref),
+		v1.Status{}.OpenAPIModelName():                            schema_pkg_apis_meta_v1_Status(ref),
+		v1.StatusCause{}.OpenAPIModelName():                       schema_pkg_apis_meta_v1_StatusCause(ref),
+		v1.StatusDetails{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_StatusDetails(ref),
+		v1.Table{}.OpenAPIModelName():                             schema_pkg_apis_meta_v1_Table(ref),
+		v1.TableColumnDefinition{}.OpenAPIModelName():             schema_pkg_apis_meta_v1_TableColumnDefinition(ref),
+		v1.TableOptions{}.OpenAPIModelName():                      schema_pkg_apis_meta_v1_TableOptions(ref),
+		v1.TableRow{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_TableRow(ref),
+		v1.TableRowCondition{}.OpenAPIModelName():                 schema_pkg_apis_meta_v1_TableRowCondition(ref),
+		v1.Time{}.OpenAPIModelName():                              schema_pkg_apis_meta_v1_Time(ref),
+		v1.Timestamp{}.OpenAPIModelName():                         schema_pkg_apis_meta_v1_Timestamp(ref),
+		v1.TypeMeta{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_TypeMeta(ref),
+		v1.UpdateOptions{}.OpenAPIModelName():                     schema_pkg_apis_meta_v1_UpdateOptions(ref),
+		v1.WatchEvent{}.OpenAPIModelName():                        schema_pkg_apis_meta_v1_WatchEvent(ref),
+		runtime.RawExtension{}.OpenAPIModelName():                 schema_k8sio_apimachinery_pkg_runtime_RawExtension(ref),
+		runtime.TypeMeta{}.OpenAPIModelName():                     schema_k8sio_apimachinery_pkg_runtime_TypeMeta(ref),
+		runtime.Unknown{}.OpenAPIModelName():                      schema_k8sio_apimachinery_pkg_runtime_Unknown(ref),
+		version.Info{}.OpenAPIModelName():                         schema_k8sio_apimachinery_pkg_version_Info(ref),
 	}
 }
 
@@ -89,7 +93,7 @@ func schema_pkg_apis_assistant_v1alpha1_AssistantEndpoint(ref common.ReferenceCa
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "AssistantEndpoint advertises where clients should send A2A traffic.\n\nIt exists so a client that already reaches this aggregated API — with the caller's own Kubernetes identity and no extra credential — can find the service without being told a hostname out of band. Before it, `datumctl assistant` required PATCH_URL: the control-plane address names Milo, not the assistant, and nothing else advertised the assistant's address.\n\nRead-only and not stored. The service reports the address it was configured to advertise (PUBLIC_BASE_URL) — the same value it puts in its agent card, so the card and this resource cannot disagree.\n\nCluster-scoped: one assistant serves every project on a control plane, so the endpoint is not a per-project fact. Named [AssistantEndpointName].",
+				Description: "AssistantEndpoint advertises where clients should send A2A traffic.\n\nIt exists so a client that already reaches this aggregated API — with the caller's own Kubernetes identity and no extra credential — can find the service without being told a hostname out of band. Before it, `datumctl patch` required PATCH_URL: the control-plane address names Milo, not the assistant, and nothing else advertised the assistant's address.\n\nRead-only and not stored. The service reports the address it was configured to advertise (PUBLIC_BASE_URL) — the same value it puts in its agent card, so the card and this resource cannot disagree.\n\nCluster-scoped: one assistant serves every project on a control plane, so the endpoint is not a per-project fact. Named [AssistantEndpointName].",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"kind": {
@@ -201,6 +205,96 @@ func schema_pkg_apis_assistant_v1alpha1_AssistantEndpointSpec(ref common.Referen
 	}
 }
 
+func schema_pkg_apis_assistant_v1alpha1_CapabilityGap(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CapabilityGap is one distinct capability gap for a provider service: every CapabilityGapReport sharing a capability key, collapsed into a single entry with a count of how many conversations hit it. It is the view to prioritise from — the same gap described three different ways by three conversations is one gap here and three reports there.\n\nThe individual reports stay available as capabilitygapreports and are where the per-occurrence evidence lives; that evidence is what makes a quality defect diagnosable, so the aggregate summarises it rather than replacing it.\n\nname == the capability key, or, for a report filed before keys existed, that report's own id — keyless reports are never merged with each other, because their free-prose descriptions are exactly what cannot establish that two of them are the same gap. namespace == the PROVIDER project, same as CapabilityGapReport. Read-only.\n\nIt carries no consumer identity: how many conversations hit a gap is the prioritisation signal, and which customers they were is a separate question this view deliberately does not answer.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name = capability key (or report id), Namespace = provider project, CreationTimestamp = first seen.",
+							Default:     map[string]interface{}{},
+							Ref:         ref(v1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1alpha1.CapabilityGapStatus{}.OpenAPIModelName()),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			v1alpha1.CapabilityGapStatus{}.OpenAPIModelName(), v1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_pkg_apis_assistant_v1alpha1_CapabilityGapList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref(v1alpha1.CapabilityGap{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			v1alpha1.CapabilityGap{}.OpenAPIModelName(), v1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
 func schema_pkg_apis_assistant_v1alpha1_CapabilityGapReport(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -240,6 +334,40 @@ func schema_pkg_apis_assistant_v1alpha1_CapabilityGapReport(ref common.Reference
 		},
 		Dependencies: []string{
 			v1alpha1.CapabilityGapReportStatus{}.OpenAPIModelName(), v1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportEvidence(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CapabilityGapReportEvidence quotes the offending tool output so the provider's team can check the claim. It carries tool output and object state only — never text from the user's message.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"tool": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Tool is the tool whose output was at fault, e.g. \"workloads_list\".",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"observed": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Observed is what that tool returned, e.g. \"actionability: transient\".",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"contradictedBy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ContradictedBy is the fact that makes Observed wrong, thin, or impossible to act on, e.g. \"instance unchanged for 9d\".",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -319,9 +447,16 @@ func schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref common.Ref
 							Format:      "",
 						},
 					},
+					"capabilityKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CapabilityKey groups this occurrence with every other report of the same gap; it is the name of the CapabilityGap it rolls up into. Empty on reports filed before keys existed, or filed without one — those stand alone in the aggregate rather than being merged on a guess.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"capability": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Capability is a short description of what was missing.",
+							Description: "Capability is a short description of the capability at fault.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -333,9 +468,93 @@ func schema_pkg_apis_assistant_v1alpha1_CapabilityGapReportStatus(ref common.Ref
 							Format:      "",
 						},
 					},
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind classifies the shortfall. Reports stored before kinds existed read back as MissingCapability.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"evidence": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Evidence quotes the tool output a non-MissingCapability report is about. Absent when there is nothing to quote.",
+							Ref:         ref(v1alpha1.CapabilityGapReportEvidence{}.OpenAPIModelName()),
+						},
+					},
 				},
 			},
 		},
+		Dependencies: []string{
+			v1alpha1.CapabilityGapReportEvidence{}.OpenAPIModelName()},
+	}
+}
+
+func schema_pkg_apis_assistant_v1alpha1_CapabilityGapStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CapabilityGapStatus carries one distinct gap and how widely it was hit.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"serviceName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServiceName identifies the provider service the gap belongs to. Keys are per-service vocabulary: the same key on two services is two gaps.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"capabilityKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CapabilityKey is the key every occurrence shares, e.g. \"workload-metrics\". Empty for a gap filed before keys existed.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"capability": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Capability is the most recent occurrence's description — the freshest wording of a gap that has been re-filed several times.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is the most recent occurrence's classification.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"conversations": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Conversations is how many distinct conversations hit this gap. It counts conversations, not reports, so one conversation filing twice still counts once.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"occurrences": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Occurrences is how many reports were filed. It can exceed Conversations.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"firstSeen": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FirstSeen is when this gap was first reported.",
+							Ref:         ref(v1.Time{}.OpenAPIModelName()),
+						},
+					},
+					"lastSeen": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastSeen is when it was most recently reported.",
+							Ref:         ref(v1.Time{}.OpenAPIModelName()),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			v1.Time{}.OpenAPIModelName()},
 	}
 }
 
