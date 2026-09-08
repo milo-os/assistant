@@ -3,10 +3,15 @@
 // an OpenAI-compatible endpoint — in this service, the Envoy AI Gateway
 // (MODEL_MODE=gateway).
 //
-// In gateway mode the service holds no upstream credential: the gateway
-// injects it. The adapter therefore sends no Authorization header when no
-// API key is configured, and forwards whatever per-request attribution
-// headers the loop supplies.
+// In gateway mode the service holds no MODEL credential: the gateway injects
+// it. The adapter therefore sends no Authorization header when neither an API
+// key nor a token file is configured, and forwards whatever per-request
+// attribution headers the loop supplies.
+//
+// A token file is a separate concern from the model credential: it proves who
+// is calling the gateway, not who may call the model. On the Datum platform the
+// gateway requires a JWT from an in-cluster workload, so the service presents
+// its own projected ServiceAccount token while still holding no model key.
 package openaicompat
 
 import (
@@ -17,6 +22,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/milo-os/assistant/agentcore"
@@ -36,6 +42,12 @@ type Options struct {
 	// APIKey is an optional bearer credential. Empty means no Authorization
 	// header (the gateway injects the upstream key).
 	APIKey string
+	// TokenFile names a file holding a bearer token to present to the
+	// gateway. It is read on every request, not once here: a projected
+	// ServiceAccount token is rewritten in place by the kubelet, so a value
+	// captured at startup works until the first rotation and then 401s for
+	// good. Ignored when APIKey is set.
+	TokenFile string
 	// HTTPClient overrides the HTTP client (custom CA, TLS settings). Nil
 	// uses the default.
 	HTTPClient *http.Client
@@ -54,9 +66,18 @@ func New(opts Options) *Model {
 	// and is bounded by the per-turn deadline. Leaving the SDK's default (2)
 	// enabled would compound with ours and multiply the attempt count.
 	reqOpts := []option.RequestOption{option.WithBaseURL(opts.BaseURL), option.WithMaxRetries(0)}
-	if opts.APIKey != "" {
+	switch {
+	case opts.APIKey != "":
 		reqOpts = append(reqOpts, option.WithAPIKey(opts.APIKey))
-	} else {
+	case opts.TokenFile != "":
+		// Still no environment-derived key, and still no statically set
+		// header — the middleware below sets Authorization per request from
+		// the file, which is what keeps a rotated token working.
+		reqOpts = append(reqOpts,
+			option.WithAPIKey(""),
+			option.WithHeaderDel("Authorization"),
+			option.WithMiddleware(bearerFromFile(opts.TokenFile)))
+	default:
 		// Gateway posture: clear any environment-derived key and strip the
 		// Authorization header outright so the service sends no upstream
 		// credential.
@@ -66,6 +87,31 @@ func New(opts Options) *Model {
 		reqOpts = append(reqOpts, option.WithHTTPClient(opts.HTTPClient))
 	}
 	return &Model{client: openai.NewClient(reqOpts...), modelID: opts.ModelID}
+}
+
+// bearerFromFile returns middleware that sets Authorization from path on every
+// request.
+//
+// Re-reading per request is the point. The file is a projected ServiceAccount
+// token, which the kubelet rewrites in place well before expiry; a token read
+// once at construction would authenticate until the first rotation and then
+// fail permanently, with nothing in this process changing to explain it.
+//
+// A read failure is returned rather than sent as an empty header, so the cause
+// appears as a missing token instead of a bare 401 from the gateway.
+func bearerFromFile(path string) option.Middleware {
+	return func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+		token, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading gateway token %s: %w", path, err)
+		}
+		trimmed := strings.TrimSpace(string(token))
+		if trimmed == "" {
+			return nil, fmt.Errorf("gateway token %s is empty", path)
+		}
+		req.Header.Set("Authorization", "Bearer "+trimmed)
+		return next(req)
+	}
 }
 
 // ModelID implements [agentcore.Model].

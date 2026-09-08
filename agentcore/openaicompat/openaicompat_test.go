@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -399,5 +401,69 @@ func TestClassifyPassesThroughCancellation(t *testing.T) {
 	}
 	if _, isModelErr := classify(fmt.Errorf("do request: %w", context.Canceled)).(*agentcore.ModelError); isModelErr {
 		t.Fatal("a wrapped cancellation must not be classified as a retryable ModelError")
+	}
+}
+
+// The gateway token is a projected ServiceAccount token: the kubelet rewrites
+// it in place long before expiry. Reading it once at construction would
+// authenticate until the first rotation and then 401 forever, with nothing in
+// this process changing to explain it — so assert the SECOND request picks up a
+// token written after the client was built.
+func TestStreamGatewayModeTokenFileRereadPerRequest(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenPath, []byte("first-token\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	var cap capture
+	srv := server(t, textSSE(), &cap)
+	defer srv.Close()
+
+	m := New(Options{ModelID: "patch-stub-v1", BaseURL: srv.URL, TokenFile: tokenPath})
+
+	drain(t, stream(t, m, agentcore.Request{Messages: []agentcore.Message{agentcore.UserMessage("hello")}}))
+	if got := cap.headers.Get("Authorization"); got != "Bearer first-token" {
+		t.Fatalf("first request Authorization=%q, want %q", got, "Bearer first-token")
+	}
+
+	// Rotate in place, exactly as the kubelet does.
+	if err := os.WriteFile(tokenPath, []byte("second-token\n"), 0o600); err != nil {
+		t.Fatalf("rotate token: %v", err)
+	}
+
+	drain(t, stream(t, m, agentcore.Request{Messages: []agentcore.Message{agentcore.UserMessage("again")}}))
+	if got := cap.headers.Get("Authorization"); got != "Bearer second-token" {
+		t.Fatalf("after rotation Authorization=%q, want %q — a token read once at startup would still send the first",
+			got, "Bearer second-token")
+	}
+}
+
+// An unreadable token must surface as a missing token here, not as an
+// unexplained 401 from the gateway. This adapter reports failures as a terminal
+// error part rather than a Recv error, so assert on that.
+func TestStreamGatewayModeTokenFileUnreadable(t *testing.T) {
+	var cap capture
+	srv := server(t, textSSE(), &cap)
+	defer srv.Close()
+
+	missing := filepath.Join(t.TempDir(), "absent")
+	m := New(Options{ModelID: "patch-stub-v1", BaseURL: srv.URL, TokenFile: missing})
+
+	parts := drain(t, stream(t, m, agentcore.Request{
+		Messages: []agentcore.Message{agentcore.UserMessage("hello")},
+	}))
+	if len(parts) == 0 {
+		t.Fatal("want a terminal error part, got no parts")
+	}
+	last := parts[len(parts)-1]
+	if last.Kind != agentcore.StreamPartError || last.Err == nil {
+		t.Fatalf("last part = %+v, want a StreamPartError carrying an error", last)
+	}
+	if !strings.Contains(last.Err.Error(), "reading gateway token") {
+		t.Fatalf("err = %v, want it to name the unreadable token file", last.Err)
+	}
+	if cap.headers != nil {
+		t.Error("no request should have been sent without a token")
 	}
 }

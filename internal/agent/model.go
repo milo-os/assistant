@@ -19,8 +19,10 @@ import (
 //
 //   - mock:      the scripted in-process model (no secrets, no network).
 //   - gateway:   the OpenAI-compatible adapter pointed at the Envoy AI Gateway,
-//     with NO upstream credential (the gateway injects it). Custom
-//     CA / insecure TLS from config is honored via the HTTP client.
+//     with NO model credential (the gateway injects it). It may still
+//     present GatewayTokenFile to prove which workload is calling,
+//     where the gateway requires that. Custom CA / insecure TLS from
+//     config is honored via the HTTP client.
 //   - anthropic: the Anthropic Messages adapter over the configured API key.
 //
 // The returned model's mode for attribution purposes is string(cfg.Mode);
@@ -44,6 +46,7 @@ func ResolveModel(cfg config.ModelConfig, logger *slog.Logger) (agentcore.Model,
 		return openaicompat.New(openaicompat.Options{
 			ModelID:    cfg.GatewayModel,
 			BaseURL:    cfg.GatewayURL,
+			TokenFile:  cfg.GatewayTokenFile,
 			HTTPClient: httpClient,
 		}), nil
 

@@ -15,12 +15,22 @@
 # mounts a real keypair and points those two variables at it; see the note on
 # the env block.
 #
-# Delegated authn/authz: no --authentication-kubeconfig/--authorization-kubeconfig
-# is set, so the server falls back to its in-cluster client for TokenReview and
+# Delegated authn/authz: all three kubeconfig variables below are empty, so the
+# server falls back to its in-cluster client for TokenReview and
 # SubjectAccessReview — i.e. the kind cluster's own apiserver/RBAC (design
-# decision #3). The requestheader client CA is discovered from the kube-system
-# `extension-apiserver-authentication` configmap (which the auth-reader
-# RoleBinding + cluster RBAC grant read access to), so no CA volume is mounted.
+# decision #3). The requestheader client CA is then discovered from that
+# cluster's kube-system `extension-apiserver-authentication` configmap (which
+# the auth-reader RoleBinding + cluster RBAC grant read access to), so no CA
+# volume is mounted.
+#
+# That fallback is a DEV-ONLY convenience. Behind a Milo control plane the
+# aggregator is milo-apiserver, and the callers it proxies are Milo identities
+# that the workload cluster has never heard of — so reviews sent to the local
+# apiserver fail and the APIService goes Stale. Such a deployment points all
+# three at a kubeconfig for milo-apiserver instead (see datum-cloud/infra
+# apps/patch-assistant), which is why they are variables and not literals. The
+# names match the ipam and activity apiserver bundles so one infra pattern
+# covers all three.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -74,7 +84,18 @@ spec:
             # by this file.
             - --tls-cert-file=$(SERVING_TLS_CERT_FILE)
             - --tls-private-key-file=$(SERVING_TLS_PRIVATE_KEY_FILE)
-            - --authorization-always-allow-paths=/healthz,/readyz,/livez
+            # Where TokenReview, SubjectAccessReview and the core-API client
+            # are sent. All three are needed: leaving --kubeconfig behind while
+            # moving the other two still drags the generic apiserver's own
+            # client back to the in-cluster fallback.
+            - --authentication-kubeconfig=$(AUTHENTICATION_KUBECONFIG)
+            - --authorization-kubeconfig=$(AUTHORIZATION_KUBECONFIG)
+            - --kubeconfig=$(KUBECONFIG)
+            - --authentication-skip-lookup=$(AUTHENTICATION_SKIP_LOOKUP)
+            - --authentication-tolerate-lookup-failure=$(AUTHENTICATION_TOLERATE_LOOKUP_FAILURE)
+            - --requestheader-client-ca-file=$(REQUESTHEADER_CLIENT_CA_FILE)
+            - --requestheader-uid-headers=$(REQUESTHEADER_UID_HEADERS)
+            - --authorization-always-allow-paths=$(AUTHORIZATION_ALWAYS_ALLOW_PATHS)
           ports:
             - containerPort: 8443
               name: https
@@ -95,6 +116,43 @@ spec:
               value: ""
             - name: SERVING_TLS_PRIVATE_KEY_FILE
               value: ""
+            # Delegated authn/authz. Empty means "use the in-cluster client",
+            # which is the dev fallback described in the header; a Milo
+            # deployment points all three at a kubeconfig for milo-apiserver.
+            - name: AUTHENTICATION_KUBECONFIG
+              value: ""
+            - name: AUTHORIZATION_KUBECONFIG
+              value: ""
+            - name: KUBECONFIG
+              value: ""
+            # Booleans, so these carry a real default rather than an empty one:
+            # `--flag=` fails to parse as a bool and the process would not start.
+            - name: AUTHENTICATION_SKIP_LOOKUP
+              value: "false"
+            - name: AUTHENTICATION_TOLERATE_LOOKUP_FAILURE
+              value: "false"
+            # Empty means "discover the whole requestheader config from the
+            # extension-apiserver-authentication configmap on whichever cluster
+            # the kubeconfigs above point at". Setting it switches to the static
+            # config, which is the only way to name the UID header below —
+            # the discovered config supplies no UID header at all.
+            - name: REQUESTHEADER_CLIENT_CA_FILE
+              value: ""
+            # Header carrying the caller's UID from the aggregator. Empty by
+            # default because it takes effect only alongside the CA file above,
+            # and because the header is a trusted input: naming it while
+            # trusting a CA that is not the aggregator's own would let any
+            # holder of a cert from that CA assert someone else's identity.
+            #
+            # Milo's OpenFGA authorizer rejects a SubjectAccessReview with no
+            # UID outright, so behind Milo this is required, not optional:
+            # without it every request we serve is denied.
+            - name: REQUESTHEADER_UID_HEADERS
+              value: ""
+            # Unauthenticated paths. A variable so a deployment can add
+            # /metrics for a scrape that cannot present credentials.
+            - name: AUTHORIZATION_ALWAYS_ALLOW_PATHS
+              value: "/healthz,/readyz,/livez"
             # Same durable store as the assistant: the CNPG-generated
             # `conversation-store-app` secret's `uri` points at the cluster's
             # -rw service. The apiserver reads (list/get/messages) the tables
