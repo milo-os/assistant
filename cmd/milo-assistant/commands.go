@@ -83,13 +83,26 @@ func newCardCmd() *cobra.Command {
 		Short: "Show the assistant's A2A agent card",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			inv, err := serviceInvocation(cmd, patchcli.KindCard, false)
+			inv, err := cardInvocation(cmd)
 			if err != nil {
 				return err
 			}
 			return run(cmd, inv)
 		},
 	}
+}
+
+// cardInvocation builds the `card` invocation. --project is optional here, so
+// needProject stays false -- a bare `card` must still work with no project set
+// -- but the flag has to be carried through explicitly or Execute never asks
+// for the extended card and silently returns the public one.
+func cardInvocation(cmd *cobra.Command) (patchcli.Invocation, error) {
+	inv, err := serviceInvocation(cmd, patchcli.KindCard, false)
+	if err != nil {
+		return inv, err
+	}
+	inv.Project, _ = cmd.Flags().GetString("project")
+	return inv, nil
 }
 
 func newChatCmd() *cobra.Command {
