@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/milo-os/assistant/agentcore"
+	"github.com/milo-os/assistant/internal/auth"
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
@@ -132,6 +133,11 @@ type Deps struct {
 	// internal/gapreport), never to params.ProjectName. Nil disables the
 	// feature entirely.
 	GapReports gapreport.Store
+	// CapabilityIdentityForwardHosts is the operator-sanctioned set of MCP
+	// endpoint hosts that may receive the caller's own bearer token and the
+	// turn's project. Empty (the default) forwards to nobody; a capability
+	// document naming an endpoint never sanctions it. See internal/capability.
+	CapabilityIdentityForwardHosts []string
 	// AllowPrivateCapabilityNetworks relaxes the capability SSRF guard's
 	// loopback/RFC1918 block (link-local/metadata stay blocked either way). The
 	// platform's capability endpoints are in-cluster private ClusterIPs, so real
@@ -261,9 +267,15 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		mu          sync.Mutex
 		invocations []capability.ProviderToolInvocation
 	)
+	// The caller's own credential, off the context the HTTP layer
+	// authenticated. Composition decides which endpoints, if any, may see it.
+	caller := capability.CallerIdentity{BearerToken: auth.BearerTokenFromContext(ctx)}
+
 	composed, _ := capability.Compose(ctx, docs, capability.ComposeOptions{
 		HTTPClient:           c.deps.HTTPClient,
 		AllowPrivateNetworks: c.deps.AllowPrivateCapabilityNetworks,
+		Caller:               caller,
+		IdentityForwardHosts: c.deps.CapabilityIdentityForwardHosts,
 		Memory:               c.deps.Memory,
 		ExpectedProject:      params.ProjectName,
 		GapReports:           c.deps.GapReports,

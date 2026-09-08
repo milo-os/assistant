@@ -48,9 +48,10 @@ type mcpSession interface {
 	Close() error
 }
 
-// mcpConnector opens a session to the MCP server at endpoint. It is injectable
-// so tests can compose without a live server.
-type mcpConnector func(ctx context.Context, endpoint string) (mcpSession, error)
+// mcpConnector opens a session to the MCP server at endpoint, sending headers
+// on every request of that session. It is injectable so tests can compose
+// without a live server.
+type mcpConnector func(ctx context.Context, endpoint string, headers map[string]string) (mcpSession, error)
 
 // ComposeOptions configures [Compose]. All fields are optional.
 type ComposeOptions struct {
@@ -94,6 +95,16 @@ type ComposeOptions struct {
 	// (backward compatible). The integrator populates these from config.
 	AllowedHosts []string
 	AllowedCIDRs []string
+	// Caller is the calling user's own credential, forwarded (with
+	// ExpectedProject) only to endpoints in IdentityForwardHosts so a provider
+	// can read as the caller instead of holding standing access of its own.
+	Caller CallerIdentity
+	// IdentityForwardHosts is the OPERATOR-sanctioned set of MCP endpoint hosts
+	// that may receive Caller — matched exactly and as a domain suffix. Kept
+	// separate from the SSRF allow-list on purpose: that one answers "may we
+	// connect at all", this the far narrower "may we hand this endpoint the
+	// user's credential". Empty (the default) forwards to nobody. See identity.go.
+	IdentityForwardHosts []string
 	// ExpectedProject, when set, is the namespace/project of the calling request.
 	// It is a defense-in-depth tenant-isolation check on the capability Source:
 	// the Source is responsible for returning only the calling project's
@@ -180,6 +191,13 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 	guard.allow = allow
 	httpClient := guard.wrapClient(opts.HTTPClient)
 
+	// Sanctioned identity-forwarding hosts. A malformed entry fails composition
+	// closed, exactly as a malformed SSRF allow-list entry does.
+	sanctioned, err := parseHostAllowList(opts.IdentityForwardHosts, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	addendum := buildKnowledgeAddendum(ctx, docs, knowledgeOptions{
 		httpClient:           httpClient,
 		guard:                guard,
@@ -189,7 +207,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		logger:               logger,
 	})
 
-	tools, sessions := connectTools(ctx, docs, opts, guard, logger)
+	tools, sessions := connectTools(ctx, docs, opts, guard, sanctioned, logger)
 
 	// Skills: descriptions into the prompt, bodies behind the built-in
 	// load_skill tool (progressive disclosure).
@@ -303,7 +321,7 @@ func scopeDocuments(docs []CapabilityDocument, expectedProject string, logger *s
 	return kept
 }
 
-func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, logger *slog.Logger) (agentcore.ToolSet, []mcpSession) {
+func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, sanctioned *hostAllowList, logger *slog.Logger) (agentcore.ToolSet, []mcpSession) {
 	connect := opts.connect
 	if connect == nil {
 		connect = guardedConnector(defaultConnector(), guard)
@@ -322,7 +340,8 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 		}
 		serviceName := doc.Spec.ServiceName
 		for _, server := range doc.Spec.Tools.MCPServers {
-			session, err := connectWithTimeout(ctx, connect, server.Endpoint, timeout)
+			headers := identityHeaders(server.Endpoint, opts.Caller, opts.ExpectedProject, sanctioned)
+			session, err := connectWithTimeout(ctx, connect, server.Endpoint, headers, timeout)
 			if err != nil {
 				logger.Warn("capability.mcp.connect_failed",
 					"service", serviceName, "server", server.Name, "endpoint", server.Endpoint, "error", err.Error())
@@ -414,32 +433,36 @@ func NamespaceToolName(serverName, toolName string) string {
 // connector touches the network. Test connectors injected via ComposeOptions
 // bypass this — they never reach the real network.
 func guardedConnector(inner mcpConnector, guard *ipGuard) mcpConnector {
-	return func(ctx context.Context, endpoint string) (mcpSession, error) {
+	return func(ctx context.Context, endpoint string, headers map[string]string) (mcpSession, error) {
 		if err := guard.checkURL(ctx, endpoint); err != nil {
 			return nil, err
 		}
-		return inner(ctx, endpoint)
+		return inner(ctx, endpoint, headers)
 	}
 }
 
 // defaultConnector opens real MCP sessions via the mcptool client.
 func defaultConnector() mcpConnector {
-	return func(ctx context.Context, endpoint string) (mcpSession, error) {
-		return mcptool.Connect(ctx, mcptool.Options{Endpoint: endpoint, ClientName: defaultMCPClientName})
+	return func(ctx context.Context, endpoint string, headers map[string]string) (mcpSession, error) {
+		return mcptool.Connect(ctx, mcptool.Options{
+			Endpoint:   endpoint,
+			ClientName: defaultMCPClientName,
+			Headers:    headers,
+		})
 	}
 }
 
 // connectWithTimeout races a connect against a deadline. If the deadline wins,
 // it returns an error but still closes a session that arrives late, so a slow
 // server never leaks a connection.
-func connectWithTimeout(ctx context.Context, connect mcpConnector, endpoint string, timeout time.Duration) (mcpSession, error) {
+func connectWithTimeout(ctx context.Context, connect mcpConnector, endpoint string, headers map[string]string, timeout time.Duration) (mcpSession, error) {
 	type result struct {
 		session mcpSession
 		err     error
 	}
 	ch := make(chan result, 1)
 	go func() {
-		session, err := connect(ctx, endpoint)
+		session, err := connect(ctx, endpoint, headers)
 		ch <- result{session, err}
 	}()
 

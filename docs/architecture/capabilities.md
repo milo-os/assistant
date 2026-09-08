@@ -62,6 +62,14 @@ gateway's route is not callable even if a capability document names it.
 The duplication is intentional. The two checks fail independently, and the
 gateway is the one a compromised or misconfigured assistant cannot bypass.
 
+## Reading as the customer
+
+A provider tool that reads the customer's own resources gets the caller's
+credential and the turn's project on every request, so it acts as that user
+rather than holding standing access. Which endpoints may receive a credential is
+an operator's decision, not a document's — see
+[Identity and access](./identity-and-access.md#acting-as-the-caller).
+
 ## Degrading, not failing
 
 A provider outage never fails a chat. A transport error, a non-2xx response, an

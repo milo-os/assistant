@@ -27,12 +27,12 @@ func (s *nilClosePanics) Close() error {
 // error with a typed-nil session, the late-close watcher must NOT call Close
 // (which would panic on the nil receiver and crash the process).
 func TestConnectWithTimeout_SlowFailureDoesNotPanic(t *testing.T) {
-	connect := func(ctx context.Context, endpoint string) (mcpSession, error) {
+	connect := func(ctx context.Context, endpoint string, _ map[string]string) (mcpSession, error) {
 		time.Sleep(40 * time.Millisecond) // exceed the timeout below
 		return (*nilClosePanics)(nil), errors.New("connect failed")
 	}
 
-	_, err := connectWithTimeout(context.Background(), connect, "http://x/mcp", 10*time.Millisecond)
+	_, err := connectWithTimeout(context.Background(), connect, "http://x/mcp", nil, 10*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected a timeout error")
 	}

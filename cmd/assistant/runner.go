@@ -147,6 +147,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 		Memory:                         mem,
 		GapReports:                     gaps,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
+		CapabilityIdentityForwardHosts: cfg.CapabilityIdentityForwardHosts,
 		Logger:                         log,
 		Metrics:                        metrics,
 	})

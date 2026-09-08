@@ -165,6 +165,13 @@ type Config struct {
 	// are untrusted (then prefer a host allow-list). Default false = safe.
 	AllowPrivateCapabilityNetworks bool
 
+	// CapabilityIdentityForwardHosts are the operator-sanctioned MCP endpoint
+	// hosts that may receive the calling user's bearer token and the turn's
+	// project (comma-separated env; exact or domain-suffix match). Empty (the
+	// default) forwards to nobody — a capability document is provider-controlled
+	// data, so naming an endpoint must never by itself send a credential there.
+	CapabilityIdentityForwardHosts []string
+
 	Model ModelConfig
 	Usage UsageConfig
 }
@@ -359,6 +366,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		PersonaPromptFile:              env("PERSONA_PROMPT_FILE"),
 		ConversationStoreURL:           conversationStoreURL,
 		AllowPrivateCapabilityNetworks: isTruthy(env("CAPABILITY_ALLOW_PRIVATE_NETWORKS")),
+		CapabilityIdentityForwardHosts: splitList(env("CAPABILITY_IDENTITY_FORWARD_HOSTS")),
 		Model: ModelConfig{
 			Mode:               modelMode,
 			AnthropicAPIKey:    anthropicKey,
@@ -453,6 +461,18 @@ func oneOf(value string, allowed []string, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+// splitList parses a comma-separated env value into trimmed, non-empty
+// entries. Unset or all-blank yields nil — the safe default for an allow-list.
+func splitList(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func isTruthy(v string) bool {

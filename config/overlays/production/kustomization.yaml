@@ -90,6 +90,12 @@ patches:
           # (see README — the guard supports it; config wiring is the follow-up).
           - name: CAPABILITY_ALLOW_PRIVATE_NETWORKS
             value: "true"
+          # Hosts sanctioned to receive the CALLING USER's bearer token and the
+          # turn's project. Unset ⇒ forwarded to nobody. Set it to the AI gateway
+          # fronting the provider endpoints; never widen it to a host a
+          # capability document merely names.
+          - name: CAPABILITY_IDENTITY_FORWARD_HOSTS
+            value: "REPLACE_WITH_AI_GATEWAY_HOST"
           # ── Capabilities: the service catalog's provider API (NOT a fixture) ──
           - name: CAPABILITY_PROVIDER_URL
             value: "http://REPLACE_WITH_CAPABILITY_PROVIDER_HOST"

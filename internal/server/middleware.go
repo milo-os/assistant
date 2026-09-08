@@ -82,7 +82,11 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m.next.ServeHTTP(w, r)
+	// Only now that the request is both authenticated and authorized for its
+	// project does the caller's own credential go downstream; internal/capability
+	// decides the far narrower question of which endpoints may ever receive it.
+	ctx = auth.ContextWithBearerToken(ctx, auth.ExtractBearerToken(r.Header.Get("Authorization")))
+	m.next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // authenticateBearer resolves the bearer token on r to a [auth.Principal], or
