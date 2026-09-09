@@ -33,6 +33,7 @@ package patchcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -174,4 +175,14 @@ func readViewErrorText(r ReadView, err error) string {
 		return err.Error()
 	}
 	return kubectlErrorText(err)
+}
+
+// readViewError is [readViewErrorText] as an error. The direct transport's
+// error is returned as-is so callers can still errors.As through it — a
+// failure to mint a token is not a failure of whatever was being fetched.
+func readViewError(r ReadView, err error) error {
+	if r.direct() {
+		return err
+	}
+	return errors.New(kubectlErrorText(err))
 }

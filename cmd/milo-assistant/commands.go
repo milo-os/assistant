@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -439,11 +440,17 @@ func serviceURL(cmd *cobra.Command, inv patchcli.Invocation) (string, error) {
 
 	url, err := patchcli.DiscoverBaseURL(cmd.Context(), patchcli.ReadViewFor(inv), discoverIn)
 	if err != nil {
-		// Report what discovery hit, then how to proceed anyway — a bare "set
-		// PATCH_URL" hides a fixable cause (credentials, apiserver not
-		// installed, PUBLIC_BASE_URL unset on the service).
-		return "", fmt.Errorf("could not discover the assistant: %w\n"+
-			"       pass --url or set PATCH_URL to skip discovery", err)
+		// Discovery only asked for a token on the way; if that is what failed,
+		// the user is offline or signed out, and "could not discover" would
+		// bury it under a step they never asked for.
+		var cred credentialsError
+		if errors.As(err, &cred) {
+			return "", err
+		}
+		// Report what discovery hit rather than how to skip it: --url is a
+		// dev-loop override, and a bare "set PATCH_URL" hides a fixable cause
+		// (apiserver not installed, PUBLIC_BASE_URL unset on the service).
+		return "", fmt.Errorf("could not discover the assistant: %w", err)
 	}
 	return url, nil
 }
@@ -504,11 +511,37 @@ func tokenSource() patchcli.TokenSource {
 		select {
 		case r := <-done:
 			if r.err != nil {
-				return "", fmt.Errorf("getting credentials from datumctl: %w", r.err)
+				return "", helperError(r.err)
 			}
 			return r.token, nil
 		case <-time.After(tokenTimeout):
 			return "", fmt.Errorf("timed out after %s waiting for datumctl to return a token", tokenTimeout)
 		}
 	}
+}
+
+// credentialsError is a failure to get a token from datumctl. It is its own
+// type so a caller that only asked for a token on the way to something else
+// (discovery) can report it as what it is rather than as its own failure.
+type credentialsError struct{ msg string }
+
+func (e credentialsError) Error() string { return e.msg }
+
+// helperError renders a [plugin.Token] failure for the terminal. The SDK leads
+// with the helper's exit status and puts its stderr behind a newline; the
+// stderr text is the whole story, so keep that and drop the rest.
+func helperError(err error) error {
+	msg := err.Error()
+	if _, stderr, ok := strings.Cut(msg, "\nstderr: "); ok && strings.TrimSpace(stderr) != "" {
+		msg = strings.TrimSpace(stderr)
+		msg = strings.TrimPrefix(msg, "error: ")
+		msg = strings.TrimPrefix(msg, "failed to get token: ")
+	}
+	// A failed dial means the auth server was never reached — the machine is
+	// offline, or DNS is not resolving. Say that instead of quoting the POST.
+	if _, dial, ok := strings.Cut(msg, "dial tcp"); ok {
+		return credentialsError{"could not connect: " + strings.TrimLeft(dial, ": ") +
+			"\n       check your network connection and try again"}
+	}
+	return credentialsError{"datumctl could not get a token: " + msg}
 }
