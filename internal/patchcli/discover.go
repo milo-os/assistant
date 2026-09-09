@@ -24,7 +24,7 @@ import (
 func DiscoverBaseURL(ctx context.Context, view ReadView, project string) (string, error) {
 	out, err := view.get(ctx, project, endpointPath())
 	if err != nil {
-		return "", fmt.Errorf("%s", readViewErrorText(view, err))
+		return "", readViewError(view, err)
 	}
 	var ep struct {
 		Spec struct {
