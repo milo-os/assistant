@@ -65,6 +65,7 @@ type spyStore struct {
 	compactCalls int
 	lastSummary  history.Turn
 	lastKeep     []history.Turn
+	failCompact  error // when set, Compact records the call and fails without writing
 }
 
 func newSpyStore() *spyStore {
@@ -75,6 +76,9 @@ func (s *spyStore) Compact(ctx context.Context, projectName, contextID string, s
 	s.compactCalls++
 	s.lastSummary = summary
 	s.lastKeep = append([]history.Turn(nil), keep...)
+	if s.failCompact != nil {
+		return s.failCompact
+	}
 	return s.MemoryStore.Compact(ctx, projectName, contextID, summary, keep)
 }
 
