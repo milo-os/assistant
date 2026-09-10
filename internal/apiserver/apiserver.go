@@ -1,7 +1,10 @@
 // Package apiserver assembles the conversations aggregated API server: the
 // runtime scheme/codecs for the assistant group and the generic apiserver
 // wiring that installs the bespoke Conversation REST (a read view over the
-// shared history store) — no etcd, no generic registry.
+// shared history store) — no etcd, no generic registry. It also installs the
+// conversations/sendmessage subresource, the one write/execution path in this
+// otherwise read-only apiserver: it drives a live agent turn and streams the
+// result back as Server-Sent Events (see registry/conversation).
 package apiserver
 
 import (
@@ -13,6 +16,7 @@ import (
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/klog/v2"
 
+	"github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/apiserver/registry/capabilitygapreport"
 	"github.com/milo-os/assistant/internal/apiserver/registry/conversation"
 	"github.com/milo-os/assistant/internal/apiserver/registry/endpoint"
@@ -53,6 +57,13 @@ type ExtraConfig struct {
 	// client can discover where to send A2A traffic. Empty is reported as
 	// empty, never guessed.
 	PublicBaseURL string
+	// Runner drives one agent turn for the conversations/sendmessage
+	// subresource — the same [a2a.AgentRunner] seam cmd/assistant's A2A
+	// executor drives, built by the same internal/agentwiring constructor, so
+	// browser (SSE) and A2A traffic run identical agent wiring. Required for
+	// that subresource to be usable; a nil Runner makes Connect fail per-call
+	// rather than at startup, since ExtraConfig has no validation hook.
+	Runner a2a.AgentRunner
 }
 
 // Config is the conversations apiserver config: the generic recommended config
@@ -99,11 +110,12 @@ func (c completedConfig) New() (*ConversationServer, error) {
 	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(v1alpha1.GroupName, Scheme, metav1.ParameterCodec, Codecs)
 
 	v1alpha1Storage := map[string]rest.Storage{
-		"conversations":          conversation.NewConversationREST(c.ExtraConfig.Reader),
-		"conversations/messages": conversation.NewMessagesREST(c.ExtraConfig.Reader),
-		"capabilitygapreports":   capabilitygapreport.NewCapabilityGapReportREST(c.ExtraConfig.GapReports),
-		"capabilitygaps":         capabilitygapreport.NewCapabilityGapREST(c.ExtraConfig.GapReports),
-		"assistantendpoints":     endpoint.NewAssistantEndpointREST(c.ExtraConfig.PublicBaseURL),
+		"conversations":             conversation.NewConversationREST(c.ExtraConfig.Reader),
+		"conversations/messages":    conversation.NewMessagesREST(c.ExtraConfig.Reader),
+		"conversations/sendmessage": conversation.NewSendMessageREST(c.ExtraConfig.Runner),
+		"capabilitygapreports":      capabilitygapreport.NewCapabilityGapReportREST(c.ExtraConfig.GapReports),
+		"capabilitygaps":            capabilitygapreport.NewCapabilityGapREST(c.ExtraConfig.GapReports),
+		"assistantendpoints":        endpoint.NewAssistantEndpointREST(c.ExtraConfig.PublicBaseURL),
 	}
 	apiGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = v1alpha1Storage
 
