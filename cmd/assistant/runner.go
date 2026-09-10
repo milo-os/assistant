@@ -19,6 +19,7 @@ import (
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
 	appmetrics "github.com/milo-os/assistant/internal/metrics"
+	"github.com/milo-os/assistant/internal/projectapi"
 	"github.com/milo-os/assistant/internal/usage"
 )
 
@@ -139,6 +140,15 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 			"note", "CONVERSATION_STORE_URL not set — capability-gap reports will not survive restarts")
 	}
 
+	// The base platform tools' path to a project's own resources. The service
+	// puts no credential of its own on it: composition binds the client to the
+	// calling user's token for the turn, so what a tool can read is exactly
+	// what the person who asked can read.
+	platformAPI, err := newPlatformAPI(cfg, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	conv := agent.New(agent.Deps{
 		Model:                          model,
 		ModelMode:                      string(cfg.Model.Mode),
@@ -148,12 +158,38 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 		History:                        store,
 		Memory:                         mem,
 		GapReports:                     gaps,
+		PlatformAPI:                    platformAPI,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
 		CapabilityIdentityForwardHosts: cfg.CapabilityIdentityForwardHosts,
 		Logger:                         log,
 		Metrics:                        metrics,
 	})
 	return conversationRunner{conv: conv}, store, cleanup, nil
+}
+
+// newPlatformAPI builds the client the base platform tools read and write a
+// project through, or nil when the deployment named no platform API — in which
+// case the base tools are simply not composed and a conversation runs on
+// provider capabilities alone.
+//
+// The CA bundle is read best-effort, matching the auth package's posture: an
+// absent file leaves the client on the system roots, which either works or
+// fails at the first request with a TLS error that says so, rather than
+// crash-looping a pod whose certificate mounts a moment late.
+func newPlatformAPI(cfg *config.Config, log *slog.Logger) (*projectapi.Client, error) {
+	if cfg.PlatformAPIURL == "" {
+		log.Warn("agent.platform_api",
+			"type", "none",
+			"reason", "PLATFORM_API_URL is unset and no control-plane endpoint could be derived — the base platform tools will not be available")
+		return nil, nil
+	}
+	caCert, _ := os.ReadFile(cfg.PlatformAPICACertPath)
+	client, err := projectapi.New(projectapi.Config{BaseURL: cfg.PlatformAPIURL, CACert: caCert})
+	if err != nil {
+		return nil, err
+	}
+	log.Info("agent.platform_api", "url", cfg.PlatformAPIURL, "caCert", len(caCert) > 0)
+	return client, nil
 }
 
 // conversationRunner adapts an [agent.Conversation] to [assistanta2a.AgentRunner]:

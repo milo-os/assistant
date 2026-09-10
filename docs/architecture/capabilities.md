@@ -21,6 +21,36 @@ plane can all feed the same runtime.
 | Tools | A reviewed subset of the provider's API | Listed in the prompt, called on demand |
 | Skills | Reviewed step-by-step procedures | Name and one line only, body loaded on demand |
 
+## What every project already has
+
+Before any provider contributes anything, a project's Patch can already work
+with that project: list its resources of any kind and read one whole, and
+describe what a kind's fields are.
+
+These are the **base platform tools**. They are not one service's contribution
+and are not entitled per project, so they are not namespaced under a provider
+and no capability document asks for them — they are simply there. They run as
+the person who asked, in the project the turn was authorized for, so a tool call
+reads nothing that person could not read themselves.
+
+The point is what a provider then has to publish. A service that wants an
+assistant to work with its resources publishes what only it knows — what its
+fields mean, how to build one, what to check when one is unwell — and inherits
+the rest. Before these existed, every provider that wanted more than a read had
+to build the same list, read, and describe machinery again, and each one
+answered slightly differently.
+
+Two questions stop short of this set on purpose: where a service is offered, and
+how much of a project's allowance is left. Both are platform records another
+service already keeps, so they are read from that service through a tool of its
+own rather than reimplemented here — one answer to each question instead of two
+that can disagree.
+
+| Tool | Answers |
+|---|---|
+| `resources_list` / `resources_get` | What is in this project, and what does this one look like |
+| `schema_get` | What fields does this kind take, and which are required |
+
 ## Composition
 
 Given the documents a project is entitled to, Patch builds that project's
@@ -33,6 +63,10 @@ assistant for the turn:
   allow-list names, namespaced by provider so two services may publish the same
   tool name. Clients open per turn and close when it ends.
 - **Skills** contribute only a name and a one-line description to the prompt.
+- **Base platform tools** are added last and unconditionally, bound to the
+  caller's own credential and the turn's project. A provider tool cannot shadow
+  one: every provider name carries its service prefix, and a base tool's does
+  not.
 
 Composition is per project and per turn. Nothing is cached across projects, so
 an entitlement change takes effect on the next message rather than at redeploy.

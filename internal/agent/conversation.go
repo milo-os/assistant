@@ -21,6 +21,7 @@ import (
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
 	appmetrics "github.com/milo-os/assistant/internal/metrics"
+	"github.com/milo-os/assistant/internal/projectapi"
 	"github.com/milo-os/assistant/internal/usage"
 )
 
@@ -127,6 +128,14 @@ type Deps struct {
 	// History, which is per-conversation and windowed). Nil disables the
 	// feature — no tools are composed.
 	Memory memory.Store
+	// PlatformAPI backs the base platform tools (resources_list,
+	// resources_get, schema_get and, when a plan token key is configured, the
+	// write path). Unlike a provider's tools
+	// these are not entitled per project and not namespaced under a service:
+	// every project has them. They act as the CALLER — composition binds the
+	// client to the caller's own bearer token and the turn's project — so the
+	// service reads nothing of its own. Nil disables them entirely.
+	PlatformAPI *projectapi.Client
 	// GapReports backs the report_capability_gap__<service> tools: lets
 	// the model flag that a provider service is missing a tool or lookup
 	// a user needed, written to THAT PROVIDER's own project (see
@@ -277,6 +286,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		Caller:               caller,
 		IdentityForwardHosts: c.deps.CapabilityIdentityForwardHosts,
 		Memory:               c.deps.Memory,
+		PlatformAPI:          c.deps.PlatformAPI,
 		ExpectedProject:      params.ProjectName,
 		GapReports:           c.deps.GapReports,
 		Metrics:              c.deps.Metrics,

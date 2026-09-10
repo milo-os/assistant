@@ -84,6 +84,72 @@ services. Loading a skill is not a provider tool invocation — no
 as input like the rest of the prompt. Executable skill bundles
 (scripts) are deliberately unsupported.
 
+## Base platform tools (always present)
+
+Every project's composition carries a set of tools that belong to no provider.
+They are **un-namespaced** — `resources_list`, not `<service>__resources_list` —
+which is the same convention the other built-ins use (`load_skill`,
+`memory_remember`, `memory_forget`) and is what makes them impossible for a
+provider to shadow: every provider tool name carries a `<server>__` prefix.
+
+| Tool | What it answers |
+|---|---|
+| `resources_list(group, version, kind, namespace?)` | Every resource of one kind in the project, with what the platform is reporting about each. Kinds held in a namespace default to `default`. |
+| `resources_get(group, version, kind, name, namespace?)` | One resource as an editable manifest, with the platform's own bookkeeping removed, plus its conditions alongside. |
+| `schema_get(group, version, kind, path?)` | What a kind's fields are and which are required, from the project's own published description. `path` narrows a large kind to one part. |
+
+Three read tools, and no more than three. A platform record that another service
+already keeps — where a service is offered, what a project's allowance has left
+— is read from the service that owns it, through a tool of its own, so the
+platform has one answer to that question rather than this service's copy of one.
+Those services reach a project the ordinary way, as a capability document naming
+their MCP endpoint.
+
+### The two rules that hold for all of them
+
+**They act as the caller.** Composition binds the platform client to the
+caller's own bearer token and the turn's project, once, and hands the tools a
+view that carries no other identity (`internal/projectapi`). The service holds
+no credential for a customer's project, so a tool call can read nothing the
+person could not read themselves. With no caller credential or no project the
+tools are **not composed at all** — there is no fallback to reading as the
+service.
+
+**The project is never an argument.** No input schema has a project field and no
+handler looks for one. The project comes from the request a SubjectAccessReview
+already approved, for the same reason `X-Datum-Project` does: an argument naming
+a project would be steerable by anything the model reads.
+
+### A failure that must not read like an answer
+
+This is a **requirement on any provider tool that reads a platform record** on a
+customer's behalf — where a service is offered, what an allowance has left, and
+anything else the platform itself keeps: when the kind that answers the question
+is not served in the project, the tool must **fail loudly and name it**, and must
+never degrade to an empty list. An empty list is a real answer. "This service is
+offered nowhere you can use" and "nothing here could look" call for opposite
+actions — one waits for the service to arrive somewhere, the other is a
+deployment that needs fixing — so they must never read the same. Returning
+nothing when nothing actually looked tells a customer to wait for a location that
+is already there, or that they have no limit when the limit is merely unreadable.
+A refusal should say which record was not served, that the person who asked did
+nothing wrong, and that whoever operates the deployment is who fixes it.
+
+The base tools hold themselves to the same contract: `resources_list`,
+`resources_get` and `schema_get` say a kind is not served rather than answering
+with nothing.
+
+### Metering
+
+A base tool fires **no** `tool-invocations` billing event, the same as
+`load_skill` and the memory tools. The tool event names the provider service
+that did the work (see [Metering](architecture/metering.md)), and there is no
+provider here — the work is the platform reading the customer's own project as
+the customer. Billing it to a provider would attribute it to the wrong party;
+billing it to Patch would make reading your own project cost you twice, since
+the tokens it adds are already billed as input. A provider tool that happens to
+do the same read still meters, because that provider ran it.
+
 ### Capability provider API (published contract, v1)
 
 Capability documents reach the assistant through the `Source` seam
