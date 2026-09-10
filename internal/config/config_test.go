@@ -342,3 +342,24 @@ func TestLoad_PlatformAPICanBeNamedSeparately(t *testing.T) {
 		t.Errorf("platform api CA = %q", cfg.PlatformAPICACertPath)
 	}
 }
+
+// A plan token is a hash of exactly what a person was shown; the key is what
+// lets a plan survive a restart and be applied by another replica. Unset is a
+// supported (and warned-about) posture, not a boot failure.
+func TestLoad_PlanTokenKeyIsOptional(t *testing.T) {
+	cfg, err := load(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlanTokenKey != "" {
+		t.Errorf("plan token key = %q, want empty by default", cfg.PlanTokenKey)
+	}
+
+	cfg, err = load(t, map[string]string{"PLAN_TOKEN_KEY": "  a-configured-secret-that-is-long  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlanTokenKey != "a-configured-secret-that-is-long" {
+		t.Errorf("plan token key = %q, want it trimmed", cfg.PlanTokenKey)
+	}
+}

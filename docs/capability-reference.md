@@ -105,6 +105,50 @@ platform has one answer to that question rather than this service's copy of one.
 Those services reach a project the ordinary way, as a capability document naming
 their MCP endpoint.
 
+Plus a change path — `resources_validate`, `resources_plan`, `resources_apply` —
+described below.
+
+### The change path
+
+Three more tools, of which exactly one can change anything. They are composed
+only when a plan-token key is available (`PLAN_TOKEN_KEY`, or one generated for
+the process): a service that cannot check a token must not issue something that
+looks like one.
+
+| Tool | What it does |
+|---|---|
+| `resources_validate(manifests[])` | Asks the platform for its verdict on each manifest without keeping any of them. Returns the field paths a rejection names, whether each resource already exists, and what applying would change. **Writes nothing.** |
+| `resources_plan(manifests[])` | Validates everything, resolves create vs update per resource, orders them so one that refers to another goes after it, reports the differences, and returns canonical manifests with a **plan token**. **Writes nothing.** |
+| `resources_apply(manifests[], planToken)` | Re-derives the token from what it was handed and refuses on any mismatch, then dry-runs again and applies in plan order. **The only tool here that writes.** |
+
+The plan token is `HMAC-SHA256` over the canonical JSON of every manifest, in
+plan order, plus the project, plus the resource version of each object the plan
+saw, plus the expiry — 15 minutes. So a manifest edited after the plan (one
+character is enough), a reordered list, a token minted in another project, or a
+resource somebody else changed in the meantime all fail to re-derive, and apply
+refuses rather than writing something nobody agreed to. Every refusal says what
+happened, that nothing was changed, and to plan again.
+
+The token proves the change was the one shown. It cannot prove agreement
+happened — that is a human step, and the platform's fixed operating rules are
+what require it: nothing the model reads in a tool result, a provider document
+or a resource's own status stands in for the person's answer. See
+`internal/plantoken`.
+
+**Ordering.** A manifest whose spec carries a `*Ref` (or `*Refs`) field naming
+another manifest in the same batch is applied after it; a `kind` on the
+reference is honoured when present. Anything with no reference into the rest of
+the batch keeps the order it was given in. The order is part of what the token
+covers, so a reordered list is refused.
+
+**What is on the change path.** `Composed.Mutating` names the composed tools
+that can change something: the provider tools a capability document flagged in
+`mcpServers[].mutating` — the first thing in the runtime to read that field —
+plus `resources_plan` and `resources_apply`. `resources_plan` is on the list
+even though it persists nothing, because it is the only thing that can authorize
+a write, and an operator asking "what can this project's assistant change" wants
+both answers. It rides on each tool's trace span as `tool.mutating`.
+
 ### The two rules that hold for all of them
 
 **They act as the caller.** Composition binds the platform client to the

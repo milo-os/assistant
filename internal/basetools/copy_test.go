@@ -74,14 +74,30 @@ func TestEveryToolSaysWhatItDoesAndWhetherItWrites(t *testing.T) {
 		if len(definition.Description) < 120 {
 			t.Errorf("%s: the description is too thin for a model to choose it well", name)
 		}
-		if !strings.Contains(definition.Description, "Read-only.") {
-			t.Errorf("%s: a tool that changes nothing must say so", name)
+		switch name {
+		case basetools.ResourcesApplyToolName:
+			// The one tool that writes. It has to say what it takes to call it.
+			if !strings.Contains(definition.Description, "said yes") {
+				t.Errorf("%s: the only tool that writes must say what it takes to call it", name)
+			}
+		case basetools.ResourcesPlanToolName:
+			if !strings.Contains(definition.Description, "changes nothing") {
+				t.Errorf("%s: planning writes nothing and must say so", name)
+			}
+		case basetools.ResourcesValidateToolName:
+			if !strings.Contains(definition.Description, "Writes nothing.") {
+				t.Errorf("%s: a tool that changes nothing must say so", name)
+			}
+		default:
+			if !strings.Contains(definition.Description, "Read-only.") {
+				t.Errorf("%s: a tool that changes nothing must say so", name)
+			}
 		}
 	}
 }
 
 func TestThePromptSectionNamesTheToolsItDescribes(t *testing.T) {
-	section := basetools.PromptSection()
+	section := basetools.PromptSection(false)
 	for _, name := range []string{
 		basetools.ResourcesListToolName,
 		basetools.ResourcesGetToolName,
@@ -89,6 +105,32 @@ func TestThePromptSectionNamesTheToolsItDescribes(t *testing.T) {
 	} {
 		if !strings.Contains(section, name) {
 			t.Errorf("the prompt section does not mention %s", name)
+		}
+	}
+	// A turn with no change path must not advertise one.
+	for _, name := range basetools.MutatingToolNames() {
+		if strings.Contains(section, name) {
+			t.Errorf("the read-only prompt section mentions %s", name)
+		}
+	}
+}
+
+// The step between a plan and an apply is a person, and the prompt is the only
+// place that can require it.
+func TestThePromptSectionRequiresAnExplicitYes(t *testing.T) {
+	section := basetools.PromptSection(true)
+	for _, name := range []string{
+		basetools.ResourcesValidateToolName,
+		basetools.ResourcesPlanToolName,
+		basetools.ResourcesApplyToolName,
+	} {
+		if !strings.Contains(section, name) {
+			t.Errorf("the prompt section does not mention %s", name)
+		}
+	}
+	for _, phrase := range []string{"explicit yes", "not a yes"} {
+		if !strings.Contains(section, phrase) {
+			t.Errorf("the prompt section does not say %q", phrase)
 		}
 	}
 }
