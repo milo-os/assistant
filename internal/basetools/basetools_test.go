@@ -50,15 +50,35 @@ type platform struct {
 }
 
 type routeEntry struct {
+	// method, when set, narrows the route to one verb — which is how a read of
+	// a resource and a write to the same path are told apart.
+	method string
 	suffix string
-	reply  reply
+	// persistedOnly narrows the route to a request that would actually change
+	// something, so a test can let a dry run pass and the write that follows
+	// it fail — which is the only way to reach a part-way change.
+	persistedOnly bool
+	reply         reply
 }
 
 type recorded struct {
 	method        string
 	path          string
+	query         string
 	authorization string
 	body          string
+}
+
+// dryRun reports whether this request asked the platform to keep nothing.
+func (r recorded) dryRun() bool { return strings.Contains(r.query, "dryRun=All") }
+
+// persisted reports whether this request would have changed something.
+func (r recorded) persisted() bool {
+	switch r.method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return !r.dryRun()
+	}
+	return false
 }
 
 func newPlatform(t *testing.T) *platform {
@@ -71,11 +91,17 @@ func newPlatform(t *testing.T) *platform {
 		}
 		p.mu.Lock()
 		p.requests = append(p.requests, recorded{
-			method: r.Method, path: r.URL.Path,
+			method: r.Method, path: r.URL.Path, query: r.URL.RawQuery,
 			authorization: r.Header.Get("Authorization"), body: string(body),
 		})
 		answer := reply{code: 404, body: `{"kind":"Status","code":404,"message":"not served here"}`}
 		for _, route := range p.routes {
+			if route.method != "" && route.method != r.Method {
+				continue
+			}
+			if route.persistedOnly && strings.Contains(r.URL.RawQuery, "dryRun=All") {
+				continue
+			}
 			if strings.HasSuffix(r.URL.Path, route.suffix) {
 				answer = route.reply
 				break
@@ -99,21 +125,71 @@ func (p *platform) route(suffix string, r reply) *platform {
 	return p
 }
 
+// routeFor registers an answer for one verb, which wins over a verb-agnostic
+// route registered later.
+func (p *platform) routeFor(method, suffix string, r reply) *platform {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.routes = append(p.routes, routeEntry{method: method, suffix: suffix, reply: r})
+	return p
+}
+
+// override registers an answer that beats everything already registered, which
+// is how a test changes the platform's mind part-way through.
+func (p *platform) override(method, suffix string, r reply) *platform {
+	return p.prepend(routeEntry{method: method, suffix: suffix, reply: r})
+}
+
+// overrideWrite is override for the request that would actually change
+// something, leaving the dry run before it to answer as it did.
+func (p *platform) overrideWrite(method, suffix string, r reply) *platform {
+	return p.prepend(routeEntry{method: method, suffix: suffix, persistedOnly: true, reply: r})
+}
+
+func (p *platform) prepend(entry routeEntry) *platform {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.routes = append([]routeEntry{entry}, p.routes...)
+	return p
+}
+
 func (p *platform) seen() []recorded {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]recorded(nil), p.requests...)
 }
 
-// tools builds the base tools against this platform, for one project and one
-// caller.
+// tools builds the read-only base tools against this platform, for one project
+// and one caller.
 func (p *platform) tools(t *testing.T, project, token string) agentcore.ToolSet {
+	t.Helper()
+	return p.toolSet(t, basetools.Options{Project: p.view(t, project, token)})
+}
+
+// writeTools builds the whole set, change path included.
+func (p *platform) writeTools(t *testing.T, project, token string) agentcore.ToolSet {
+	t.Helper()
+	return p.toolSet(t, basetools.Options{
+		Project:      p.view(t, project, token),
+		PlanTokenKey: testPlanKey,
+	})
+}
+
+// testPlanKey is the key the change path binds plans with in these tests.
+var testPlanKey = []byte("a-test-key-long-enough-to-be-one")
+
+func (p *platform) view(t *testing.T, project, token string) *projectapi.Project {
 	t.Helper()
 	client, err := projectapi.New(projectapi.Config{BaseURL: p.server.URL})
 	if err != nil {
 		t.Fatalf("projectapi.New: %v", err)
 	}
-	return basetools.Tools(basetools.Options{Project: client.As(project, token)})
+	return client.As(project, token)
+}
+
+func (p *platform) toolSet(t *testing.T, opts basetools.Options) agentcore.ToolSet {
+	t.Helper()
+	return basetools.Tools(opts)
 }
 
 // call runs one tool and returns its output, failing the test on an error.

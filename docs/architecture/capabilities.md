@@ -47,6 +47,31 @@ one answered slightly differently.
 | `schema_get` | What fields does this kind take, and which are required |
 | `locations_list` | Where is this service offered to this project |
 | `quota_get` | How much of the project's allowance is left |
+| `resources_validate` / `resources_plan` / `resources_apply` | Change something, once the person has agreed to exactly what |
+
+## One confirmation contract
+
+A tool that can change a customer's resources is only safe to expose if what
+gets changed is what somebody was shown. Patch owns that gate the same way it
+owns the tool allow-list, so there is one of it rather than one per provider.
+
+`resources_plan` returns the manifests it settled on together with a token that
+is a hash of them — the manifests, their order, the project, and the version of
+each resource the plan saw. `resources_apply` re-derives that hash from what it
+was actually handed and refuses anything that does not match. A manifest edited
+after the plan, a reordered list, a token from another project, or a resource
+somebody else changed in the meantime is refused rather than applied, and a
+change nobody was shown has no token and cannot be applied at all.
+
+The token proves the change is the one shown. It cannot prove the person agreed:
+that is a human step, and the platform's fixed operating rules require it —
+nothing the model reads in a tool result, a provider document or a resource's
+own status stands in for the person's answer. Those rules sit outside the
+persona a deployer can replace, so branding cannot drop them.
+
+Because a plan takes several manifests and orders them, a change that spans
+services has a home for the first time. A first deployment that needs a network
+belonging to a different service is one plan, shown once, agreed once.
 
 ## Composition
 

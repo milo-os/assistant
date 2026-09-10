@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/projectapi"
@@ -58,8 +59,23 @@ type Options struct {
 	// Project reads and writes as the caller. Required — with no project view
 	// there is no identity to act as, and the tools are not built.
 	Project *projectapi.Project
+	// PlanTokenKey mints and checks the tokens that bind a change to what a
+	// person was shown (see internal/plantoken). Empty leaves the change path
+	// out entirely: a service that cannot check a token must not issue
+	// something that looks like one.
+	PlanTokenKey []byte
 	// Logger receives operational warnings. Nil discards them.
 	Logger *slog.Logger
+	// Now is the clock, for tests. Nil uses time.Now.
+	Now func() time.Time
+}
+
+// now reads the clock.
+func (o Options) now() time.Time {
+	if o.Now == nil {
+		return time.Now()
+	}
+	return o.Now()
 }
 
 // Tools returns the base tool set, or nil when there is nothing to bind it to.
@@ -70,21 +86,33 @@ func Tools(opts Options) agentcore.ToolSet {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
-	return agentcore.ToolSet{
+	tools := agentcore.ToolSet{
 		ResourcesListToolName: resourcesList(opts),
 		ResourcesGetToolName:  resourcesGet(opts),
 		SchemaGetToolName:     schemaGet(opts),
 		LocationsListToolName: locationsList(opts),
 		QuotaGetToolName:      quotaGet(opts),
 	}
+	for name, t := range writeTools(opts) {
+		tools[name] = t
+	}
+	return tools
 }
 
 // PromptSection is what the system prompt says about these tools. It is the
 // same shape as the skills index: a short section, added only when the tools
-// are actually there, so a turn without them never advertises them.
-func PromptSection() string {
-	return strings.TrimSpace(`
-Platform tools: this project's own resources are reachable with resources_list and resources_get, whatever service owns them — pass the group, version and kind. schema_get describes what a kind's fields are and which are required; read it before writing a manifest rather than guessing. locations_list says where a named service is offered to this project, and quota_get says how much of the project's allowance is left. All of these read as the person you are talking to, in their project only, so a result they are not entitled to cannot come back. Prefer a provider's own tool when one covers the question: it knows what the fields mean, where these only report them.`)
+// are actually there, so a turn without them never advertises them. The write
+// half is described only when the change path was actually composed.
+func PromptSection(withWritePath bool) string {
+	section := `
+Platform tools: this project's own resources are reachable with resources_list and resources_get, whatever service owns them — pass the group, version and kind. schema_get describes what a kind's fields are and which are required; read it before writing a manifest rather than guessing. locations_list says where a named service is offered to this project, and quota_get says how much of the project's allowance is left. All of these read as the person you are talking to, in their project only, so a result they are not entitled to cannot come back. Prefer a provider's own tool when one covers the question: it knows what the fields mean, where these only report them.`
+
+	if withWritePath {
+		section += `
+
+Changing something takes three steps and they are not optional. resources_validate checks manifests and keeps nothing. resources_plan settles what would happen and returns the manifests it settled on with a plan token. resources_apply carries out exactly that plan and nothing else. Between plan and apply there is a person: show them the manifests and the differences the plan returned, say plainly what will exist afterwards and what cannot be changed later, and get an explicit yes. A question about the plan is not a yes, and silence is not a yes. If they ask for anything different, plan again — the token covers what they were shown, so applying an edited manifest is refused, and that refusal is the check working rather than something to route around.`
+	}
+	return strings.TrimSpace(section)
 }
 
 // ----------------------------------------------------------------- plumbing

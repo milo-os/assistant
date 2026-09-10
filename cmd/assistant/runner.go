@@ -19,6 +19,7 @@ import (
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
 	appmetrics "github.com/milo-os/assistant/internal/metrics"
+	"github.com/milo-os/assistant/internal/plantoken"
 	"github.com/milo-os/assistant/internal/projectapi"
 	"github.com/milo-os/assistant/internal/usage"
 )
@@ -149,6 +150,14 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 		return nil, nil, nil, err
 	}
 
+	// The key the change path binds a plan with. Resolved even when there is
+	// no platform API to use it, so a deployment with a bad key hears about it
+	// at boot rather than the first time somebody tries to change something.
+	planTokenKey, err := plantoken.ResolveKey(cfg.PlanTokenKey, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	conv := agent.New(agent.Deps{
 		Model:                          model,
 		ModelMode:                      string(cfg.Model.Mode),
@@ -159,6 +168,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 		Memory:                         mem,
 		GapReports:                     gaps,
 		PlatformAPI:                    platformAPI,
+		PlanTokenKey:                   planTokenKey,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
 		CapabilityIdentityForwardHosts: cfg.CapabilityIdentityForwardHosts,
 		Logger:                         log,
