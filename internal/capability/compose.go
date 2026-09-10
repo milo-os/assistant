@@ -11,9 +11,11 @@ import (
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/agentcore/mcptool"
+	"github.com/milo-os/assistant/internal/basetools"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/memory"
 	appmetrics "github.com/milo-os/assistant/internal/metrics"
+	"github.com/milo-os/assistant/internal/projectapi"
 )
 
 // Tool composition defaults (Tier 2).
@@ -139,6 +141,18 @@ type ComposeOptions struct {
 	// tools but no reportingProject simply gets no gap-report tool. Nil
 	// disables the feature entirely.
 	GapReports gapreport.Store
+	// PlatformAPI, when non-nil, adds the base platform tools (see
+	// internal/basetools) to every project's composition: read this project's
+	// resources of any kind, describe a kind, list where a service is offered,
+	// report what the allowance has left. They are not one provider's
+	// contribution, so they are not namespaced under a service and are not
+	// allow-listed by a capability document — they are what every project has.
+	//
+	// They run as the CALLER and only as the caller: the client is bound to
+	// Caller.BearerToken and ExpectedProject here, once, and the tools receive
+	// a view that carries no other identity. With either missing there is
+	// nobody to act as, so nothing is composed. Nil disables the feature.
+	PlatformAPI *projectapi.Client
 	// Metrics, when non-nil, records assistant_gap_report_total for every
 	// report_capability_gap tool call this composition creates (see
 	// internal/metrics). Nil disables recording only — GapReports still
@@ -274,6 +288,32 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		}
 		if _, exists := tools[ForgetMemoryToolName]; !exists {
 			tools[ForgetMemoryToolName] = &forgetMemoryTool{store: opts.Memory, project: opts.ExpectedProject}
+		}
+	}
+
+	// Base platform tools: always present, never namespaced, always the
+	// caller's own identity. Registered before the gap-report tools and after
+	// the provider ones, which cannot collide with them: every provider name
+	// carries the "<server>__" prefix.
+	if opts.PlatformAPI != nil && opts.ExpectedProject != "" && opts.Caller.BearerToken != "" {
+		base := basetools.Tools(basetools.Options{
+			Project: opts.PlatformAPI.As(opts.ExpectedProject, opts.Caller.BearerToken),
+			Logger:  logger,
+		})
+		for name, t := range base {
+			if _, exists := tools[name]; exists {
+				continue // first registration wins, deterministically
+			}
+			tools[name] = t
+		}
+		if len(base) > 0 {
+			if section := basetools.PromptSection(); section != "" {
+				if addendum == "" {
+					addendum = section
+				} else {
+					addendum = addendum + "\n\n" + section
+				}
+			}
 		}
 	}
 

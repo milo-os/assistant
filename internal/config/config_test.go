@@ -308,3 +308,37 @@ func TestLoad_CapabilityIdentityForwardHostsDefaultEmpty(t *testing.T) {
 		t.Fatalf("hosts = %v, want none", cfg.CapabilityIdentityForwardHosts)
 	}
 }
+
+// ── platform API (the base tools' read/write path) ─────────────
+
+// The platform that decides whether a caller may act on a project is the same
+// one that serves that project's resources, so a deployment that named one has
+// already named the other and configures nothing extra.
+func TestLoad_PlatformAPIDefaultsToTheAuthorizationEndpoint(t *testing.T) {
+	cfg, err := load(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlatformAPIURL != cfg.Auth.SARAPIURL {
+		t.Errorf("platform api url = %q, want the SAR endpoint %q", cfg.PlatformAPIURL, cfg.Auth.SARAPIURL)
+	}
+	if cfg.PlatformAPICACertPath != cfg.Auth.SARCACertPath {
+		t.Errorf("platform api CA = %q, want the SAR CA %q", cfg.PlatformAPICACertPath, cfg.Auth.SARCACertPath)
+	}
+}
+
+func TestLoad_PlatformAPICanBeNamedSeparately(t *testing.T) {
+	cfg, err := load(t, map[string]string{
+		"PLATFORM_API_URL":          "https://api.datum.test/",
+		"PLATFORM_API_CA_CERT_PATH": "/etc/platform/ca.crt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlatformAPIURL != "https://api.datum.test" {
+		t.Errorf("platform api url = %q, want the trailing slash trimmed", cfg.PlatformAPIURL)
+	}
+	if cfg.PlatformAPICACertPath != "/etc/platform/ca.crt" {
+		t.Errorf("platform api CA = %q", cfg.PlatformAPICACertPath)
+	}
+}
