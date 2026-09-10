@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/milo-os/assistant/agentcore"
@@ -80,6 +81,23 @@ type ComposeOptions struct {
 	// OnToolInvocation, if set, fires once at the start of every provider-tool
 	// execution (wired to usage metering by the caller).
 	OnToolInvocation func(ProviderToolInvocation)
+	// UnmeteredServices names provider serviceNames whose tools compose
+	// WITHOUT the metering hook: they fire no OnToolInvocation, so no
+	// tool-invocations billing event is ever emitted for them.
+	//
+	// Every PLATFORM document's serviceName is unmetered whether or not it is
+	// listed here (see [PlatformSource]): a platform capability is composed
+	// into a project regardless of entitlement, so the project never chose it
+	// and must not be billed a tool invocation for it. This field EXTENDS that
+	// set for anything else an operator wants off the meter; it cannot take a
+	// platform service back onto it, because that would bill a customer for
+	// something they were given.
+	//
+	// Unmetered means no event at all, never an event on some other meter:
+	// usage.MeterToolInvocations is a wire contract with the billing pipeline
+	// (a golden test pins the shape), so a second meter name is a change to
+	// that pipeline rather than something composition may invent.
+	UnmeteredServices []string
 	// Logger receives composition warnings. Nil discards them.
 	Logger *slog.Logger
 	// AllowPrivateNetworks disables the SSRF IP guard's private/loopback/
@@ -272,7 +290,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		logger:               logger,
 	})
 
-	tools, sessions := connectTools(ctx, docs, opts, guard, sanctioned, logger)
+	tools, sessions := connectTools(ctx, docs, opts, guard, sanctioned, unmeteredServices(docs, opts.UnmeteredServices), logger)
 
 	// What a document declared as changing something, namespaced the same way
 	// its tools are, and kept only where the tool was actually composed.
@@ -445,7 +463,26 @@ func ScopeDocuments(docs []CapabilityDocument, expectedProject string, logger *s
 	return kept
 }
 
-func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, sanctioned *hostAllowList, logger *slog.Logger) (agentcore.ToolSet, []mcpSession) {
+// unmeteredServices is the set of serviceNames whose tools compose without the
+// metering hook: every platform document's own service, plus whatever the
+// operator named explicitly. See [ComposeOptions.UnmeteredServices] for why the
+// platform half is not overridable.
+func unmeteredServices(docs []CapabilityDocument, configured []string) map[string]bool {
+	unmetered := map[string]bool{}
+	for _, doc := range docs {
+		if doc.platform && doc.Spec.ServiceName != "" {
+			unmetered[doc.Spec.ServiceName] = true
+		}
+	}
+	for _, name := range configured {
+		if name = strings.TrimSpace(name); name != "" {
+			unmetered[name] = true
+		}
+	}
+	return unmetered
+}
+
+func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, sanctioned *hostAllowList, unmetered map[string]bool, logger *slog.Logger) (agentcore.ToolSet, []mcpSession) {
 	connect := opts.connect
 	if connect == nil {
 		connect = guardedConnector(defaultConnector(), guard)
@@ -498,23 +535,45 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 						"service", serviceName, "server", server.Name, "tool", namespaced)
 					continue // first registration wins, deterministically
 				}
-				invocation := ProviderToolInvocation{
-					ServiceName:        serviceName,
-					ServerName:         server.Name,
-					ToolName:           toolName,
-					NamespacedToolName: namespaced,
+				def := namespacedDefinition(providerTool.Definition(), namespaced)
+				if unmetered[serviceName] {
+					// No metering wrapper at all, rather than a wrapper with a
+					// nil hook: a tool that must never bill should not be
+					// holding the thing that bills.
+					tools[namespaced] = &namespacedTool{inner: providerTool, def: def}
+					continue
 				}
 				tools[namespaced] = &meteredTool{
 					inner:    providerTool,
-					def:      namespacedDefinition(providerTool.Definition(), namespaced),
+					def:      def,
 					onInvoke: opts.OnToolInvocation,
-					invoke:   invocation,
+					invoke: ProviderToolInvocation{
+						ServiceName:        serviceName,
+						ServerName:         server.Name,
+						ToolName:           toolName,
+						NamespacedToolName: namespaced,
+					},
 				}
 			}
 		}
 	}
 
 	return tools, sessions
+}
+
+// namespacedTool presents a provider tool to the model under its namespaced
+// name and does nothing else. It is what an UNMETERED service's tools compose
+// as (see [ComposeOptions.UnmeteredServices]): there is no metering hook on
+// this path to fire by accident.
+type namespacedTool struct {
+	inner agentcore.Tool
+	def   agentcore.ToolDefinition
+}
+
+func (t *namespacedTool) Definition() agentcore.ToolDefinition { return t.def }
+
+func (t *namespacedTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	return t.inner.Execute(ctx, input)
 }
 
 // meteredTool wraps a provider tool: it presents the namespaced name to the

@@ -160,13 +160,39 @@ type CapabilityDocument struct {
 	Metadata   *Metadata      `json:"metadata,omitempty"`
 	Spec       CapabilitySpec `json:"spec"`
 	Status     *Status        `json:"status,omitempty"`
+
+	// platform marks a PLATFORM capability document: one the platform operator
+	// declared to this service directly, composed into every project rather
+	// than entitled to one (see [PlatformSource]). It is unexported and has no
+	// JSON tag on purpose — a document cannot declare itself platform, because
+	// the per-project path parses provider-controlled data and a provider that
+	// could set this flag would compose itself into every tenant and stop
+	// being metered while doing it. Only the platform source sets it.
+	platform bool
 }
+
+// IsPlatform reports whether this document arrived from the platform source
+// and therefore applies to every project. See [PlatformSource].
+func (d CapabilityDocument) IsPlatform() bool { return d.platform }
 
 // Validate reports whether the document satisfies the required-field
 // constraints (the Go analogue of the zod schema). It returns a clear,
 // path-qualified error on the first violation. Unknown fields are not an
 // error; missing or empty required fields are.
-func (d *CapabilityDocument) Validate() error {
+func (d *CapabilityDocument) Validate() error { return d.validate(false) }
+
+// validate is Validate with the platform relaxation. serviceAgentRef and
+// configurationVersion are CATALOG concepts — the agent registration a service
+// made and the revision of its published configuration — and the catalog fills
+// them in on every document it projects. A platform capability is declared by
+// the platform operator directly to this service and never passes through the
+// catalog, so its publisher has no honest value to put in either field, and
+// requiring one would only get a placeholder typed into a ConfigMap.
+//
+// serviceRef.name and serviceName stay required on both paths: serviceName is
+// the metering dimension, the unmetered-service key and the log key, and a
+// document without one cannot be attributed to anything.
+func (d *CapabilityDocument) validate(platform bool) error {
 	s := d.Spec
 	if s.ServiceName == "" {
 		return fmt.Errorf("spec.serviceName: required")
@@ -174,11 +200,13 @@ func (d *CapabilityDocument) Validate() error {
 	if s.ServiceRef.Name == "" {
 		return fmt.Errorf("spec.serviceRef.name: required")
 	}
-	if s.ServiceAgentRef.Name == "" {
-		return fmt.Errorf("spec.serviceAgentRef.name: required")
-	}
-	if s.ConfigurationVersion == "" {
-		return fmt.Errorf("spec.configurationVersion: required")
+	if !platform {
+		if s.ServiceAgentRef.Name == "" {
+			return fmt.Errorf("spec.serviceAgentRef.name: required")
+		}
+		if s.ConfigurationVersion == "" {
+			return fmt.Errorf("spec.configurationVersion: required")
+		}
 	}
 	if s.Tools != nil {
 		for i, srv := range s.Tools.MCPServers {
@@ -221,6 +249,20 @@ func (d *CapabilityDocument) Validate() error {
 // takes down a project's capabilities. A malformed root (bad JSON, or neither
 // array nor list) is a hard error.
 func ParseDocuments(raw []byte, onSkip func(index int, err error)) ([]CapabilityDocument, error) {
+	return parseDocuments(raw, false, onSkip)
+}
+
+// ParsePlatformDocuments parses documents from the PLATFORM source: the same
+// wire shape and the same skip-one-keep-the-rest posture as [ParseDocuments],
+// with two differences. spec.serviceAgentRef and spec.configurationVersion are
+// optional (see [CapabilityDocument.validate]), and every document that parses
+// is marked platform and has metadata.namespace cleared, so it survives
+// [ScopeDocuments] into every project instead of the one it happened to name.
+func ParsePlatformDocuments(raw []byte, onSkip func(index int, err error)) ([]CapabilityDocument, error) {
+	return parseDocuments(raw, true, onSkip)
+}
+
+func parseDocuments(raw []byte, platform bool, onSkip func(index int, err error)) ([]CapabilityDocument, error) {
 	var items []json.RawMessage
 
 	if err := json.Unmarshal(raw, &items); err != nil {
@@ -245,13 +287,29 @@ func ParseDocuments(raw []byte, onSkip func(index int, err error)) ([]Capability
 			}
 			continue
 		}
-		if err := doc.Validate(); err != nil {
+		if err := doc.validate(platform); err != nil {
 			if onSkip != nil {
 				onSkip(i, err)
 			}
 			continue
 		}
+		if platform {
+			markPlatform(&doc)
+		}
 		docs = append(docs, doc)
 	}
 	return docs, nil
+}
+
+// markPlatform makes a document a platform capability: it applies to every
+// project, so the namespace it may have been written with is dropped before
+// [ScopeDocuments] can read it as "one project only". Idempotent, and applied
+// both where platform documents are parsed and where [PlatformSource] merges
+// them, so a source wired up without the platform constructor still cannot
+// leak a project-scoped platform document or a metered one.
+func markPlatform(doc *CapabilityDocument) {
+	doc.platform = true
+	if doc.Metadata != nil {
+		doc.Metadata.Namespace = ""
+	}
 }

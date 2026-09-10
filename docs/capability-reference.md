@@ -1,6 +1,6 @@
 # Capabilities — knowledge, tools, skills
 
-How a provider service contributes to Patch: the capability-document schema this service owns, and the provider API that serves it.
+How a provider service contributes to Patch: the capability-document schema this service owns, the provider API that serves it, and how the platform's own services reach every project without an entitlement.
 
 ## Capability documents (provider capabilities)
 
@@ -83,6 +83,97 @@ services. Loading a skill is not a provider tool invocation — no
 `tool-invocations` billing event fires; the tokens it adds are billed
 as input like the rest of the prompt. Executable skill bundles
 (scripts) are deliberately unsupported.
+
+## Platform capabilities (every project, no entitlement)
+
+Some of what an assistant needs is not any catalog service's contribution. Where
+a service is offered, and what a project's allowance has left, are records the
+**platform itself** keeps, published by services that are platform
+infrastructure. Nothing entitles a project to them; every project needs them.
+
+So the **platform operator declares them to Patch directly**, and Patch composes
+them into every project's conversation regardless of entitlement. This is the
+first-class, permanent mechanism for platform capabilities — not a stand-in for
+something the catalog will express later. The catalog covers catalog services
+and feeds the per-project source; a service that is not in the catalog has no
+entitlement to project and reaches a project this way instead.
+
+### How an operator declares one
+
+The same two shapes as the per-project source, under their own names:
+
+| Setting | What it is |
+|---|---|
+| `PLATFORM_CAPABILITY_DOCS_FIXTURE` | Path to a JSON file of platform capability documents (bare array or `{"items": […]}`) |
+| `PLATFORM_CAPABILITY_PROVIDER_URL` | Base URL of an HTTP provider serving the same shape at the same endpoint |
+
+At most one of the two, for the same reason the per-project pair are exclusive:
+they answer the same seam. They are **not** exclusive with
+`CAPABILITY_DOCS_FIXTURE` / `CAPABILITY_PROVIDER_URL` — a full deployment sets
+one of each, because "what does every project get" and "what was this project
+entitled to" are different questions. See
+[Configuration](configuration.md) and the worked example in
+[Platform capability example](examples/platform-capabilities.md).
+
+A platform document is an ordinary capability document with two relaxations and
+one behavior change:
+
+- **`serviceAgentRef` and `configurationVersion` are optional.** Both are
+  catalog concepts — the agent registration a service made, and the revision of
+  its published configuration — and the catalog fills them in on every document
+  it projects. A platform service never passes through the catalog and has no
+  honest value for either, so requiring one would produce a placeholder typed
+  into a ConfigMap. They stay **required on the per-project path**.
+- **`serviceRef.name` and `serviceName` stay required**, on both paths.
+  `serviceName` is the metering dimension, the unmetered-service key, and the
+  log key; a document without one cannot be attributed to anything.
+- **`metadata.namespace` is cleared on parse.** The project scope gate
+  (`ScopeDocuments`) drops a document whose namespace names a different project,
+  which is exactly right for an entitlement and exactly wrong for a platform
+  capability. Clearing it is what makes "every project" true.
+
+Platform documents are composed **first**. Tool registration is first-wins on a
+name collision, so a project-scoped document can never shadow a platform tool
+with one of its own.
+
+A document cannot declare itself platform. The flag is set only by the platform
+source and has no JSON field behind it: the per-project path parses
+provider-controlled data, and a provider that could set it would compose itself
+into every tenant and stop being billed while doing it.
+
+### Metering: a platform capability is not billed
+
+**A platform service's tools fire no `tool-invocations` event.** A project did
+not choose a platform capability — it was given one — so billing a tool
+invocation for it would charge a customer for something they never asked for.
+This is the default and it needs no second setting: every platform document's
+`serviceName` is unmetered because the document is a platform document.
+
+`CAPABILITY_UNMETERED_SERVICES` (comma-separated `serviceName`s) **extends** that
+set for anything else an operator wants off the meter. It cannot take a platform
+service back onto it, for the reason above.
+
+Unmetered means **no event at all**, never an event on a different meter.
+`assistant.miloapis.com/conversation/tool-invocations` is a wire contract with
+the billing pipeline; a second meter name is a change to that pipeline, not
+something composition may invent. See
+[Metering](architecture/metering.md).
+
+### Naming is unchanged
+
+A platform provider's tools are namespaced `<server>__<tool>` like every other
+provider's — `locations__locations_list`, not `locations_list`. There is no
+un-prefixed exception, because a platform provider is an ordinary MCP provider
+that happens to be composed everywhere; the only un-prefixed tools are Patch's
+own built-ins (`resources_list`, `load_skill`, `memory_remember`), and the
+prefix on everything else is what makes those impossible to shadow.
+
+### The agent card
+
+Platform services appear in **every** project's extended agent card, alongside
+whatever that project is entitled to, because the card is derived from the same
+documents the next turn composes. A card that promised only entitled services
+would under-report what the assistant can actually do.
 
 ## Base platform tools (always present)
 
@@ -257,8 +348,12 @@ from this **document schema version (v1)**.
   "spec": {                                        // REQUIRED
     "serviceRef":           { "name": "string" },  // REQUIRED, name REQUIRED
     "serviceName":          "string",              // REQUIRED (tool-invocation meter dimension)
-    "serviceAgentRef":      { "name": "string" },  // REQUIRED, name REQUIRED
-    "configurationVersion": "string",              // REQUIRED (provider config revision)
+    "serviceAgentRef":      { "name": "string" },  // REQUIRED, name REQUIRED — except on the
+                                                    // PLATFORM path, where it is optional: it is a
+                                                    // catalog concept and a platform service has no
+                                                    // catalog registration to name.
+    "configurationVersion": "string",              // REQUIRED (provider config revision) — likewise
+                                                    // optional on the PLATFORM path.
     "reportingProject":     "string",              // optional — the provider's OWN project,
                                                     // where its team reviews capability-gap
                                                     // reports (see capability-gap-reporting-design.md).

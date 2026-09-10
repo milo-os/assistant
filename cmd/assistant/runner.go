@@ -54,21 +54,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 		log.Info("agent.persona.source", "type", "default")
 	}
 
-	// Source selection (fixture and provider URL are mutually exclusive — the
-	// config loader rejects setting both).
-	var source capability.Source
-	switch {
-	case cfg.CapabilityProviderURL != "":
-		source = capability.NewHTTPSource(cfg.CapabilityProviderURL, nil, log)
-		log.Info("agent.capability.source", "type", "http", "url", cfg.CapabilityProviderURL)
-	case cfg.CapabilityDocsFixture != "":
-		source = capability.NewFixtureSource(cfg.CapabilityDocsFixture, log)
-		log.Info("agent.capability.source", "type", "fixture", "path", cfg.CapabilityDocsFixture)
-	default:
-		log.Warn("agent.capability.source",
-			"type", "none",
-			"reason", "neither CAPABILITY_PROVIDER_URL nor CAPABILITY_DOCS_FIXTURE set — no provider capabilities will be composed")
-	}
+	source := newCapabilitySource(cfg, log)
 
 	emitter := usage.NewEmitter(usage.EmitterConfig{
 		GatewayURL: cfg.Usage.GatewayURL,
@@ -162,6 +148,7 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 		Model:                          model,
 		ModelMode:                      string(cfg.Model.Mode),
 		Source:                         source,
+		UnmeteredCapabilityServices:    cfg.CapabilityUnmeteredServices,
 		Persona:                        persona,
 		Emitter:                        emitter,
 		History:                        store,
@@ -175,6 +162,64 @@ func newAgentRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, m
 		Metrics:                        metrics,
 	})
 	return conversationRunner{conv: conv}, store, cleanup, nil
+}
+
+// newCapabilitySource wires the capability documents a turn composes from: the
+// project's own entitlements, and — when the deployment declares any — the
+// platform's own capabilities on top.
+//
+// The two are separate settings answering separate questions. A project's
+// entitlements come from the catalog, which knows which projects were granted
+// what. A platform capability has nobody to ask: the services that publish
+// them (where a service is offered, what an allowance has left) are platform
+// infrastructure rather than catalog services, so the platform OPERATOR names
+// them here and every project gets them. Within each pair the fixture and the
+// provider URL are mutually exclusive; across the pairs they are not, and a
+// full deployment sets one of each.
+//
+// Returns nil when nothing at all is configured — a valid, built-ins-only
+// assistant.
+func newCapabilitySource(cfg *config.Config, log *slog.Logger) capability.Source {
+	var project capability.Source
+	switch {
+	case cfg.CapabilityProviderURL != "":
+		project = capability.NewHTTPSource(cfg.CapabilityProviderURL, nil, log)
+		log.Info("agent.capability.source", "type", "http", "url", cfg.CapabilityProviderURL)
+	case cfg.CapabilityDocsFixture != "":
+		project = capability.NewFixtureSource(cfg.CapabilityDocsFixture, log)
+		log.Info("agent.capability.source", "type", "fixture", "path", cfg.CapabilityDocsFixture)
+	default:
+		log.Warn("agent.capability.source",
+			"type", "none",
+			"reason", "neither CAPABILITY_PROVIDER_URL nor CAPABILITY_DOCS_FIXTURE set — no provider capabilities will be composed")
+	}
+
+	var platform capability.Source
+	switch {
+	case cfg.PlatformCapabilityProviderURL != "":
+		platform = capability.NewPlatformHTTPSource(cfg.PlatformCapabilityProviderURL, nil, log)
+		log.Info("agent.capability.platform_source", "type", "http", "url", cfg.PlatformCapabilityProviderURL)
+	case cfg.PlatformCapabilityDocsFixture != "":
+		platform = capability.NewPlatformFixtureSource(cfg.PlatformCapabilityDocsFixture, log)
+		log.Info("agent.capability.platform_source", "type", "fixture", "path", cfg.PlatformCapabilityDocsFixture)
+	default:
+		log.Info("agent.capability.platform_source",
+			"type", "none",
+			"reason", "neither PLATFORM_CAPABILITY_PROVIDER_URL nor PLATFORM_CAPABILITY_DOCS_FIXTURE set — no capability reaches a project without an entitlement")
+	}
+	if len(cfg.CapabilityUnmeteredServices) > 0 {
+		log.Info("agent.capability.unmetered_services",
+			"services", cfg.CapabilityUnmeteredServices,
+			"note", "in addition to every platform document's own service, which is unmetered regardless")
+	}
+
+	if platform == nil {
+		return project
+	}
+	// Which serviceNames are platform-scoped is logged by the source itself,
+	// as capability.platform.services, on the first fetch: a platform provider
+	// URL is only readable on a request, so the names are not knowable here.
+	return capability.NewPlatformSource(platform, project, log)
 }
 
 // newPlatformAPI builds the client the base platform tools read and write a

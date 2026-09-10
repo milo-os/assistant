@@ -141,6 +141,28 @@ type Config struct {
 	// composed.
 	CapabilityProviderURL string
 
+	// PlatformCapabilityDocsFixture and PlatformCapabilityProviderURL are the
+	// PLATFORM capability source (env PLATFORM_CAPABILITY_DOCS_FIXTURE /
+	// PLATFORM_CAPABILITY_PROVIDER_URL): the same two shapes as the pair
+	// above, serving the documents composed into EVERY project regardless of
+	// entitlement — the platform's own services, which are infrastructure
+	// rather than catalog services and so have nothing to entitle a project
+	// through. At most one of these two may be set, for the same reason the
+	// pair above are exclusive: they answer the same seam.
+	//
+	// They are NOT exclusive with the per-project pair. A real deployment sets
+	// one of each: the platform's own capabilities, plus whatever a project is
+	// separately entitled to. See internal/capability.PlatformSource.
+	PlatformCapabilityDocsFixture string
+	PlatformCapabilityProviderURL string
+
+	// CapabilityUnmeteredServices names provider serviceNames whose tool calls
+	// emit no tool-invocations billing event (comma-separated env
+	// CAPABILITY_UNMETERED_SERVICES). Every platform document's service is
+	// already unmetered without being named here; this EXTENDS that set and
+	// cannot shrink it. See internal/capability.ComposeOptions.
+	CapabilityUnmeteredServices []string
+
 	// PersonaPromptFile is the path to a file containing the persona section
 	// of the system prompt (env PERSONA_PROMPT_FILE), read once at startup.
 	// Empty ⇒ agent.DefaultPersona. A platform provider sets this to mount
@@ -348,6 +370,18 @@ func Load(getenv func(string) string) (*Config, error) {
 			"CAPABILITY_PROVIDER_URL and CAPABILITY_DOCS_FIXTURE are mutually exclusive — set at most one capability source"})
 	}
 
+	// The PLATFORM capability source: the same two shapes, exclusive with each
+	// other for the same reason, and deliberately NOT exclusive with the pair
+	// above. Platform capabilities and per-project entitlements are different
+	// questions — what every project has, and what this project was given —
+	// and a deployment normally answers both.
+	platformDocsFixture := env("PLATFORM_CAPABILITY_DOCS_FIXTURE")
+	platformProviderURL := strings.TrimRight(env("PLATFORM_CAPABILITY_PROVIDER_URL"), "/")
+	if platformDocsFixture != "" && platformProviderURL != "" {
+		errs = append(errs, FieldError{"PLATFORM_CAPABILITY_PROVIDER_URL",
+			"PLATFORM_CAPABILITY_PROVIDER_URL and PLATFORM_CAPABILITY_DOCS_FIXTURE are mutually exclusive — set at most one platform capability source"})
+	}
+
 	conversationStoreURL := env("CONVERSATION_STORE_URL")
 	if conversationStoreURL != "" &&
 		!strings.HasPrefix(conversationStoreURL, "postgres://") &&
@@ -402,6 +436,9 @@ func Load(getenv func(string) string) (*Config, error) {
 		PlatformAPICACertPath:          platformAPICACertPath,
 		CapabilityDocsFixture:          capabilityDocsFixture,
 		CapabilityProviderURL:          capabilityProviderURL,
+		PlatformCapabilityDocsFixture:  platformDocsFixture,
+		PlatformCapabilityProviderURL:  platformProviderURL,
+		CapabilityUnmeteredServices:    splitList(env("CAPABILITY_UNMETERED_SERVICES")),
 		PersonaPromptFile:              env("PERSONA_PROMPT_FILE"),
 		ConversationStoreURL:           conversationStoreURL,
 		AllowPrivateCapabilityNetworks: isTruthy(env("CAPABILITY_ALLOW_PRIVATE_NETWORKS")),

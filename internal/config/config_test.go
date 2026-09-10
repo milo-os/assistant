@@ -363,3 +363,61 @@ func TestLoad_PlanTokenKeyIsOptional(t *testing.T) {
 		t.Errorf("plan token key = %q, want it trimmed", cfg.PlanTokenKey)
 	}
 }
+
+// The PLATFORM capability source answers "what does every project get",
+// separately from "what was this project entitled to". Two settings, two
+// questions, and a real deployment answers both — so they must not be
+// exclusive with each other.
+func TestLoad_PlatformAndProjectCapabilitySourcesCoexist(t *testing.T) {
+	cfg, err := load(t, map[string]string{
+		"CAPABILITY_PROVIDER_URL":          "http://capability-adapter/",
+		"PLATFORM_CAPABILITY_DOCS_FIXTURE": "/etc/assistant/platform/platform-capability-documents.json",
+		"CAPABILITY_UNMETERED_SERVICES":    "locations.miloapis.com, quota.miloapis.com",
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.CapabilityProviderURL != "http://capability-adapter" {
+		t.Errorf("capability provider url = %q", cfg.CapabilityProviderURL)
+	}
+	if cfg.PlatformCapabilityDocsFixture != "/etc/assistant/platform/platform-capability-documents.json" {
+		t.Errorf("platform fixture = %q", cfg.PlatformCapabilityDocsFixture)
+	}
+	if len(cfg.CapabilityUnmeteredServices) != 2 ||
+		cfg.CapabilityUnmeteredServices[0] != "locations.miloapis.com" ||
+		cfg.CapabilityUnmeteredServices[1] != "quota.miloapis.com" {
+		t.Errorf("unmetered services = %v", cfg.CapabilityUnmeteredServices)
+	}
+}
+
+// Within the platform pair the rule is the same as within the project pair:
+// two answers to one seam is ambiguous, so refuse to boot rather than pick.
+func TestLoad_PlatformCapabilitySourcesMutuallyExclusive(t *testing.T) {
+	_, err := load(t, map[string]string{
+		"PLATFORM_CAPABILITY_DOCS_FIXTURE": "/tmp/platform-caps.json",
+		"PLATFORM_CAPABILITY_PROVIDER_URL": "http://platform-capability-adapter",
+	})
+	var cfgErr *Error
+	if !errors.As(err, &cfgErr) {
+		t.Fatalf("want *config.Error, got %v", err)
+	}
+	for _, fe := range cfgErr.Errors {
+		if fe.Field == "PLATFORM_CAPABILITY_PROVIDER_URL" {
+			return
+		}
+	}
+	t.Fatalf("expected a PLATFORM_CAPABILITY_PROVIDER_URL mutual-exclusion error, got %+v", cfgErr.Errors)
+}
+
+func TestLoad_NoPlatformCapabilitySourceByDefault(t *testing.T) {
+	cfg, err := load(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlatformCapabilityDocsFixture != "" || cfg.PlatformCapabilityProviderURL != "" {
+		t.Errorf("platform source = %q / %q, want unset", cfg.PlatformCapabilityDocsFixture, cfg.PlatformCapabilityProviderURL)
+	}
+	if len(cfg.CapabilityUnmeteredServices) != 0 {
+		t.Errorf("unmetered services = %v, want none", cfg.CapabilityUnmeteredServices)
+	}
+}

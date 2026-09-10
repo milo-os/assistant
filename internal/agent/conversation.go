@@ -100,8 +100,15 @@ type Deps struct {
 	// attribution headers; those are never sent in other modes.
 	ModelMode string
 	// Source supplies a project's capability documents. Nil means the
-	// assistant runs with no provider capabilities.
+	// assistant runs with no provider capabilities. In a deployment that
+	// declares platform capabilities this is a capability.PlatformSource
+	// wrapping both — the platform's own documents and the project's.
 	Source capability.Source
+	// UnmeteredCapabilityServices names provider serviceNames whose tool calls
+	// emit no tool-invocations event. Platform documents are already unmetered
+	// without being named here; this extends the set. See
+	// capability.ComposeOptions.UnmeteredServices.
+	UnmeteredCapabilityServices []string
 	// Persona overrides the identity/voice section of the system prompt
 	// (empty uses [DefaultPersona]). The fixed operating rules always follow
 	// it — see [BuildSystemPrompt].
@@ -297,6 +304,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		GapReports:           c.deps.GapReports,
 		Metrics:              c.deps.Metrics,
 		ContextID:            params.ContextID,
+		UnmeteredServices:    c.deps.UnmeteredCapabilityServices,
 		OnToolInvocation: func(inv capability.ProviderToolInvocation) {
 			mu.Lock()
 			invocations = append(invocations, inv)

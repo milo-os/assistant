@@ -35,6 +35,9 @@ type HTTPSource struct {
 	baseURL string
 	client  *http.Client
 	logger  *slog.Logger
+	// platform parses the response as PLATFORM capability documents — see
+	// [ParsePlatformDocuments] and [PlatformSource].
+	platform bool
 }
 
 // NewHTTPSource returns an HTTP source targeting baseURL (the capability
@@ -53,6 +56,18 @@ func NewHTTPSource(baseURL string, client *http.Client, logger *slog.Logger) *HT
 		client:  client,
 		logger:  logger,
 	}
+}
+
+// NewPlatformHTTPSource returns an HTTP source whose documents are PLATFORM
+// capabilities: composed into every project, parsed with the catalog-only
+// fields optional. The endpoint shape is the same one [NewHTTPSource] uses —
+// the project in the path is who is asking, not who the documents belong to,
+// and a platform provider is free to answer identically for everyone. Pass it
+// to [NewPlatformSource].
+func NewPlatformHTTPSource(baseURL string, client *http.Client, logger *slog.Logger) *HTTPSource {
+	s := NewHTTPSource(baseURL, client, logger)
+	s.platform = true
+	return s
 }
 
 // Documents fetches and parses projectName's capability documents. On any
@@ -89,11 +104,16 @@ func (s *HTTPSource) Documents(ctx context.Context, projectName string) ([]Capab
 		return nil, nil
 	}
 
-	docs, err := ParseDocuments(raw, func(index int, skipErr error) {
+	onSkip := func(index int, skipErr error) {
 		s.logger.Warn("capability.http.entry_skipped",
 			"url", endpoint, "projectName", projectName,
 			"index", index, "error", skipErr.Error())
-	})
+	}
+	parse := ParseDocuments
+	if s.platform {
+		parse = ParsePlatformDocuments
+	}
+	docs, err := parse(raw, onSkip)
 	if err != nil {
 		s.degrade(projectName, endpoint, "parse", err)
 		return nil, nil

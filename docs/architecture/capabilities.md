@@ -76,10 +76,27 @@ Because a plan takes several manifests and orders them, a change that spans
 services has a home for the first time. A first deployment that needs a network
 belonging to a different service is one plan, shown once, agreed once.
 
+## What the platform itself contributes
+
+Not every service an assistant needs is a catalog service. Where a service is
+offered, and what a project's allowance has left, are records the platform keeps,
+published by services that are platform infrastructure rather than things a
+customer subscribes to. There is no entitlement to project, and every project
+needs them. So the platform **operator** declares those capabilities to Patch
+directly — a fixture file or a platform provider URL, separate from the
+per-project source — and Patch composes them into every project's conversation
+alongside whatever that project was entitled to. They are ordinary capability
+documents and their tools are namespaced like any provider's; what differs is
+that they carry no project, they are registered first so nothing can shadow
+them, and they are not metered, because a project that was given a capability
+should not be billed for using it. This is how platform services reach a
+conversation, permanently — the catalog covers catalog services and feeds the
+per-project source only.
+
 ## Composition
 
-Given the documents a project is entitled to, Patch builds that project's
-assistant for the turn:
+Given the documents a project is entitled to, plus the platform's own, Patch
+builds that project's assistant for the turn:
 
 - **Knowledge** is fetched over HTTP under a short timeout and a per-source byte
   cap, then rendered with a provenance header so the model can attribute what it
