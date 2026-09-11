@@ -15,6 +15,8 @@ Environment variables, model backends, and the authentication/authorization seam
 | `AUTHN_TOKENREVIEW_API_URL` | in-cluster (derived) | Control-plane base URL for the TokenReview call; unset in tokenreview mode ⇒ derived from `KUBERNETES_SERVICE_HOST/PORT` |
 | `AUTHN_TOKENREVIEW_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Assistant's own SA token for the TokenReview call |
 | `AUTHN_TOKENREVIEW_CA_CERT_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | Apiserver CA bundle for the TokenReview call |
+| `PLATFORM_API_URL` | `AUTHZ_SAR_API_URL` | Platform API the **base platform tools** read and write a project's own resources through. The platform that decides whether a caller may act on a project is the same one that serves that project's resources, so this normally needs no setting. Every request over it carries the **calling user's** own bearer token — the service holds no credential for it, which is why there is no token path beside it. Unset and underivable ⇒ the base tools are not composed |
+| `PLATFORM_API_CA_CERT_PATH` | `AUTHZ_SAR_CA_CERT_PATH` | CA bundle verifying the platform API's certificate (same server as the SAR endpoint by default) |
 | `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file (fixture source); mutually exclusive with `CAPABILITY_PROVIDER_URL` |
 | `CAPABILITY_PROVIDER_URL` | — | Base URL of the capability-provider HTTP API (HTTP source); mutually exclusive with `CAPABILITY_DOCS_FIXTURE`. Both unset ⇒ no provider capabilities |
 | `CONVERSATION_STORE_URL` | — | `postgres://` URL for durable conversation history. Unset ⇒ in-memory (process lifetime). Set but unreachable ⇒ boot fails (no silent fallback to amnesia) |
