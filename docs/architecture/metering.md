@@ -34,6 +34,14 @@ provider content the model reads, so its cost is the tokens it adds to the
 prompt, billed as input like any other part of the prompt. Treating it as a tool
 call would bill the same work twice.
 
+The base platform tools are not metered either, for the same reason read
+differently. The tool event names the provider service that did the work, and
+there is no provider in a base tool — the work is the platform reading the
+customer's own project, as the customer. There is nobody to attribute it to
+except Patch itself, and billing a customer twice for reading their own project
+is not a charge anyone would defend. A provider tool that happens to perform the
+same read still meters, because that provider ran it.
+
 ## Delivery posture
 
 Usage reporting never blocks a turn. Events are emitted alongside the

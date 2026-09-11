@@ -84,6 +84,60 @@ services. Loading a skill is not a provider tool invocation — no
 as input like the rest of the prompt. Executable skill bundles
 (scripts) are deliberately unsupported.
 
+## Base platform tools (always present)
+
+Every project's composition carries a set of tools that belong to no provider.
+They are **un-namespaced** — `resources_list`, not `<service>__resources_list` —
+which is the same convention the other built-ins use (`load_skill`,
+`memory_remember`, `memory_forget`) and is what makes them impossible for a
+provider to shadow: every provider tool name carries a `<server>__` prefix.
+
+| Tool | What it answers |
+|---|---|
+| `resources_list(group, version, kind, namespace?)` | Every resource of one kind in the project, with what the platform is reporting about each. Kinds held in a namespace default to `default`. |
+| `resources_get(group, version, kind, name, namespace?)` | One resource as an editable manifest, with the platform's own bookkeeping removed, plus its conditions alongside. |
+| `schema_get(group, version, kind, path?)` | What a kind's fields are and which are required, from the project's own published description. `path` narrows a large kind to one part. |
+| `locations_list(service)` | Where a named service is offered to this project, joined from `ServiceAvailability` (`services.miloapis.com/v1alpha1`) to the `Location` (`locations.miloapis.com/v1alpha1`) it names, with topology and readiness. |
+| `quota_get(service?)` | Limit, used and available per resource type, from `AllowanceBucket` (`quota.miloapis.com/v1alpha1`, namespace `milo-system`, label `quota.miloapis.com/consumer-kind=Project`), converted into the unit `ResourceRegistration` publishes. |
+
+### The two rules that hold for all of them
+
+**They act as the caller.** Composition binds the platform client to the
+caller's own bearer token and the turn's project, once, and hands the tools a
+view that carries no other identity (`internal/projectapi`). The service holds
+no credential for a customer's project, so a tool call can read nothing the
+person could not read themselves. With no caller credential or no project the
+tools are **not composed at all** — there is no fallback to reading as the
+service.
+
+**The project is never an argument.** No input schema has a project field and no
+handler looks for one. The project comes from the request a SubjectAccessReview
+already approved, for the same reason `X-Datum-Project` does: an argument naming
+a project would be steerable by anything the model reads.
+
+### Two failures that must not read alike
+
+`locations_list` refuses loudly when the project does not serve
+`ServiceAvailability` or `Location`, naming the missing kind and saying the
+person did nothing wrong. It never degrades to an empty list. An empty list is a
+real answer — the service is offered nowhere this project may use — and
+returning it when nothing actually looked would tell a customer to wait for a
+location that is already there. The two call for opposite actions.
+
+`quota_get` behaves the same way: a project that does not serve the allowance
+kinds is told the answer is unknown, not that there is no limit.
+
+### Metering
+
+A base tool fires **no** `tool-invocations` billing event, the same as
+`load_skill` and the memory tools. The tool event names the provider service
+that did the work (see [Metering](architecture/metering.md)), and there is no
+provider here — the work is the platform reading the customer's own project as
+the customer. Billing it to a provider would attribute it to the wrong party;
+billing it to Patch would make reading your own project cost you twice, since
+the tokens it adds are already billed as input. A provider tool that happens to
+do the same read still meters, because that provider ran it.
+
 ### Capability provider API (published contract, v1)
 
 Capability documents reach the assistant through the `Source` seam
