@@ -180,8 +180,10 @@ posture:
   — the whole point of a manual command is that the user sees whether it
   actually worked. It returns the exported `ErrNothingToCompact` when there's
   no stored history, or the stored history is already a single summary turn
-  (nothing left to fold), and a real error for any summarize/store failure or
-  a summarization that didn't actually shrink the estimated token count.
+  (nothing left to fold), and a real error for any summarize/store failure.
+  A digest that comes out no smaller than the turns it replaced is still a
+  success — the store was rewritten either way, and short conversations
+  routinely summarize to something of comparable size.
 - **Transport: a plain REST endpoint, not the A2A `/a2a` JSON-RPC surface.**
   `/a2a` is a message-turn protocol (`SendMessage`/`SendStreamingMessage`
   expect a task and an answer); compaction produces no answer, just a store

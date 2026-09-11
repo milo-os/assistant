@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/milo-os/assistant/internal/history"
@@ -110,5 +111,116 @@ func TestCompactSummarizeFailureReturnsError(t *testing.T) {
 	}
 	if len(after) != len(before) {
 		t.Fatalf("history changed after a failed manual compact: before=%d after=%d turns", len(before), len(after))
+	}
+}
+
+// TestCompactSucceedsWhenDigestIsNotSmaller pins the outcome that matters:
+// summarize and History.Compact both succeeded and the rewrite is persisted,
+// so Compact reports success even though the digest came out bigger than the
+// turns it replaced. Compaction's success is "the store was rewritten", not
+// "the token estimate went down".
+func TestCompactSucceedsWhenDigestIsNotSmaller(t *testing.T) {
+	// ~500 estimated tokens of digest against ~90 tokens of history.
+	model := &compactModel{summaryText: strings.Repeat("x", 2000)}
+	store := newSpyStore()
+	conv := New(Deps{Model: model, ModelMode: "mock", Emitter: noopEmitter(),
+		History: store, HistoryTokenBudget: 1_000_000})
+
+	params := Params{ProjectName: "demo-project", ContextID: "conv-bigger-digest"}
+	fillTurns(t, conv, params, 3)
+
+	before, err := store.Turns(context.Background(), params.ProjectName, params.ContextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := conv.Compact(context.Background(), params); err != nil {
+		t.Fatalf("Compact: %v, want nil — the rewrite was persisted", err)
+	}
+	if store.compactCalls != 1 {
+		t.Fatalf("compactCalls = %d, want 1", store.compactCalls)
+	}
+
+	after, err := store.Turns(context.Background(), params.ProjectName, params.ContextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 || !history.IsSummaryTurn(after[0]) {
+		t.Fatalf("turns after compact = %+v, want a single summary turn", after)
+	}
+	if history.EstimateTokens(after) <= history.EstimateTokens(before) {
+		t.Fatalf("fixture no longer exercises the case: after=%d tokens, before=%d",
+			history.EstimateTokens(after), history.EstimateTokens(before))
+	}
+}
+
+// TestCompactSingleTurnConversationSucceeds is the shape seen live: one
+// ordinary turn, whose digest is comfortably larger than the turn itself. A
+// single non-summary turn is still foldable (it can be arbitrarily long), so
+// it compacts rather than short-circuiting to ErrNothingToCompact.
+func TestCompactSingleTurnConversationSucceeds(t *testing.T) {
+	model := &compactModel{summaryText: strings.Repeat("y", 300)}
+	store := newSpyStore()
+	conv := New(Deps{Model: model, ModelMode: "mock", Emitter: noopEmitter(),
+		History: store, HistoryTokenBudget: 1_000_000})
+
+	params := Params{ProjectName: "demo-project", ContextID: "conv-single-turn"}
+	fillTurns(t, conv, params, 1)
+
+	if err := conv.Compact(context.Background(), params); err != nil {
+		t.Fatalf("Compact: %v, want nil", err)
+	}
+	if store.compactCalls != 1 {
+		t.Fatalf("compactCalls = %d, want 1", store.compactCalls)
+	}
+
+	after, err := store.Turns(context.Background(), params.ProjectName, params.ContextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 || !history.IsSummaryTurn(after[0]) {
+		t.Fatalf("turns after compact = %+v, want a single summary turn", after)
+	}
+}
+
+// TestCompactPersistFailureReturnsError guards the other half of the split:
+// with the token comparison gone, a store that refuses the rewrite must
+// still surface as an error on the manual path.
+func TestCompactPersistFailureReturnsError(t *testing.T) {
+	model := &compactModel{}
+	store := newSpyStore()
+	conv := New(Deps{Model: model, ModelMode: "mock", Emitter: noopEmitter(),
+		History: store, HistoryTokenBudget: 1_000_000})
+
+	params := Params{ProjectName: "demo-project", ContextID: "conv-persist-fail"}
+	fillTurns(t, conv, params, 3)
+	store.failCompact = errors.New("store exploded")
+
+	err := conv.Compact(context.Background(), params)
+	if err == nil {
+		t.Fatal("Compact err = nil, want an error when the store rejects the rewrite")
+	}
+	if !strings.Contains(err.Error(), "store exploded") {
+		t.Fatalf("err = %v, want it to carry the store failure", err)
+	}
+}
+
+// TestCompactStoreFailureFallsOpenOnAutomaticPath: the automatic path must
+// still never fail a turn when the store rejects the rewrite.
+func TestCompactStoreFailureFallsOpenOnAutomaticPath(t *testing.T) {
+	model := &compactModel{}
+	store := newSpyStore()
+	store.failCompact = errors.New("store exploded")
+	conv := New(Deps{Model: model, ModelMode: "mock", Emitter: noopEmitter(),
+		History: store, HistoryTokenBudget: 200})
+
+	params := Params{ProjectName: "demo-project", ContextID: "conv-auto-store-fail"}
+	res := fillTurns(t, conv, params, 7) // crosses the threshold on turn 7
+
+	if res.State != StateCompleted {
+		t.Fatalf("turn state = %s, want completed despite a failed store rewrite", res.State)
+	}
+	if store.compactCalls == 0 {
+		t.Fatal("compactCalls = 0, want the automatic path to have attempted a rewrite")
 	}
 }
