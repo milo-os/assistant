@@ -13,8 +13,10 @@ import (
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	openapinamer "k8s.io/apiserver/pkg/endpoints/openapi"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	genericfilters "k8s.io/apiserver/pkg/server/filters"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/options"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -105,6 +107,20 @@ func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config,
 
 	genericConfig := genericapiserver.NewRecommendedConfig(assistantapiserver.Codecs)
 	genericConfig.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString("1.36", "", "")
+
+	// NewRecommendedConfig's default LongRunningFunc only treats the
+	// upstream subresource set (watch/attach/exec/proxy/log/portforward) as
+	// long-running. sendmessage streams an SSE response for the duration of
+	// a full agent turn (tool calls included), so without this it's wrapped
+	// by WithTimeoutForNonLongRunningRequests like any ordinary read and got
+	// cut off mid-turn — the browser saw "upstream connect error ... reset
+	// reason: protocol error" and the apiserver logged "Timeout or abort
+	// while handling" / agent.turn.completed outcome=canceled around 10s in.
+	// Same fix pods/exec and pods/log --follow needed upstream.
+	genericConfig.LongRunningFunc = genericfilters.BasicLongRunningRequestCheck(
+		sets.NewString("watch", "proxy"),
+		sets.NewString("attach", "exec", "proxy", "log", "portforward", "sendmessage"),
+	)
 
 	// Wrap the generic-apiserver's normal handler chain (auth, audit,
 	// panic-recovery, etc. — DefaultBuildHandlerChain) with an outer otelhttp
