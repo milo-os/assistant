@@ -51,9 +51,10 @@ one answered slightly differently.
 
 ## One confirmation contract
 
-A tool that changes a customer's resources is safe only if what changes is what
-somebody saw. Patch owns that check, the same way it owns the tool allow-list,
-so there is one of it rather than one per provider.
+A tool that changes a customer's resources is safe only when the change applied
+matches the change the customer was shown. Patch enforces that itself, the same
+way it enforces the tool allow-list, so providers inherit one confirmation step
+instead of each building their own.
 
 Changing anything takes two steps:
 
