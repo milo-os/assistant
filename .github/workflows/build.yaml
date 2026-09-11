@@ -88,7 +88,13 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.14.0
+    # v1.14.0 (still used by the plain single-image publish-docker.yaml calls
+    # above) predates the multi-image `images:` input this job relies on —
+    # that input was added in v1.15.0 and confirmed present as of v1.21.0.
+    # An undefined `with:` key against an older pin fails at workflow
+    # validation before any job runs ("startup_failure"), which is exactly
+    # what broke this job after the consumer-ui-plugin image was added.
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.21.0
     with:
       bundle-name: ghcr.io/milo-os/assistant-kustomize
       # The whole config/ tree, so the bundle root carries both
