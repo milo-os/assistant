@@ -1,0 +1,26 @@
+{
+  "name": "assistant.miloapis.com",
+  "version": "0.1.0",
+  "sdk": {
+    "name": "@datum-cloud/portal-plugin-sdk",
+    "range": "^1.0.0"
+  },
+  "remoteEntry": "remoteEntry.js",
+  "exposedModules": {
+    "ChatDock": "./src/widgets/chat-dock.tsx"
+  },
+  "extensions": [
+    {
+      "type": "portal.dock/project",
+      "properties": {
+        "id": "assistant-chat",
+        "title": "Patch AI",
+        "icon": "brain",
+        "component": {
+          "$codeRef": "ChatDock"
+        },
+        "order": 0
+      }
+    }
+  ]
+}

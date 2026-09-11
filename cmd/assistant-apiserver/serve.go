@@ -26,9 +26,12 @@ import (
 
 	_ "k8s.io/component-base/logs/json/register"
 
+	"github.com/milo-os/assistant/internal/agentwiring"
 	assistantapiserver "github.com/milo-os/assistant/internal/apiserver"
+	"github.com/milo-os/assistant/internal/config"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
 	"github.com/milo-os/assistant/internal/tracing"
 	generatedopenapi "github.com/milo-os/assistant/pkg/generated/openapi"
 )
@@ -147,11 +150,48 @@ func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config,
 		return nil, nil, fmt.Errorf("connect gap-report store: %w", err)
 	}
 
+	// The conversations/sendmessage subresource needs the same agent-execution
+	// stack (model, capability source, memory/gap-report stores, usage
+	// emitter) as cmd/assistant — built by the same internal/agentwiring
+	// constructor, from the same [config.Config] shape, so browser (SSE) and
+	// A2A traffic never drift onto different wiring. This reuses
+	// cmd/assistant's exact env var names (MODEL_MODE, ANTHROPIC_API_KEY,
+	// CAPABILITY_*, PERSONA_PROMPT_FILE, USAGE_GATEWAY_*, …; see
+	// internal/config's doc comment) rather than inventing a second set.
+	//
+	// config.Load also requires AUTHN_TOKENREVIEW_API_URL/AUTHZ_SAR_API_URL,
+	// which this process does not otherwise use (its own authn/authz is the
+	// delegated TokenReview/SAR wired by o.Recommended.ApplyTo above) — but
+	// both derive automatically from KUBERNETES_SERVICE_HOST/PORT in any
+	// in-cluster deployment, so no new required setting reaches operators in
+	// practice; only off-cluster/local runs need to set them explicitly, the
+	// same as cmd/assistant already does.
+	agentCfg, err := config.Load(os.Getenv)
+	if err != nil {
+		store.Close()
+		gapStore.Close()
+		return nil, nil, fmt.Errorf("load agent config: %w", err)
+	}
+	// The DSN this process actually connected the read stores with above
+	// (which may come from --postgres-dsn rather than $CONVERSATION_STORE_URL)
+	// is authoritative: the agent runner's own history/memory/gap-report
+	// stores must point at the same database, never silently fall back to
+	// in-memory because the env var alone was empty.
+	agentCfg.ConversationStoreURL = o.PostgresDSN
+
+	runner, _, runnerCleanup, err := agentwiring.NewRunner(ctx, agentCfg, slog.Default(), appmetrics.New())
+	if err != nil {
+		store.Close()
+		gapStore.Close()
+		return nil, nil, fmt.Errorf("build agent runner: %w", err)
+	}
+
 	return &assistantapiserver.Config{
 			GenericConfig: genericConfig,
 			ExtraConfig: assistantapiserver.ExtraConfig{
 				Reader:     store,
 				GapReports: gapStore,
+				Runner:     runner,
 				// The address clients should send A2A traffic to. Read from the
 				// same env the service uses for its agent card, so discovery and
 				// the card cannot disagree.
@@ -160,6 +200,7 @@ func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config,
 		}, func() {
 			store.Close()
 			gapStore.Close()
+			runnerCleanup()
 		}, nil
 }
 
