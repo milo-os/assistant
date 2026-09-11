@@ -1,0 +1,103 @@
+apiVersion: services.miloapis.com/v1alpha1
+kind: ServiceConfiguration
+metadata:
+  name: assistant-miloapis-com
+spec:
+  serviceRef:
+    name: assistant-miloapis-com
+  phase: Published
+  # Consumer-side portal plugin (cloud-portal): the "Patch AI" chat dock
+  # (portal.dock/project extension, no page). Hosted internally only —
+  # config/components/consumer-ui-plugin, folded into patch-assistant's own
+  # Deployment set, never fronted by a public Gateway/HTTPRoute.
+  # cloud-portal's server is the only caller, over this in-cluster Service
+  # DNS name — the browser never talks to a plugin origin directly.
+  # Cluster-local DNS means this value is correct in every environment
+  # patch-assistant deploys to.
+  #
+  # No caBundle needed: the plugin's CSI-issued server cert chains to
+  # datum-control-plane-ca, which cloud-portal's Bun runtime already trusts
+  # platform-wide via NODE_EXTRA_CA_CERTS.
+  #
+  # entitlement: None — there is no per-project ServiceEntitlement concept
+  # for Patch; every project should see it.
+  userInterface:
+    consumer:
+      assets:
+        baseURL: https://assistant-consumer-ui-plugin.patch-system.svc.cluster.local
+      visibility:
+        entitlement: None
+  monitoredResourceTypes:
+    - type: assistant.miloapis.com/Conversation
+      displayName: AI assistant chat
+      description: |
+        A conversation with the AI assistant in the Datum Cloud portal.
+        Each chat tracks the tokens and messages used in your requests.
+      gvk:
+        group: assistant.miloapis.com
+        kind: Conversation
+      labels:
+        - name: model
+          description: |
+            The model identifier handling the conversation (e.g.
+            "claude-sonnet-4-6"). Required so per-model unit economics
+            remain visible all the way to the bill.
+        - name: region
+          description: |
+            Optional Datum deployment region serving the request. Useful for
+            cost attribution when the portal is deployed in multiple regions
+            or when egress charges differ per region.
+  metrics:
+    - name: assistant.miloapis.com/conversation/input-tokens
+      displayName: Input tokens
+      description: |
+        Prompt and context you send with each AI assistant request.
+      kind: Delta
+      unit: "{token}"
+      # Per-model unit economics: each model has a different cost, so the
+      # rating engine prices on this dimension. The producer emits `model`
+      # in data.dimensions; the central validator requires it declared here.
+      dimensions:
+        - model
+    - name: assistant.miloapis.com/conversation/output-tokens
+      displayName: Output tokens
+      description: |
+        Text the AI assistant generates in its responses.
+      kind: Delta
+      unit: "{token}"
+      dimensions:
+        - model
+    - name: assistant.miloapis.com/conversation/cache-read-tokens
+      displayName: Cached prompt tokens
+      description: |
+        Previously sent prompt content reused from cache instead of being
+        processed again.
+      kind: Delta
+      unit: "{token}"
+      dimensions:
+        - model
+    - name: assistant.miloapis.com/conversation/cache-write-tokens
+      displayName: Prompt cache storage
+      description: |
+        New prompt content saved to cache so follow-up requests can reuse it.
+      kind: Delta
+      unit: "{token}"
+      dimensions:
+        - model
+    - name: assistant.miloapis.com/conversation/messages
+      displayName: Messages
+      description: |
+        Completed back-and-forth exchanges with the AI assistant.
+      kind: Delta
+      unit: "{message}"
+      dimensions:
+        - model
+  billing:
+    consumerDestinations:
+      - monitoredResourceType: assistant.miloapis.com/Conversation
+        metrics:
+          - assistant.miloapis.com/conversation/input-tokens
+          - assistant.miloapis.com/conversation/output-tokens
+          - assistant.miloapis.com/conversation/cache-read-tokens
+          - assistant.miloapis.com/conversation/cache-write-tokens
+          - assistant.miloapis.com/conversation/messages
