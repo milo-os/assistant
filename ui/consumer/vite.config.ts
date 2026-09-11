@@ -52,15 +52,21 @@ export default defineConfig({
       exposes: {
         './ChatDock': './src/widgets/chat-dock.tsx',
       },
-      // Host-pinned singletons. requiredVersion tracks the host's majors
-      // (react 19, react-router 7, react-query 5). singleton:true guarantees
-      // one instance — the host provides all of these, so plugin queries share
-      // the host's QueryClient cache.
+      // Host-pinned singletons. requiredVersion:false, matching the host's own
+      // federation-host.ts hostShared() — the host copy always wins,
+      // regardless of what version this plugin was built against. A strict
+      // requiredVersion here would re-break on the host's next major bump
+      // (this happened once already: cloud-portal moved to react-router v8
+      // while this stayed pinned to ^7.0.0, which made Module Federation
+      // refuse to bridge the shared modules at all — a hard runtime crash,
+      // not just a warning). singleton:true still guarantees one instance —
+      // the host provides all of these, so plugin queries share the host's
+      // QueryClient cache.
       shared: {
-        react: { singleton: true, requiredVersion: '^19.0.0' },
-        'react-dom': { singleton: true, requiredVersion: '^19.0.0' },
-        'react-router': { singleton: true, requiredVersion: '^7.0.0' },
-        '@tanstack/react-query': { singleton: true, requiredVersion: '^5.0.0' },
+        react: { singleton: true, requiredVersion: false },
+        'react-dom': { singleton: true, requiredVersion: false },
+        'react-router': { singleton: true, requiredVersion: false },
+        '@tanstack/react-query': { singleton: true, requiredVersion: false },
         // Must be shared, not bundled: useProjectContext()/usePluginFetch()
         // read a React Context defined inside this module, and that Context
         // is only the host's PortalPluginHostProvider's Context if every
