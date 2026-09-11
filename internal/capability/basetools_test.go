@@ -173,3 +173,72 @@ func TestProviderToolsCannotShadowABaseTool(t *testing.T) {
 		t.Fatalf("the provider tool is missing under %q", namespaced)
 	}
 }
+
+// The capability document has always carried a per-server mutating list that
+// nothing read. Composition now answers what this project's assistant can
+// change from that list plus the base tools' change path, giving an operator
+// one place to look.
+func TestComposeReportsWhatCanChangeSomething(t *testing.T) {
+	client, _ := platformClient(t)
+
+	doc := streamcoDoc(func(d *CapabilityDocument) {
+		d.Spec.Tools.MCPServers[0].ToolSelector.Include = []string{"streams_list", "pipeline_restart"}
+		d.Spec.Tools.MCPServers[0].Mutating = []string{"pipeline_restart", "never_composed"}
+	})
+	session := newFakeSession("streams_list", "pipeline_restart")
+
+	composed, err := Compose(context.Background(), []CapabilityDocument{doc}, ComposeOptions{
+		PlatformAPI:     client,
+		PlanTokenKey:    []byte("a-test-key-long-enough-to-be-one"),
+		ExpectedProject: "demo-project",
+		Caller:          CallerIdentity{BearerToken: "caller-token"},
+		connect:         connectorFor(map[string]*fakeSession{"http://provider/mcp": session}),
+	})
+	if err != nil {
+		t.Fatalf("Compose: %v", err)
+	}
+	defer func() { _ = composed.Close() }()
+
+	restart := NamespaceToolName("streamco", "pipeline_restart")
+	for _, name := range append(basetools.MutatingToolNames(), restart) {
+		if !composed.IsMutating(name) {
+			t.Errorf("%s is on a change path and was not reported as one: %v", name, composed.Mutating)
+		}
+	}
+	if composed.IsMutating(NamespaceToolName("streamco", "streams_list")) {
+		t.Error("a read was reported as changing something")
+	}
+	// A tool the document flagged but never composed is not something this
+	// project's assistant can change.
+	if composed.IsMutating(NamespaceToolName("streamco", "never_composed")) {
+		t.Error("a tool that was never composed was reported as changing something")
+	}
+}
+
+// Without a key there is no change path, so nothing the platform owns is on
+// the list.
+func TestComposeReportsNoBaseChangePathWithoutAKey(t *testing.T) {
+	client, _ := platformClient(t)
+
+	composed, err := Compose(context.Background(), nil, ComposeOptions{
+		PlatformAPI:     client,
+		ExpectedProject: "demo-project",
+		Caller:          CallerIdentity{BearerToken: "caller-token"},
+	})
+	if err != nil {
+		t.Fatalf("Compose: %v", err)
+	}
+	defer func() { _ = composed.Close() }()
+
+	if len(composed.Mutating) != 0 {
+		t.Fatalf("Mutating = %v, want none", composed.Mutating)
+	}
+	for _, name := range basetools.MutatingToolNames() {
+		if _, exists := composed.Tools[name]; exists {
+			t.Fatalf("%s was composed with no key to bind a plan with", name)
+		}
+	}
+	if strings.Contains(composed.SystemPromptAddendum, basetools.ResourcesApplyToolName) {
+		t.Fatal("the prompt advertises a change path that is not there")
+	}
+}

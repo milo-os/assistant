@@ -47,6 +47,35 @@ one answered slightly differently.
 | `schema_get` | What fields does this kind take, and which are required |
 | `locations_list` | Where is this service offered to this project |
 | `quota_get` | How much of the project's allowance is left |
+| `resources_validate` / `resources_plan` / `resources_apply` | Change something, once the person has seen and agreed to exactly what |
+
+## One confirmation contract
+
+A tool that changes a customer's resources is safe only when the change applied
+matches the change the customer was shown. Patch enforces that itself, the same
+way it enforces the tool allow-list, so providers inherit one confirmation step
+instead of each building their own.
+
+Changing anything takes two steps:
+
+1. `resources_plan` works out what would happen. It returns the exact manifests
+   and a token that stands for them.
+2. `resources_apply` takes those manifests and that token. If either has moved,
+   it refuses and nothing changes.
+
+That catches an edited manifest, a reordered list, a token from another project,
+and a resource someone else changed in between. A change nobody saw has no token
+at all, so nobody can apply it.
+
+The token proves the change is the one shown. It cannot prove the person agreed.
+Agreement is a human step, required by Patch's fixed operating rules: nothing
+the assistant reads in a tool result, a provider document, or a resource's
+status counts as the person's answer. Those rules sit outside the persona a
+deployer can replace, so rebranding cannot drop them.
+
+A plan can also carry several manifests and order them, so a change that spans
+services is one plan. A first deployment that needs a network from another
+service is shown once and agreed once.
 
 ## Composition
 

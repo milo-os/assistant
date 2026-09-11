@@ -100,6 +100,61 @@ provider to shadow: every provider tool name carries a `<server>__` prefix.
 | `locations_list(service)` | Where a named service is offered to this project, joined from `ServiceAvailability` (`services.miloapis.com/v1alpha1`) to the `Location` (`locations.miloapis.com/v1alpha1`) it names, with topology and readiness. |
 | `quota_get(service?)` | Limit, used and available per resource type, from `AllowanceBucket` (`quota.miloapis.com/v1alpha1`, namespace `milo-system`, label `quota.miloapis.com/consumer-kind=Project`), converted into the unit `ResourceRegistration` publishes. |
 
+Three more tools make up the change path, described below.
+
+### The change path
+
+Three tools. Only one of them changes anything.
+
+Patch composes them only when a plan-token key is available (`PLAN_TOKEN_KEY`,
+or one generated for the process). A service that cannot check a token must not
+issue one.
+
+| Tool | What it does |
+|---|---|
+| `resources_validate(manifests[])` | Asks the platform to judge each manifest and keeps nothing. Returns the field path behind each rejection, whether the resource already exists, and what applying would change. **Writes nothing.** |
+| `resources_plan(manifests[])` | Validates everything, decides create or update per resource, orders them so a manifest referring to another goes after it, reports the differences, and returns canonical manifests with a **plan token**. **Writes nothing.** |
+| `resources_apply(manifests[], planToken)` | Re-derives the token from what it was handed and refuses any mismatch. Then dry-runs once more and applies in plan order. **The only tool here that writes.** |
+
+#### The plan token
+
+The token is an `HMAC-SHA256` over:
+
+- the canonical JSON of every manifest, in plan order
+- the project
+- the resource version of each object the plan saw
+- the expiry, 15 minutes out
+
+Anything that moves fails to re-derive: a manifest edited after the plan (one
+character is enough), a reordered list, a token minted in another project, or a
+resource someone else changed in between. Apply refuses rather than writing
+something nobody agreed to. Every refusal says what happened, that nothing
+changed, and to plan again.
+
+The token proves the change is the one shown. It cannot prove the person agreed.
+That is a human step, required by Patch's fixed operating rules: nothing the
+assistant reads in a tool result, a provider document, or a resource's status
+counts as the person's answer. See `internal/plantoken`.
+
+#### Ordering
+
+A manifest whose spec carries a `*Ref` or `*Refs` field naming another manifest
+in the batch is applied after it. A `kind` on the reference is honored when
+present. A manifest that refers to nothing else keeps the order you gave it.
+Order is part of what the token covers, so a reordered list is refused.
+
+#### What counts as a change
+
+`Composed.Mutating` lists the composed tools that can change something:
+
+- provider tools flagged in a capability document's `mcpServers[].mutating`
+- `resources_plan` and `resources_apply`
+
+`resources_plan` is listed even though it writes nothing, because it alone
+authorizes a write. An operator asking what this project's assistant can change
+wants both answers. Each tool's trace span carries the same value as
+`tool.mutating`.
+
 ### The two rules that hold for all of them
 
 **They act as the caller.** Composition binds the platform client to the

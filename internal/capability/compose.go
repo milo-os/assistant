@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"time"
 
 	"github.com/milo-os/assistant/agentcore"
@@ -153,6 +154,11 @@ type ComposeOptions struct {
 	// a view that carries no other identity. With either missing there is
 	// nobody to act as, so nothing is composed. Nil disables the feature.
 	PlatformAPI *projectapi.Client
+	// PlanTokenKey binds plans for the base tools' change path
+	// (resources_validate, resources_plan, resources_apply). Empty leaves the
+	// change path out: a service that cannot check a token must not issue one.
+	// Ignored when PlatformAPI is nil. See internal/plantoken.
+	PlanTokenKey []byte
 	// Metrics, when non-nil, records assistant_gap_report_total for every
 	// report_capability_gap tool call this composition creates (see
 	// internal/metrics). Nil disables recording only — GapReports still
@@ -192,10 +198,25 @@ func knownCapabilityKeys(ctx context.Context, store gapreport.Store, doc Capabil
 type Composed struct {
 	// SystemPromptAddendum is "" when no document contributed knowledge.
 	SystemPromptAddendum string
-	// Tools holds exactly the allow-listed provider tools, keyed and named
-	// "<server>__<tool>".
+	// Tools holds the allow-listed provider tools, keyed and named
+	// "<server>__<tool>", together with the platform's own built-ins.
 	Tools agentcore.ToolSet
-	close func() error
+	// Mutating names the composed tools on a change path: those a capability
+	// document flagged in mcpServers[].mutating, plus the base tools' change
+	// path. It answers what this project's assistant can change. Sorted, so
+	// two compositions of the same project read alike.
+	Mutating []string
+	close    func() error
+}
+
+// IsMutating reports whether a composed tool is on a change path.
+func (c *Composed) IsMutating(name string) bool {
+	for _, mutating := range c.Mutating {
+		if mutating == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Close closes every MCP session opened during composition. It is safe to call
@@ -251,6 +272,23 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 
 	tools, sessions := connectTools(ctx, docs, opts, guard, sanctioned, logger)
 
+	// What the document declared as mutating, namespaced like its tools, kept
+	// only where the tool was actually composed.
+	mutating := map[string]bool{}
+	for _, doc := range docs {
+		if doc.Spec.Tools == nil {
+			continue
+		}
+		for _, server := range doc.Spec.Tools.MCPServers {
+			for _, toolName := range server.Mutating {
+				namespaced := NamespaceToolName(server.Name, toolName)
+				if _, composed := tools[namespaced]; composed {
+					mutating[namespaced] = true
+				}
+			}
+		}
+	}
+
 	// Skills: descriptions into the prompt, bodies behind the built-in
 	// load_skill tool (progressive disclosure).
 	skills := collectSkills(docs, logger)
@@ -297,8 +335,9 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 	// carries the "<server>__" prefix.
 	if opts.PlatformAPI != nil && opts.ExpectedProject != "" && opts.Caller.BearerToken != "" {
 		base := basetools.Tools(basetools.Options{
-			Project: opts.PlatformAPI.As(opts.ExpectedProject, opts.Caller.BearerToken),
-			Logger:  logger,
+			Project:      opts.PlatformAPI.As(opts.ExpectedProject, opts.Caller.BearerToken),
+			PlanTokenKey: opts.PlanTokenKey,
+			Logger:       logger,
 		})
 		for name, t := range base {
 			if _, exists := tools[name]; exists {
@@ -307,7 +346,14 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 			tools[name] = t
 		}
 		if len(base) > 0 {
-			if section := basetools.PromptSection(); section != "" {
+			writePath := false
+			for _, name := range basetools.MutatingToolNames() {
+				if _, composed := base[name]; composed {
+					mutating[name] = true
+					writePath = true
+				}
+			}
+			if section := basetools.PromptSection(writePath); section != "" {
 				if addendum == "" {
 					addendum = section
 				} else {
@@ -345,10 +391,17 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		}
 	}
 
+	mutatingNames := make([]string, 0, len(mutating))
+	for name := range mutating {
+		mutatingNames = append(mutatingNames, name)
+	}
+	sort.Strings(mutatingNames)
+
 	closed := false
 	return &Composed{
 		SystemPromptAddendum: addendum,
 		Tools:                tools,
+		Mutating:             mutatingNames,
 		close: func() error {
 			if closed {
 				return nil

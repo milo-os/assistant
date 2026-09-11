@@ -136,6 +136,11 @@ type Deps struct {
 	// client to the caller's own bearer token and the turn's project — so the
 	// service reads nothing of its own. Nil disables them entirely.
 	PlatformAPI *projectapi.Client
+	// PlanTokenKey enables the base tools' change path (resources_validate,
+	// resources_plan, resources_apply). Empty leaves it out: a service that
+	// cannot check a token must not issue one. Ignored when PlatformAPI is
+	// nil. See internal/plantoken.
+	PlanTokenKey []byte
 	// GapReports backs the report_capability_gap__<service> tools: lets
 	// the model flag that a provider service is missing a tool or lookup
 	// a user needed, written to THAT PROVIDER's own project (see
@@ -287,6 +292,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		IdentityForwardHosts: c.deps.CapabilityIdentityForwardHosts,
 		Memory:               c.deps.Memory,
 		PlatformAPI:          c.deps.PlatformAPI,
+		PlanTokenKey:         c.deps.PlanTokenKey,
 		ExpectedProject:      params.ProjectName,
 		GapReports:           c.deps.GapReports,
 		Metrics:              c.deps.Metrics,
@@ -334,7 +340,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		Model:           tracedModel(c.deps.Model, c.deps.Metrics),
 		System:          system,
 		Messages:        messages,
-		Tools:           tracedTools(composed.Tools, c.deps.Metrics),
+		Tools:           tracedTools(composed.Tools, composed.Mutating, c.deps.Metrics),
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),

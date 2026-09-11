@@ -113,27 +113,36 @@ func (r *tracingStreamReader) endSpan(err error) {
 	r.metrics.RecordModelCall(outcome, time.Since(r.start))
 }
 
-// tracedTools wraps every tool in a set so each Execute call gets a
-// "tool.execute" span carrying only the tool's name — never its input
-// (tool-call arguments, which may carry user-supplied data) or its textual
-// result — and, right alongside that span, one assistant_tool_call_total
-// increment labeled by tool name and outcome (success/error). A nil metrics
-// is a safe no-op.
-func tracedTools(tools agentcore.ToolSet, metrics *appmetrics.Metrics) agentcore.ToolSet {
+// tracedTools wraps every tool so each Execute call emits a "tool.execute"
+// span and one assistant_tool_call_total increment labeled by tool name and
+// outcome. The span carries the tool's name and whether it is on a change
+// path, never its input or result: arguments may hold user-supplied data. A
+// nil metrics is a safe no-op.
+//
+// mutating comes from [capability.Composed.Mutating]. It rides on the span
+// rather than the metric because it is a property of the tool, not a dimension
+// worth multiplying the series by; an operator asking whether a turn changed
+// anything reads it off the trace.
+func tracedTools(tools agentcore.ToolSet, mutating []string, metrics *appmetrics.Metrics) agentcore.ToolSet {
 	if len(tools) == 0 {
 		return tools
 	}
+	changes := make(map[string]bool, len(mutating))
+	for _, name := range mutating {
+		changes[name] = true
+	}
 	wrapped := make(agentcore.ToolSet, len(tools))
 	for name, t := range tools {
-		wrapped[name] = &tracingTool{inner: t, name: name, metrics: metrics}
+		wrapped[name] = &tracingTool{inner: t, name: name, mutating: changes[name], metrics: metrics}
 	}
 	return wrapped
 }
 
 type tracingTool struct {
-	inner   agentcore.Tool
-	name    string
-	metrics *appmetrics.Metrics
+	inner    agentcore.Tool
+	name     string
+	mutating bool
+	metrics  *appmetrics.Metrics
 }
 
 func (t *tracingTool) Definition() agentcore.ToolDefinition { return t.inner.Definition() }
@@ -141,6 +150,7 @@ func (t *tracingTool) Definition() agentcore.ToolDefinition { return t.inner.Def
 func (t *tracingTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	ctx, span := tracer.Start(ctx, "tool.execute", trace.WithAttributes(
 		attribute.String("tool.name", t.name),
+		attribute.Bool("tool.mutating", t.mutating),
 	))
 	defer span.End()
 

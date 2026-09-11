@@ -181,6 +181,14 @@ type Config struct {
 	// bundle, which is the same server.
 	PlatformAPICACertPath string
 
+	// PlanTokenKey binds plans for the base tools' change path (env
+	// PLAN_TOKEN_KEY; base64 or a raw string of at least 16 bytes). Setting it
+	// lets one process apply another's plan and survives restarts. Unset
+	// generates a key per process with a startup warning: the guarantee still
+	// holds, but an outstanding plan is lost on restart and refused by a
+	// sibling replica. See internal/plantoken.
+	PlanTokenKey string
+
 	// CapabilityIdentityForwardHosts are the operator-sanctioned MCP endpoint
 	// hosts that may receive the calling user's bearer token and the turn's
 	// project (comma-separated env; exact or domain-suffix match). Empty (the
@@ -388,6 +396,7 @@ func Load(getenv func(string) string) (*Config, error) {
 			TokenReviewClientKeyPath:  tokenReviewClientKeyPath,
 		},
 		PlatformAPIURL:                 platformAPIURL,
+		PlanTokenKey:                   env("PLAN_TOKEN_KEY"),
 		PlatformAPICACertPath:          platformAPICACertPath,
 		CapabilityDocsFixture:          capabilityDocsFixture,
 		CapabilityProviderURL:          capabilityProviderURL,
