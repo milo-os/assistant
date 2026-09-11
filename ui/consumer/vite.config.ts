@@ -65,6 +65,16 @@ export default defineConfig({
       shared: {
         react: { singleton: true, requiredVersion: false },
         'react-dom': { singleton: true, requiredVersion: false },
+        // React 19's createRoot/hydrateRoot live in this subpath, which MF
+        // treats as its own distinct shared module from 'react-dom' — one of
+        // this plugin's dependencies pulls it in (confirmed present in the
+        // built remoteEntry.js). Left undeclared, MF still tried to "bridge"
+        // it against nothing on the host side and crashed with React's
+        // "incompatible react/react-dom versions" invariant (#527) instead of
+        // just using this plugin's own bundled copy. Needs a matching
+        // host-side entry in cloud-portal's federation-host.ts hostShared()
+        // to actually share the host's instance instead of a local fallback.
+        'react-dom/client': { singleton: true, requiredVersion: false },
         'react-router': { singleton: true, requiredVersion: false },
         '@tanstack/react-query': { singleton: true, requiredVersion: false },
         // Must be shared, not bundled: useProjectContext()/usePluginFetch()
