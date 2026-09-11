@@ -60,8 +60,8 @@ func applyInput(token string, manifests ...string) string {
 
 // ------------------------------------------------------------ the change path
 
-// A service that cannot check a plan token must not issue something that looks
-// like one, so the change path is absent rather than broken.
+// A service that cannot check a token must not issue one, so the change path
+// is absent rather than broken.
 func TestTheChangePathNeedsAKey(t *testing.T) {
 	readOnly := newPlatform(t).tools(t, "demo", "tok")
 	for _, name := range basetools.MutatingToolNames() {
@@ -130,7 +130,7 @@ func TestValidateRejectsAManifestThatDoesNotSayWhatItIs(t *testing.T) {
 	}
 }
 
-// A manifest that reads badly is one item's problem, not the whole call's.
+// An unreadable manifest is one item's problem, not the whole call's.
 func TestValidateReportsEachManifestSeparately(t *testing.T) {
 	p := writePlatform(t)
 
@@ -181,8 +181,8 @@ func TestPlanMintsNoTokenForSomethingThatWasRejected(t *testing.T) {
 	}
 }
 
-// A manifest that refers to another by name goes after it, so the thing it
-// points at exists by the time it is applied.
+// A manifest referring to another by name goes after it, so what it points at
+// exists by the time it is applied.
 func TestPlanOrdersAManifestAfterWhatItRefersTo(t *testing.T) {
 	p := newPlatform(t).
 		route("/apis/compute.datumapis.com/v1alpha1",
@@ -226,9 +226,8 @@ func TestPlanKeepsTheGivenOrderWhenNothingRefersToAnything(t *testing.T) {
 	}
 }
 
-// What applying would change is taken from what the platform says the resource
-// would become, so the differences are real changes rather than every value the
-// platform fills in on its own.
+// The diff comes from what the platform says the resource would become, so it
+// shows real changes rather than every value the platform fills in itself.
 func TestPlanReportsWhatWouldChange(t *testing.T) {
 	existing := `{"apiVersion":"compute.datumapis.com/v1alpha1","kind":"Workload",
 		"metadata":{"name":"api","namespace":"default","resourceVersion":"991"},
@@ -277,7 +276,7 @@ func TestApplyCarriesOutThePlanItWasAgreedTo(t *testing.T) {
 	}
 }
 
-// One changed character. This is the whole point.
+// One changed character is enough.
 func TestApplyRefusesAnEditedManifest(t *testing.T) {
 	p := writePlatform(t)
 	tools := p.writeTools(t, "demo", "tok")
@@ -310,8 +309,8 @@ func TestApplyRefusesAReorderedPlan(t *testing.T) {
 	assertRefusedAndUnchanged(t, p, refusal)
 }
 
-// A resource somebody else changed between the plan and the apply is refused:
-// what the person agreed to is no longer what would happen.
+// A resource somebody else changed between plan and apply is refused: the
+// agreed change no longer describes what would happen.
 func TestApplyRefusesAResourceSomebodyElseChanged(t *testing.T) {
 	existing := func(version string) string {
 		return fmt.Sprintf(`{"apiVersion":"compute.datumapis.com/v1alpha1","kind":"Workload",
@@ -408,8 +407,8 @@ func TestApplyFollowsThePlanOrder(t *testing.T) {
 	}
 }
 
-// A plan is checked again against the live platform just before it is applied,
-// because the things it depends on move underneath it.
+// Apply re-checks against the live platform, because what the plan depends on
+// can move underneath it.
 func TestApplyChecksAgainBeforeWriting(t *testing.T) {
 	p := writePlatform(t)
 	tools := p.writeTools(t, "demo", "tok")
@@ -445,8 +444,8 @@ func TestApplyReportsAChangeThatStoppedPartWay(t *testing.T) {
 
 	plan := planOf(t, tools, workloadManifest, networkManifest)
 
-	// The second write fails after the first one has already happened. The dry
-	// run before it still passes, which is exactly how a change gets part-way.
+	// The second write fails after the first succeeded. Its dry run still
+	// passes, which is how a change gets part-way.
 	p.overrideWrite(http.MethodPost, "/workloads",
 		reply{code: 500, body: `{"kind":"Status","code":500,"message":"the platform is unwell"}`})
 
@@ -478,8 +477,8 @@ func TestTheChangePathRefusesMoreThanAPersonCanRead(t *testing.T) {
 	assertNothingPersisted(t, p)
 }
 
-// A file pasted whole is one entry holding several documents, and that is what
-// a person will do.
+// A pasted file is one entry holding several documents, which is what people
+// do.
 func TestTheChangePathAcceptsAMultiDocumentManifest(t *testing.T) {
 	p := newPlatform(t).
 		route("/apis/compute.datumapis.com/v1alpha1",

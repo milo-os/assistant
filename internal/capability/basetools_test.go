@@ -174,10 +174,10 @@ func TestProviderToolsCannotShadowABaseTool(t *testing.T) {
 	}
 }
 
-// The capability document has carried a per-server `mutating` list since it was
-// written, and nothing read it. Composition now answers "what can this
-// project's assistant change" from that list plus the base tools' own change
-// path, so an operator has one place to look.
+// The capability document has always carried a per-server mutating list that
+// nothing read. Composition now answers what this project's assistant can
+// change from that list plus the base tools' change path, giving an operator
+// one place to look.
 func TestComposeReportsWhatCanChangeSomething(t *testing.T) {
 	client, _ := platformClient(t)
 
@@ -208,8 +208,8 @@ func TestComposeReportsWhatCanChangeSomething(t *testing.T) {
 	if composed.IsMutating(NamespaceToolName("streamco", "streams_list")) {
 		t.Error("a read was reported as changing something")
 	}
-	// A tool the document flagged but that was never composed is not something
-	// this project's assistant can change.
+	// A tool the document flagged but never composed is not something this
+	// project's assistant can change.
 	if composed.IsMutating(NamespaceToolName("streamco", "never_composed")) {
 		t.Error("a tool that was never composed was reported as changing something")
 	}

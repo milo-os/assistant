@@ -59,10 +59,9 @@ type Options struct {
 	// Project reads and writes as the caller. Required — with no project view
 	// there is no identity to act as, and the tools are not built.
 	Project *projectapi.Project
-	// PlanTokenKey mints and checks the tokens that bind a change to what a
-	// person was shown (see internal/plantoken). Empty leaves the change path
-	// out entirely: a service that cannot check a token must not issue
-	// something that looks like one.
+	// PlanTokenKey mints and checks the tokens binding a change to what a
+	// person was shown. Empty leaves the change path out: a service that
+	// cannot check a token must not issue one. See internal/plantoken.
 	PlanTokenKey []byte
 	// Logger receives operational warnings. Nil discards them.
 	Logger *slog.Logger
@@ -101,8 +100,8 @@ func Tools(opts Options) agentcore.ToolSet {
 
 // PromptSection is what the system prompt says about these tools. It is the
 // same shape as the skills index: a short section, added only when the tools
-// are actually there, so a turn without them never advertises them. The write
-// half is described only when the change path was actually composed.
+// are present, so a turn without them never advertises them. The write half
+// appears only when the change path was composed.
 func PromptSection(withWritePath bool) string {
 	section := `
 Platform tools: this project's own resources are reachable with resources_list and resources_get, whatever service owns them — pass the group, version and kind. schema_get describes what a kind's fields are and which are required; read it before writing a manifest rather than guessing. locations_list says where a named service is offered to this project, and quota_get says how much of the project's allowance is left. All of these read as the person you are talking to, in their project only, so a result they are not entitled to cannot come back. Prefer a provider's own tool when one covers the question: it knows what the fields mean, where these only report them.`

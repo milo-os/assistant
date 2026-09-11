@@ -50,13 +50,13 @@ type platform struct {
 }
 
 type routeEntry struct {
-	// method, when set, narrows the route to one verb — which is how a read of
-	// a resource and a write to the same path are told apart.
+	// method, when set, narrows the route to one verb, telling a read and a
+	// write on the same path apart.
 	method string
 	suffix string
 	// persistedOnly narrows the route to a request that would actually change
-	// something, so a test can let a dry run pass and the write that follows
-	// it fail — which is the only way to reach a part-way change.
+	// something, so a dry run can pass and the write after it fail. That is
+	// the only way to reach a part-way change.
 	persistedOnly bool
 	reply         reply
 }
@@ -134,14 +134,14 @@ func (p *platform) routeFor(method, suffix string, r reply) *platform {
 	return p
 }
 
-// override registers an answer that beats everything already registered, which
-// is how a test changes the platform's mind part-way through.
+// override registers an answer beating everything already registered, so a
+// test can change the platform's mind part-way through.
 func (p *platform) override(method, suffix string, r reply) *platform {
 	return p.prepend(routeEntry{method: method, suffix: suffix, reply: r})
 }
 
-// overrideWrite is override for the request that would actually change
-// something, leaving the dry run before it to answer as it did.
+// overrideWrite is override for the persisting request, leaving the dry run
+// before it to answer as it did.
 func (p *platform) overrideWrite(method, suffix string, r reply) *platform {
 	return p.prepend(routeEntry{method: method, suffix: suffix, persistedOnly: true, reply: r})
 }

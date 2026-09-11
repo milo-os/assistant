@@ -1,25 +1,16 @@
-// Package plantoken is the write gate: proof that what is about to be applied
-// is exactly what somebody was already shown.
+// Package plantoken proves that what is about to be applied is exactly what
+// somebody was already shown.
 //
-// The problem it solves is not authorization. Whether a caller may change a
-// resource is decided by the platform, on the caller's own credential, on every
-// request. The problem is agreement. A model proposes a change, a person reads
-// it and says yes, and the model then calls apply — and between those two
-// moments the model has read tool output, provider knowledge and status
-// messages, any of which could try to talk it into applying something else.
+// Authorization is a separate question, decided by the platform on the
+// caller's own credential on every request. This package settles agreement. A
+// plan returns a token hashing the manifests, their order, the project, and
+// the resource version each manifest saw. Apply re-derives the hash and
+// refuses any mismatch, so an edited manifest, a reordered list, another
+// project's token, or an object somebody else changed cannot reach the
+// platform. A change nobody was shown has no token at all.
 //
-// So a plan returns a token that is a hash of what the plan covered: the exact
-// manifests, the project they belong to, and the version of each object the
-// plan saw. Apply re-derives that hash from what it was actually handed and
-// refuses anything that does not match. A manifest edited after the plan — one
-// character is enough — a token minted for another project, or an object
-// somebody else changed in the meantime all fail to match, so the only thing
-// that can reach the platform is the change already put in front of the person
-// who asked. A change nobody was shown has no token and cannot be applied at
-// all.
-//
-// The token proves agreement was about THIS change. It cannot prove agreement
-// happened: that is a human step, and the platform prompt is what requires it.
+// The token proves agreement covered this change. It cannot prove agreement
+// happened; the platform prompt requires that human step.
 package plantoken
 
 import (
@@ -37,13 +28,12 @@ import (
 )
 
 const (
-	// TTL is how long a token stays good: long enough for the change to be
-	// shown and read and answered, short enough that agreement cannot outlive
-	// the conversation it was given in.
+	// TTL bounds how long agreement stays good: long enough to read and
+	// answer, short enough not to outlive the conversation it was given in.
 	TTL = 15 * time.Minute
 
-	// version prefixes the hashed payload so a future change to what is
-	// covered cannot be confused with today's.
+	// version prefixes the hashed payload so a later change to what the token
+	// covers cannot be confused with today's.
 	version = "plan.v1"
 
 	// keyBytes is the size of a generated key.
@@ -53,36 +43,33 @@ const (
 // Binding is everything a plan assumed. All of it is hashed, so any of it
 // moving invalidates the token.
 type Binding struct {
-	// Project is the project the plan was made in. A token minted elsewhere
-	// cannot be spent here.
+	// Project scopes the token. One minted elsewhere cannot be spent here.
 	Project string
-	// Manifests are the canonical forms of what would be applied, in the order
-	// they would be applied in. Order is part of the agreement: the same set in
-	// a different order is a different plan.
+	// Manifests are the canonical forms to apply, in apply order. Order is
+	// part of the agreement: the same set reordered is a different plan.
 	Manifests [][]byte
-	// ResourceVersions is the version of the object each manifest would
-	// replace, positionally, and empty where the manifest would create one. A
-	// version that has moved since the plan means somebody else changed the
-	// object, and what the person agreed to is no longer what would happen.
+	// ResourceVersions is the version each manifest would replace,
+	// positionally, and empty where it would create. A moved version means
+	// somebody else changed the object, so the agreed change no longer
+	// describes what would happen.
 	ResourceVersions []string
 }
 
 // ResolveKey returns the key tokens are minted and checked with.
 //
-// A configured key is what a real deployment uses: it survives a restart and is
-// shared between replicas, so a plan made by one process can be applied by
-// another. Without one a random key is generated for this process, which still
-// enforces the whole guarantee within a process — and loses every outstanding
-// plan on restart, and refuses a plan made by a sibling replica. That is a
-// deployment worth warning about loudly, and much better than either refusing
-// to write at all or minting tokens with a key an attacker could guess.
+// A configured key survives restarts and is shared between replicas, so one
+// process can apply another's plan. Without one, this process generates a
+// random key: the guarantee still holds within the process, but a restart
+// loses every outstanding plan and a sibling replica's plan is refused. That
+// warrants a loud warning, and beats refusing to write or minting tokens with
+// a guessable key.
 func ResolveKey(configured string, logger *slog.Logger) ([]byte, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	if configured = strings.TrimSpace(configured); configured != "" {
-		// Accept base64 for a key generated the obvious way, and raw bytes for
-		// one that is simply a long secret string.
+		// Accept base64 for a generated key, raw bytes for a long secret
+		// string.
 		if decoded, err := base64.StdEncoding.DecodeString(configured); err == nil && len(decoded) >= 16 {
 			logger.Info("plantoken.key", "source", "configured", "encoding", "base64")
 			return decoded, nil
@@ -105,12 +92,12 @@ func ResolveKey(configured string, logger *slog.Logger) ([]byte, error) {
 	return key, nil
 }
 
-// Mint returns the token that authorizes applying exactly this plan, until
+// Mint returns the token that authorizes applying exactly this plan until
 // expiry.
 //
-// The form is base64(HMAC-SHA256(payload)) + "." + the expiry in seconds. The
-// expiry travels in the clear because it is also covered by the hash, so moving
-// it invalidates the token rather than extending it.
+// The form is base64(HMAC-SHA256(payload)) + "." + expiry in seconds. The
+// expiry travels in the clear but is covered by the hash, so moving it
+// invalidates the token rather than extending it.
 func Mint(key []byte, binding Binding, expiry time.Time) string {
 	unix := expiry.Unix()
 	return base64.RawURLEncoding.EncodeToString(mac(key, binding, unix)) + "." + strconv.FormatInt(unix, 10)
@@ -119,10 +106,9 @@ func Mint(key []byte, binding Binding, expiry time.Time) string {
 // Verify refuses anything that is not a token minted for exactly this plan and
 // still inside its window.
 //
-// Every refusal is read by a person, so each one says what happened, that
-// nothing was changed, and what to do instead. planTool and applyTool are the
-// tool names to name in that advice, so this package can be used by anything
-// without hard-coding one caller's vocabulary.
+// A person reads every refusal, so each one says what happened, that nothing
+// was changed, and what to do next. planTool names the tool that advice points
+// at, so this package hard-codes no caller's vocabulary.
 func Verify(key []byte, token string, binding Binding, now time.Time, planTool string) error {
 	encoded, expiryText, found := strings.Cut(strings.TrimSpace(token), ".")
 	if !found {
@@ -161,8 +147,8 @@ func Verify(key []byte, token string, binding Binding, now time.Time, planTool s
 }
 
 // mac hashes everything the plan assumed. Each part is length-prefixed so no
-// two different bindings can be built out of the same bytes — without that, two
-// manifests could be split differently and hash the same.
+// two bindings can be built from the same bytes; without it, manifests split
+// differently would hash alike.
 func mac(key []byte, binding Binding, expiryUnix int64) []byte {
 	var payload bytes.Buffer
 	writePart(&payload, []byte(version))

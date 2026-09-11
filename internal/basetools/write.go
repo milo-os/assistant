@@ -15,20 +15,15 @@ import (
 	"github.com/milo-os/assistant/internal/projectapi"
 )
 
-// The write path is three tools, of which exactly one can change anything.
+// The write path is three tools, of which exactly one changes anything.
 //
-// resources_validate asks the platform for its verdict on some manifests
-// without keeping any of them, so it is safe to run as often as it takes to get
-// them right. resources_plan settles what would happen — create or change, in
-// what order, changing what — and returns the manifests it settled on together
-// with a token that is a hash of them. resources_apply takes those manifests
-// and that token, re-derives the hash from what it was actually handed, and
-// refuses anything that does not match.
+// resources_validate returns the platform's verdict and keeps nothing, so it
+// is safe to rerun. resources_plan settles what would happen and returns the
+// manifests plus a token hashing them. resources_apply re-derives that hash
+// from what it was handed and refuses any mismatch.
 //
-// So the only thing that can reach the platform is the change the model already
-// put in front of the person who asked. A change nobody was shown has no token
-// and cannot be applied at all. See internal/plantoken for what the token
-// covers and why.
+// Only a change already shown to the person who asked can reach the platform.
+// See internal/plantoken for what the token covers.
 const (
 	// ResourcesValidateToolName checks manifests without keeping them.
 	ResourcesValidateToolName = "resources_validate"
@@ -42,32 +37,31 @@ const (
 	actionCreate = "create"
 	actionUpdate = "update"
 
-	// fieldManifest is what a rejection names when a manifest could not be
-	// read at all, rather than when the platform named a path inside it.
+	// fieldManifest names a rejection of the whole manifest, as opposed to a
+	// path the platform named inside it.
 	fieldManifest = "manifest"
 
-	// maxManifests bounds one call. A change to more than this at once is not
-	// something a person can read and agree to, which is the only thing the
-	// plan token can protect.
+	// maxManifests bounds one call. Beyond this a person cannot read and agree
+	// to the change, which is all the plan token protects.
 	maxManifests = 20
 
-	// maxDiffLines bounds what one change reports. Past it the person is
-	// reading a wall rather than a change.
+	// maxDiffLines bounds what one change reports. Past it the person reads a
+	// wall rather than a change.
 	maxDiffLines = 60
 )
 
 // MutatingToolNames are the base tools on the change path.
 //
-// resources_apply is the only one that writes; resources_plan is on the list
-// because it is the only thing that can authorize a write, and an operator
-// asking "what can this project's assistant change" wants both answers.
+// resources_apply is the only one that writes. resources_plan is listed too
+// because it alone authorizes a write, and an operator asking what this
+// project's assistant can change wants both answers.
 func MutatingToolNames() []string {
 	return []string{ResourcesPlanToolName, ResourcesApplyToolName}
 }
 
-// writeTools returns the change path, or nil when there is no key to bind a
-// plan with. A service that cannot check a token must not issue something that
-// looks like one, so the write tools are absent rather than broken.
+// writeTools returns the change path, or nil without a key to bind a plan
+// with. A service that cannot check a token must not issue one, so the write
+// tools are absent rather than broken.
 func writeTools(opts Options) map[string]*tool {
 	if len(opts.PlanTokenKey) == 0 {
 		return nil
@@ -83,29 +77,27 @@ func writeTools(opts Options) map[string]*tool {
 
 // ManifestResult is what one manifest would do, and whether it can.
 type ManifestResult struct {
-	// Index is where this manifest was in the list that was passed in.
+	// Index is this manifest's position in the list passed in.
 	Index int `json:"index"`
-	// Kind, Name and Namespace identify what it describes, when they could be
-	// read from it.
+	// Kind, Name and Namespace identify what it describes, where readable.
 	Kind      string `json:"kind,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
 	// Valid is false when the platform rejected it. Nothing can be planned or
-	// applied until it is fixed.
+	// applied until the manifest is fixed.
 	Valid bool `json:"valid"`
 	// Errors are the rejections, each with the field path the platform named.
 	Errors []projectapi.FieldError `json:"errors,omitempty"`
-	// Exists reports whether a resource of this name is already there, which
-	// is what decides between creating one and changing one.
+	// Exists decides between create and update.
 	Exists bool `json:"exists"`
 	// Action is "create" or "update".
 	Action string `json:"action,omitempty"`
-	// Diff is what applying this would change about the existing resource,
-	// taken from what the platform said it would become. Empty for a create,
-	// and empty for a change that changes nothing.
+	// Diff is what applying would change about the existing resource, from
+	// what the platform said it would become. Empty for a create, and for an
+	// update that changes nothing.
 	Diff []string `json:"diff,omitempty"`
-	// Manifest is the canonical form this covers. Present in a plan, where it
-	// is what the token covers and what apply has to be handed back.
+	// Manifest is the canonical form. Present in a plan, where it is what the
+	// token covers and what apply must be handed back.
 	Manifest string `json:"manifest,omitempty"`
 }
 
@@ -115,21 +107,20 @@ type ValidateOutput struct {
 	Results []ManifestResult `json:"results"`
 }
 
-// PlanOutput is everything a person needs to see before agreeing, plus the
-// token that binds their agreement to exactly this.
+// PlanOutput is what a person sees before agreeing, plus the token binding
+// their agreement to exactly this.
 type PlanOutput struct {
-	// Valid is false when anything was rejected. There is no token in that
-	// case and nothing can be applied.
+	// Valid is false when anything was rejected. There is then no token and
+	// nothing can be applied.
 	Valid bool `json:"valid"`
-	// Results are in the order they would be applied in, which is part of what
-	// the token covers.
+	// Results are in apply order, which the token covers.
 	Results []ManifestResult `json:"results"`
-	// PlanToken authorizes applying exactly these manifests, in this order,
-	// and nothing else.
+	// PlanToken authorizes exactly these manifests in this order, and nothing
+	// else.
 	PlanToken string `json:"planToken,omitempty"`
 	// ExpiresAt is when the token stops being accepted, in RFC 3339.
 	ExpiresAt string `json:"expiresAt,omitempty"`
-	// Note says anything about the plan the person should hear.
+	// Note carries anything about the plan the person should hear.
 	Note string `json:"note,omitempty"`
 }
 
@@ -144,8 +135,8 @@ type AppliedResource struct {
 // ApplyOutput is what was done.
 type ApplyOutput struct {
 	Applied []AppliedResource `json:"applied"`
-	// Next is the step that turns an accepted request into something that is
-	// actually running, which are not the same thing.
+	// Next is the step from an accepted request to something actually
+	// running. They are not the same thing.
 	Next string `json:"next"`
 }
 
@@ -310,8 +301,8 @@ func resourcesApply(opts Options) *tool {
 			if err != nil {
 				return "", err
 			}
-			// A manifest that cannot even be read has no canonical form, so
-			// there is nothing to compare a token against.
+			// An unreadable manifest has no canonical form, so there is
+			// nothing to check the token against.
 			for _, item := range items {
 				if len(item.errors) > 0 {
 					return "", fmt.Errorf(
@@ -321,9 +312,8 @@ func resourcesApply(opts Options) *tool {
 				}
 			}
 
-			// The token is checked before anything is written and before
-			// anything is even offered to the platform: a change nobody agreed
-			// to must not reach it at all, not even as a check.
+			// Check the token before offering anything to the platform, even
+			// as a dry run: a change nobody agreed to must not reach it.
 			binding := plantoken.Binding{Project: opts.Project.Name()}
 			for _, item := range items {
 				canonical, err := canonicalJSON(item.desired)
@@ -339,9 +329,9 @@ func resourcesApply(opts Options) *tool {
 				return "", err
 			}
 
-			// Checked once more against the platform, because the plan may
-			// have been made minutes ago and the things it depends on move
-			// underneath it. A rejection here changes nothing.
+			// Re-check against the platform: the plan may be minutes old and
+			// what it depends on can move underneath it. A rejection here
+			// changes nothing.
 			check(ctx, opts, items)
 			for _, item := range items {
 				if len(item.errors) > 0 {
@@ -381,9 +371,9 @@ func resourcesApply(opts Options) *tool {
 	)
 }
 
-// partialFailure reports a change that stopped part-way. What was already done
-// stays done, and saying exactly what that was is the difference between a
-// person who can carry on and one who has to guess.
+// partialFailure reports a change that stopped part-way. What was done stays
+// done, so naming it exactly is what lets the person carry on instead of
+// guessing.
 func partialFailure(applied []AppliedResource, failed *manifestItem, err error) error {
 	if len(applied) == 0 {
 		return fmt.Errorf("nothing was changed: %s %q could not be applied: %w",
@@ -403,13 +393,13 @@ func partialFailure(applied []AppliedResource, failed *manifestItem, err error) 
 
 // manifestItem is one manifest on its way through validate, plan or apply.
 type manifestItem struct {
-	// index is where this manifest was in the list that came in.
+	// index is this manifest's position in the list that came in.
 	index int
-	// desired is the manifest, normalized: what the token is computed over.
+	// desired is the normalized manifest, and what the token covers.
 	desired projectapi.Object
-	// existing is what is there today, or nil when nothing is.
+	// existing is what is there today, or nil for a create.
 	existing projectapi.Object
-	// resourceVersion is the version existing was read at, or "" for a create.
+	// resourceVersion is the version existing was read at, empty for a create.
 	resourceVersion string
 
 	resource  projectapi.Resource
@@ -458,8 +448,8 @@ func readManifestsArg(toolName string, input json.RawMessage) ([]string, error) 
 }
 
 func checkManifestsArg(toolName string, manifests []string) ([]string, error) {
-	// One entry may hold several documents; a person pasting a file gets what
-	// they expect rather than a rejection about shape.
+	// One entry may hold several documents, so pasting a whole file works
+	// rather than being rejected on shape.
 	var split []string
 	for _, manifest := range manifests {
 		split = append(split, splitDocuments(manifest)...)
@@ -488,10 +478,9 @@ func splitDocuments(manifest string) []string {
 	return out
 }
 
-// prepare decodes each manifest, works out what kind it is, and reads what is
-// there today. A manifest that cannot be read becomes a rejection on that one
-// item rather than a failure of the whole call: the other manifests still have
-// verdicts worth reporting.
+// prepare decodes each manifest, resolves its kind, and reads what is there
+// today. An unreadable manifest is rejected on its own item rather than
+// failing the call, so the others still report verdicts.
 func prepare(ctx context.Context, opts Options, manifests []string) ([]*manifestItem, error) {
 	items := make([]*manifestItem, 0, len(manifests))
 	for i, manifest := range manifests {
@@ -518,9 +507,8 @@ func prepare(ctx context.Context, opts Options, manifests []string) ([]*manifest
 		}
 		item.resource = resource
 
-		// The project decides where this goes, never the manifest: one naming
-		// somewhere else would be asking to write somewhere this conversation
-		// does not reach.
+		// The project decides placement, never the manifest: one naming
+		// another namespace would write where this conversation cannot reach.
 		if resource.Namespaced {
 			item.namespace = defaultNamespace
 			if named, ok := projectapi.NestedString(obj, "metadata", "namespace"); ok && named != "" {
@@ -547,9 +535,8 @@ func prepare(ctx context.Context, opts Options, manifests []string) ([]*manifest
 	return items, nil
 }
 
-// check asks the platform for its verdict on each item without keeping
-// anything. A rejection is a result, not a failure: the field paths are what
-// has to be acted on.
+// check asks the platform for a verdict on each item and keeps nothing. A
+// rejection is a result, not a failure; the field paths are what to act on.
 func check(ctx context.Context, opts Options, items []*manifestItem) {
 	for _, item := range items {
 		if item.desired == nil {
@@ -564,7 +551,7 @@ func check(ctx context.Context, opts Options, items []*manifestItem) {
 			err   error
 		)
 		if item.existing != nil {
-			// Checked at the version that was read, so what is checked is the
+			// Check at the version that was read, so the check covers the
 			// change that would actually be made.
 			setResourceVersion(attempt, item.resourceVersion)
 			would, err = opts.Project.Update(ctx, item.resource, attempt, true)
@@ -576,9 +563,9 @@ func check(ctx context.Context, opts Options, items []*manifestItem) {
 			continue
 		}
 		if item.existing != nil && would != nil {
-			// What the platform says it would become, against what is there
-			// now — so the differences are real changes rather than every
-			// value the platform fills in on its own.
+			// Compare what the platform says it would become against what is
+			// there now, so the diff shows real changes rather than every
+			// value the platform fills in itself.
 			item.diff = diff(
 				normalize(item.existing, item.namespace),
 				normalize(would, item.namespace))
@@ -592,8 +579,8 @@ func decodeManifest(manifest string) (projectapi.Object, *projectapi.FieldError)
 		return nil, &projectapi.FieldError{Field: fieldManifest, Message: "a manifest is required"}
 	}
 	var obj projectapi.Object
-	// Strict, so a duplicated field is reported rather than silently dropped
-	// and then missing from a resource somebody was told it was on.
+	// Strict, so a duplicated field is reported rather than dropped and then
+	// missing from a resource somebody was told it was on.
 	if err := sigsyaml.UnmarshalStrict([]byte(manifest), &obj); err != nil {
 		return nil, &projectapi.FieldError{
 			Field:   fieldManifest,
@@ -641,9 +628,9 @@ func setResourceVersion(obj projectapi.Object, resourceVersion string) {
 	metadata["resourceVersion"] = resourceVersion
 }
 
-// canonicalJSON renders what the plan token is computed over. The manifest is
-// normalized first and Go writes map keys in sorted order, so two spellings of
-// the same desired state always produce the same bytes.
+// canonicalJSON renders what the plan token covers. The manifest is
+// normalized first and Go sorts map keys, so two spellings of the same desired
+// state produce the same bytes.
 func canonicalJSON(obj projectapi.Object) ([]byte, error) {
 	raw, err := json.Marshal(obj)
 	if err != nil {
@@ -663,19 +650,17 @@ func fieldErrors(err error) []projectapi.FieldError {
 
 // -------------------------------------------------------------------- order
 
-// inDependencyOrder puts manifests in an order that works: one that refers to
-// another by name goes after it.
+// inDependencyOrder sorts manifests so one referring to another goes after it.
 //
-// A reference is a field whose name ends in "Ref" (or "Refs") carrying a name,
-// which is how this platform's kinds point at each other. Anything with no
-// reference into the rest of the batch keeps the order it was given in, because
-// that is the order the person wrote and there is no reason to disturb it. A
-// cycle cannot be ordered at all, so it falls back to the given order and the
-// platform rejects whichever half cannot be satisfied.
+// A reference is a field ending in "Ref" or "Refs" that carries a name, which
+// is how this platform's kinds point at each other. A manifest referring to
+// nothing in the batch keeps the order the person wrote. A cycle cannot be
+// ordered, so it keeps the given order and the platform rejects whichever half
+// cannot be satisfied.
 func inDependencyOrder(items []*manifestItem) []*manifestItem {
-	// Index what this batch provides, by kind and by bare name. Kind is
-	// checked when the reference declares one, so a reference to a Network
-	// called "web" is not satisfied by a Workload called "web".
+	// Index the batch by bare name. Kind is matched below when the reference
+	// declares one, so a reference to a Network "web" is not satisfied by a
+	// Workload "web".
 	provided := map[string][]int{}
 	for i, item := range items {
 		provided[strings.ToLower(item.name)] = append(provided[strings.ToLower(item.name)], i)
@@ -718,8 +703,7 @@ func inDependencyOrder(items []*manifestItem) []*manifestItem {
 			}
 		}
 		if next == -1 {
-			// Everything left refers to everything else. Nothing can be
-			// ordered, so keep what was given.
+			// A cycle: nothing can be ordered, so keep the given order.
 			for i := range items {
 				if !emitted[i] {
 					next = i
@@ -733,7 +717,7 @@ func inDependencyOrder(items []*manifestItem) []*manifestItem {
 	return ordered
 }
 
-// reference is one pointer from a manifest to something else.
+// reference is one pointer from a manifest to another resource.
 type reference struct {
 	kind string
 	name string
@@ -789,12 +773,11 @@ func readReferences(value any) []reference {
 
 // --------------------------------------------------------------------- diff
 
-// diff reports what changes between two manifests, as one line per field.
+// diff reports what changes between two manifests, one line per field.
 //
-// Kind-agnostic on purpose: these tools work with kinds this repository has
-// never compiled in, so there is nothing to compare field by field. Both sides
-// are flattened to paths and values and the paths compared, which reads well
-// for exactly the changes a person makes.
+// Kind-agnostic on purpose: these tools serve kinds this repository never
+// compiled in, so there is no typed schema to compare. Both sides flatten to
+// path/value pairs and the paths are compared.
 func diff(before, after projectapi.Object) []string {
 	from := flatten(before)
 	to := flatten(after)

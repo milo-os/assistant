@@ -343,9 +343,8 @@ func TestLoad_PlatformAPICanBeNamedSeparately(t *testing.T) {
 	}
 }
 
-// A plan token is a hash of exactly what a person was shown; the key is what
-// lets a plan survive a restart and be applied by another replica. Unset is a
-// supported (and warned-about) posture, not a boot failure.
+// The key lets a plan survive a restart and be applied by another replica.
+// Unset is a supported, warned-about posture, not a boot failure.
 func TestLoad_PlanTokenKeyIsOptional(t *testing.T) {
 	cfg, err := load(t, nil)
 	if err != nil {

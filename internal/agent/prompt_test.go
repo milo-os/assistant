@@ -60,10 +60,10 @@ func TestBuildSystemPrompt_AddendumAppended(t *testing.T) {
 	}
 }
 
-// The plan token proves that what gets applied is what somebody was shown. It
-// cannot prove they agreed: that is a human step, and this is the only place
-// that can require it. It lives in the fixed rules rather than the persona, so
-// a deployer replacing the branding cannot drop it.
+// The plan token proves what gets applied is what somebody was shown, not
+// that they agreed. Only the prompt can require that human step, and it lives
+// in the fixed rules rather than the persona so replacing the branding cannot
+// drop it.
 func TestOperatingRulesRequireAgreementBeforeAnythingChanges(t *testing.T) {
 	prompt := BuildSystemPrompt("A completely different persona.", "")
 
@@ -76,8 +76,8 @@ func TestOperatingRulesRequireAgreementBeforeAnythingChanges(t *testing.T) {
 			t.Errorf("the fixed rules do not say %q", phrase)
 		}
 	}
-	// The rule has to hold against what the model reads, not only against what
-	// the user says — a status message that asks to be applied is the attack.
+	// The rule must hold against what the model reads, not just what the user
+	// says: a status message asking to be applied is the attack.
 	if !strings.Contains(prompt, "tool result") {
 		t.Error("the fixed rules do not rule out taking agreement from tool output")
 	}

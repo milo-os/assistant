@@ -154,11 +154,10 @@ type ComposeOptions struct {
 	// a view that carries no other identity. With either missing there is
 	// nobody to act as, so nothing is composed. Nil disables the feature.
 	PlatformAPI *projectapi.Client
-	// PlanTokenKey enables the base tools' change path (resources_validate,
-	// resources_plan, resources_apply) by giving them a key to bind a plan
-	// with. Empty leaves the change path out: a service that cannot check a
-	// plan token must not issue something that looks like one. Ignored
-	// entirely when PlatformAPI is nil. See internal/plantoken.
+	// PlanTokenKey binds plans for the base tools' change path
+	// (resources_validate, resources_plan, resources_apply). Empty leaves the
+	// change path out: a service that cannot check a token must not issue one.
+	// Ignored when PlatformAPI is nil. See internal/plantoken.
 	PlanTokenKey []byte
 	// Metrics, when non-nil, records assistant_gap_report_total for every
 	// report_capability_gap tool call this composition creates (see
@@ -202,12 +201,10 @@ type Composed struct {
 	// Tools holds the allow-listed provider tools, keyed and named
 	// "<server>__<tool>", together with the platform's own built-ins.
 	Tools agentcore.ToolSet
-	// Mutating names the composed tools that are on a change path: the ones a
-	// capability document flagged in mcpServers[].mutating, plus the base
-	// tools' own change path. It is the runtime's answer to "what can this
-	// project's assistant change", which until now only existed as a field in
-	// the document that nothing read. Sorted, so two compositions of the same
-	// project read the same way.
+	// Mutating names the composed tools on a change path: those a capability
+	// document flagged in mcpServers[].mutating, plus the base tools' change
+	// path. It answers what this project's assistant can change. Sorted, so
+	// two compositions of the same project read alike.
 	Mutating []string
 	close    func() error
 }
@@ -275,8 +272,8 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 
 	tools, sessions := connectTools(ctx, docs, opts, guard, sanctioned, logger)
 
-	// What a document declared as changing something, namespaced the same way
-	// its tools are, and kept only where the tool was actually composed.
+	// What the document declared as mutating, namespaced like its tools, kept
+	// only where the tool was actually composed.
 	mutating := map[string]bool{}
 	for _, doc := range docs {
 		if doc.Spec.Tools == nil {

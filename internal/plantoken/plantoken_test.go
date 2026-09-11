@@ -33,7 +33,7 @@ func TestATokenCoversTheThingItWasMintedFor(t *testing.T) {
 	}
 }
 
-// One character is enough. This is the whole point of the scheme.
+// One changed character is enough.
 func TestATamperedManifestIsRefused(t *testing.T) {
 	token := mintNow(t, binding())
 
@@ -47,9 +47,9 @@ func TestATamperedManifestIsRefused(t *testing.T) {
 	assertRefusalIsUseful(t, err.Error(), "resources_plan")
 }
 
-// The same manifests in a different order are a different plan: a plan is an
-// order as much as a set, and applying two changes the other way round can mean
-// something entirely different.
+// The same manifests reordered are a different plan: order is part of the
+// agreement, and applying two changes the other way round can mean something
+// else entirely.
 func TestReorderedManifestsAreRefused(t *testing.T) {
 	planned := binding()
 	planned.Manifests = [][]byte{[]byte(`{"kind":"Network"}`), []byte(`{"kind":"Workload"}`)}
@@ -75,8 +75,8 @@ func TestATokenFromAnotherProjectIsRefused(t *testing.T) {
 	}
 }
 
-// Somebody else changing the object in the meantime means what the person
-// agreed to is no longer what would happen.
+// Somebody else changing the object means the agreed change no longer
+// describes what would happen.
 func TestAMovedResourceVersionIsRefused(t *testing.T) {
 	token := mintNow(t, binding())
 
@@ -146,8 +146,8 @@ func TestATokenFromAnotherKeyIsRefused(t *testing.T) {
 	}
 }
 
-// Two bindings that differ only in where the boundary between manifests falls
-// must not hash the same.
+// Two bindings differing only in where the manifest boundary falls must not
+// hash alike.
 func TestManifestBoundariesAreUnambiguous(t *testing.T) {
 	one := plantoken.Binding{Project: "p", Manifests: [][]byte{[]byte("ab"), []byte("c")}}
 	two := plantoken.Binding{Project: "p", Manifests: [][]byte{[]byte("a"), []byte("bc")}}
@@ -184,8 +184,8 @@ func TestResolveKeyRefusesASecretTooShortToBeOne(t *testing.T) {
 	}
 }
 
-// Without a configured key the service still enforces the whole guarantee — it
-// just cannot carry a plan across a restart, and says so loudly.
+// Without a configured key the guarantee still holds. A plan just cannot
+// cross a restart, and the service says so loudly.
 func TestResolveKeyGeneratesOneAndWarns(t *testing.T) {
 	var logged bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))

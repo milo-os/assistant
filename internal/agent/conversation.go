@@ -138,8 +138,8 @@ type Deps struct {
 	PlatformAPI *projectapi.Client
 	// PlanTokenKey enables the base tools' change path (resources_validate,
 	// resources_plan, resources_apply). Empty leaves it out: a service that
-	// cannot check a plan token must not issue something that looks like one.
-	// Ignored when PlatformAPI is nil. See internal/plantoken.
+	// cannot check a token must not issue one. Ignored when PlatformAPI is
+	// nil. See internal/plantoken.
 	PlanTokenKey []byte
 	// GapReports backs the report_capability_gap__<service> tools: lets
 	// the model flag that a provider service is missing a tool or lookup

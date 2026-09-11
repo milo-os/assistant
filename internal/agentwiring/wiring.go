@@ -157,9 +157,8 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		return nil, nil, nil, err
 	}
 
-	// The key the change path binds a plan with. Resolved even when there is
-	// no platform API to use it, so a deployment with a bad key hears about it
-	// at boot rather than the first time somebody tries to change something.
+	// Resolve the plan-token key even without a platform API to use it, so a
+	// bad key fails at boot rather than at the first attempted change.
 	planTokenKey, err := plantoken.ResolveKey(cfg.PlanTokenKey, log)
 	if err != nil {
 		return nil, nil, nil, err

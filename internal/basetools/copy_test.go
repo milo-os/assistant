@@ -76,7 +76,7 @@ func TestEveryToolSaysWhatItDoesAndWhetherItWrites(t *testing.T) {
 		}
 		switch name {
 		case basetools.ResourcesApplyToolName:
-			// The one tool that writes. It has to say what it takes to call it.
+			// The one tool that writes. It must say what calling it takes.
 			if !strings.Contains(definition.Description, "said yes") {
 				t.Errorf("%s: the only tool that writes must say what it takes to call it", name)
 			}
@@ -117,8 +117,8 @@ func TestThePromptSectionNamesTheToolsItDescribes(t *testing.T) {
 	}
 }
 
-// The step between a plan and an apply is a person, and the prompt is the only
-// place that can require it.
+// A person stands between plan and apply, and only the prompt can require
+// that step.
 func TestThePromptSectionRequiresAnExplicitYes(t *testing.T) {
 	section := basetools.PromptSection(true)
 	for _, name := range []string{
