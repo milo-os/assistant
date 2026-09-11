@@ -1,0 +1,80 @@
+name: Release Plugin
+
+# Builds and publishes the milo-assistant datumctl plugin, then opens a PR
+# against the datumctl plugin catalog. Separate from build.yaml, which publishes
+# the service image and kustomize bundle, so the plugin's release cadence stays
+# independent of the service's.
+
+on:
+  release:
+    types: ["published"]
+
+jobs:
+  # Publishes per-platform archives plus checksums.txt as release assets. The
+  # catalog entry references these asset names and the bump automation reads
+  # their basenames, so renaming them breaks both.
+  #
+  # Gated on `release: published` rather than the tag push: publishing a release
+  # fires both, so gating here runs once and gives goreleaser a real release to
+  # attach artifacts to.
+  publish-plugin:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Syft CLI
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Bumps the catalog entry to this release: version, per-platform URLs, and
+  # sha256s refreshed from checksums.txt. Depends on publish-plugin so those
+  # assets exist before they are read.
+  #
+  # Mint and use the App token in ONE job: a token minted in a separate job and
+  # passed through outputs is scrubbed to empty, because masked values do not
+  # survive a job hop.
+  update-plugin-index:
+    needs:
+      - publish-plugin
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      # The App must be installed on the catalog repo with pull-request write.
+      # It is currently scoped to milo-os/cli-plugins only, so this step fails
+      # until that installation is widened -- and a catalog entry whose bump
+      # automation never runs silently freezes at whatever version landed first.
+      - name: Mint catalog token from the GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.PLUGIN_INDEX_APP_ID }}
+          private-key: ${{ secrets.PLUGIN_INDEX_APP_PRIVATE_KEY }}
+          owner: datum-cloud
+          repositories: datumctl-plugins
+
+      - name: Open the catalog PR
+        uses: datum-cloud/actions/update-plugin-index@v1.18.0
+        with:
+          index-repo: datum-cloud/datumctl-plugins
+          plugin-name: assistant
+          version: ${{ github.event.release.tag_name }}
+          token: ${{ steps.app-token.outputs.token }}
