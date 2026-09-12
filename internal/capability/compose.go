@@ -9,14 +9,17 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/agentcore/mcptool"
+	"github.com/milo-os/assistant/internal/basetools"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/memory"
 	appmetrics "github.com/milo-os/assistant/internal/metrics"
+	"github.com/milo-os/assistant/internal/projectapi"
 )
 
 // Tool composition defaults (Tier 2).
@@ -222,6 +225,23 @@ type ComposeOptions struct {
 	// tools but no reportingProject simply gets no gap-report tool. Nil
 	// disables the feature entirely.
 	GapReports gapreport.Store
+	// PlatformAPI, when non-nil, adds the base platform tools (see
+	// internal/basetools) to every project's composition: read this project's
+	// resources of any kind, describe a kind, list where a service is offered,
+	// report what the allowance has left. They are not one provider's
+	// contribution, so they are not namespaced under a service and are not
+	// allow-listed by a capability document — they are what every project has.
+	//
+	// They run as the CALLER and only as the caller: the client is bound to
+	// Caller.BearerToken and ExpectedProject here, once, and the tools receive
+	// a view that carries no other identity. With either missing there is
+	// nobody to act as, so nothing is composed. Nil disables the feature.
+	PlatformAPI *projectapi.Client
+	// PlanTokenKey binds plans for the base tools' change path
+	// (resources_validate, resources_plan, resources_apply). Empty leaves the
+	// change path out: a service that cannot check a token must not issue one.
+	// Ignored when PlatformAPI is nil. See internal/plantoken.
+	PlanTokenKey []byte
 	// Metrics, when non-nil, records assistant_gap_report_total for every
 	// report_capability_gap tool call this composition creates (see
 	// internal/metrics). Nil disables recording only — GapReports still
@@ -261,10 +281,25 @@ func knownCapabilityKeys(ctx context.Context, store gapreport.Store, doc Capabil
 type Composed struct {
 	// SystemPromptAddendum is "" when no document contributed knowledge.
 	SystemPromptAddendum string
-	// Tools holds exactly the allow-listed provider tools, keyed and named
-	// "<server>__<tool>".
+	// Tools holds the allow-listed provider tools, keyed and named
+	// "<server>__<tool>", together with the platform's own built-ins.
 	Tools agentcore.ToolSet
-	close func() error
+	// Mutating names the composed tools on a change path: those a capability
+	// document flagged in mcpServers[].mutating, plus the base tools' change
+	// path. It answers what this project's assistant can change. Sorted, so
+	// two compositions of the same project read alike.
+	Mutating []string
+	close    func() error
+}
+
+// IsMutating reports whether a composed tool is on a change path.
+func (c *Composed) IsMutating(name string) bool {
+	for _, mutating := range c.Mutating {
+		if mutating == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Close closes every MCP session opened during composition. It is safe to call
@@ -337,6 +372,23 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 	// many servers or sources it declared.
 	reportComposed(docs, knowledgeErrs, toolErrs, opts.OnDocumentComposed, logger)
 
+	// What the document declared as mutating, namespaced like its tools, kept
+	// only where the tool was actually composed.
+	mutating := map[string]bool{}
+	for _, doc := range docs {
+		if doc.Spec.Tools == nil {
+			continue
+		}
+		for _, server := range doc.Spec.Tools.MCPServers {
+			for _, toolName := range server.Mutating {
+				namespaced := NamespaceToolName(server.Name, toolName)
+				if _, composed := tools[namespaced]; composed {
+					mutating[namespaced] = true
+				}
+			}
+		}
+	}
+
 	// Skills: descriptions into the prompt, bodies behind the built-in
 	// load_skill tool (progressive disclosure).
 	skills := collectSkills(docs, logger)
@@ -377,6 +429,40 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		}
 	}
 
+	// Base platform tools: always present, never namespaced, always the
+	// caller's own identity. Registered before the gap-report tools and after
+	// the provider ones, which cannot collide with them: every provider name
+	// carries the "<server>__" prefix.
+	if opts.PlatformAPI != nil && opts.ExpectedProject != "" && opts.Caller.BearerToken != "" {
+		base := basetools.Tools(basetools.Options{
+			Project:      opts.PlatformAPI.As(opts.ExpectedProject, opts.Caller.BearerToken),
+			PlanTokenKey: opts.PlanTokenKey,
+			Logger:       logger,
+		})
+		for name, t := range base {
+			if _, exists := tools[name]; exists {
+				continue // first registration wins, deterministically
+			}
+			tools[name] = t
+		}
+		if len(base) > 0 {
+			writePath := false
+			for _, name := range basetools.MutatingToolNames() {
+				if _, composed := base[name]; composed {
+					mutating[name] = true
+					writePath = true
+				}
+			}
+			if section := basetools.PromptSection(writePath); section != "" {
+				if addendum == "" {
+					addendum = section
+				} else {
+					addendum = addendum + "\n\n" + section
+				}
+			}
+		}
+	}
+
 	// Capability-gap reporting: one tool instance per document that declares
 	// a ReportingProject, closed over THAT document's own ServiceName and
 	// ReportingProject. The model's tool input never carries a project or
@@ -405,10 +491,17 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		}
 	}
 
+	mutatingNames := make([]string, 0, len(mutating))
+	for name := range mutating {
+		mutatingNames = append(mutatingNames, name)
+	}
+	sort.Strings(mutatingNames)
+
 	closed := false
 	return &Composed{
 		SystemPromptAddendum: addendum,
 		Tools:                tools,
+		Mutating:             mutatingNames,
 		close: func() error {
 			if closed {
 				return nil

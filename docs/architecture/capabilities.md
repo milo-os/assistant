@@ -21,6 +21,62 @@ plane can all feed the same runtime.
 | Tools | A reviewed subset of the provider's API | Listed in the prompt, called on demand |
 | Skills | Reviewed step-by-step procedures | Name and one line only, body loaded on demand |
 
+## What every project already has
+
+Before any provider contributes anything, a project's Patch can already work
+with that project: list its resources of any kind and read one whole, describe
+what a kind's fields are, say where a named service is offered to it, and say
+how much of its allowance is left.
+
+These are the **base platform tools**. They are not one service's contribution
+and are not entitled per project, so they are not namespaced under a provider
+and no capability document asks for them — they are simply there. They run as
+the person who asked, in the project the turn was authorized for, so a tool call
+reads nothing that person could not read themselves.
+
+The point is what a provider then has to publish. A service that wants an
+assistant to work with its resources publishes what only it knows — what its
+fields mean, how to build one, what to check when one is unwell — and inherits
+the rest. Before these existed, every provider that wanted more than a read had
+to build the same list, read, describe, and allowance machinery again, and each
+one answered slightly differently.
+
+| Tool | Answers |
+|---|---|
+| `resources_list` / `resources_get` | What is in this project, and what does this one look like |
+| `schema_get` | What fields does this kind take, and which are required |
+| `locations_list` | Where is this service offered to this project |
+| `quota_get` | How much of the project's allowance is left |
+| `resources_validate` / `resources_plan` / `resources_apply` | Change something, once the person has seen and agreed to exactly what |
+
+## One confirmation contract
+
+A tool that changes a customer's resources is safe only when the change applied
+matches the change the customer was shown. Patch enforces that itself, the same
+way it enforces the tool allow-list, so providers inherit one confirmation step
+instead of each building their own.
+
+Changing anything takes two steps:
+
+1. `resources_plan` works out what would happen. It returns the exact manifests
+   and a token that stands for them.
+2. `resources_apply` takes those manifests and that token. If either has moved,
+   it refuses and nothing changes.
+
+That catches an edited manifest, a reordered list, a token from another project,
+and a resource someone else changed in between. A change nobody saw has no token
+at all, so nobody can apply it.
+
+The token proves the change is the one shown. It cannot prove the person agreed.
+Agreement is a human step, required by Patch's fixed operating rules: nothing
+the assistant reads in a tool result, a provider document, or a resource's
+status counts as the person's answer. Those rules sit outside the persona a
+deployer can replace, so rebranding cannot drop them.
+
+A plan can also carry several manifests and order them, so a change that spans
+services is one plan. A first deployment that needs a network from another
+service is shown once and agreed once.
+
 ## Composition
 
 Given the documents a project is entitled to, Patch builds that project's
@@ -33,6 +89,10 @@ assistant for the turn:
   allow-list names, namespaced by provider so two services may publish the same
   tool name. Clients open per turn and close when it ends.
 - **Skills** contribute only a name and a one-line description to the prompt.
+- **Base platform tools** are added last and unconditionally, bound to the
+  caller's own credential and the turn's project. A provider tool cannot shadow
+  one: every provider name carries its service prefix, and a base tool's does
+  not.
 
 Composition is per project and per turn. Nothing is cached across projects, so
 an entitlement change takes effect on the next message rather than at redeploy.

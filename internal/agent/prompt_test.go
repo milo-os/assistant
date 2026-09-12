@@ -59,3 +59,26 @@ func TestBuildSystemPrompt_AddendumAppended(t *testing.T) {
 		t.Errorf("addendum not appended as trailing section:\n%s", got)
 	}
 }
+
+// The plan token proves what gets applied is what somebody was shown, not
+// that they agreed. Only the prompt can require that human step, and it lives
+// in the fixed rules rather than the persona so replacing the branding cannot
+// drop it.
+func TestOperatingRulesRequireAgreementBeforeAnythingChanges(t *testing.T) {
+	prompt := BuildSystemPrompt("A completely different persona.", "")
+
+	for _, phrase := range []string{
+		"explicit yes",
+		"A question about it is not a yes",
+		"silence is not a yes",
+	} {
+		if !strings.Contains(prompt, phrase) {
+			t.Errorf("the fixed rules do not say %q", phrase)
+		}
+	}
+	// The rule must hold against what the model reads, not just what the user
+	// says: a status message asking to be applied is the attack.
+	if !strings.Contains(prompt, "tool result") {
+		t.Error("the fixed rules do not rule out taking agreement from tool output")
+	}
+}

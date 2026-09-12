@@ -51,6 +51,28 @@ jobs:
       registry-organization: milo-os
     secrets: inherit
 
+  # Deployed as a Component (config/components/consumer-ui-plugin) folded into
+  # patch-assistant's own kustomize bundle/Flux Kustomization — no separate
+  # bundle for this image. Same shape as compute's consumer-ui-plugin image job.
+  publish-consumer-ui-plugin-image:
+    needs:
+      - validate-kustomize
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.14.0
+    with:
+      image-name: assistant-consumer-ui-plugin
+      context: ui/consumer
+      dockerfile-path: ui/consumer/Dockerfile
+      registry-organization: milo-os
+    secrets: inherit
+
   publish-kustomize-bundle:
     # The image must exist before the bundle that pins it — publishing the bundle
     # is what triggers the Flux rollout.
@@ -61,19 +83,25 @@ jobs:
     needs:
       - validate-kustomize
       - publish-container-image
+      - publish-consumer-ui-plugin-image
     permissions:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.14.0
+    # v1.14.0 (still used by the plain single-image publish-docker.yaml calls
+    # above) predates the multi-image `images:` input this job relies on —
+    # that input was added in v1.15.0 and confirmed present as of v1.21.0.
+    # An undefined `with:` key against an older pin fails at workflow
+    # validation before any job runs ("startup_failure"), which is exactly
+    # what broke this job after the consumer-ui-plugin image was added.
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.21.0
     with:
       bundle-name: ghcr.io/milo-os/assistant-kustomize
       # The whole config/ tree, so the bundle root carries both
       # ./overlays/production and ./milo — the two paths infra's Flux
       # Kustomizations point at.
       bundle-path: config
-      # Stamp the released tag into base; every overlay composes it, and the
-      # apiserver Deployment runs the same image, so one pin covers both.
-      image-overlays: config/base
-      image-name: ghcr.io/milo-os/assistant
+      images: |
+        - { path: config/base, name: ghcr.io/milo-os/assistant, tag: "${{ needs.publish-container-image.outputs.tag }}" }
+        - { path: config/components/consumer-ui-plugin, name: ghcr.io/milo-os/assistant-consumer-ui-plugin, tag: "${{ needs.publish-consumer-ui-plugin-image.outputs.tag }}" }
     secrets: inherit

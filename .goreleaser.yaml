@@ -1,0 +1,65 @@
+# GoReleaser config for the milo-assistant datumctl plugin.
+#
+# Release by publishing a GitHub release for a semver tag. The release workflow
+# runs goreleaser, which builds the plugin per platform and attaches the
+# archives plus checksums.txt as release assets. The datumctl plugin catalog
+# entry references these exact asset names, and the bump automation keys off
+# their basenames, so name_template must not change casually.
+#
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: milo-assistant
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: milo-assistant
+    # cmd/milo-assistant is the plugin: it answers datumctl's manifest
+    # handshake. cmd/patch is the standalone binary and is not what ships here.
+    main: ./cmd/milo-assistant
+    binary: milo-assistant
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # main.version, not main.pluginVersion. The variable name differs from
+    # milo-search's; copying that one leaves the released binary reporting "dev"
+    # to datumctl's manifest handshake.
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+
+archives:
+  - id: milo-assistant
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

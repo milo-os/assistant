@@ -21,6 +21,7 @@ import (
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
 	appmetrics "github.com/milo-os/assistant/internal/metrics"
+	"github.com/milo-os/assistant/internal/projectapi"
 	"github.com/milo-os/assistant/internal/usage"
 )
 
@@ -127,6 +128,19 @@ type Deps struct {
 	// History, which is per-conversation and windowed). Nil disables the
 	// feature — no tools are composed.
 	Memory memory.Store
+	// PlatformAPI backs the base platform tools (resources_list,
+	// resources_get, schema_get, locations_list, quota_get and, when a plan
+	// token key is configured, the write path). Unlike a provider's tools
+	// these are not entitled per project and not namespaced under a service:
+	// every project has them. They act as the CALLER — composition binds the
+	// client to the caller's own bearer token and the turn's project — so the
+	// service reads nothing of its own. Nil disables them entirely.
+	PlatformAPI *projectapi.Client
+	// PlanTokenKey enables the base tools' change path (resources_validate,
+	// resources_plan, resources_apply). Empty leaves it out: a service that
+	// cannot check a token must not issue one. Ignored when PlatformAPI is
+	// nil. See internal/plantoken.
+	PlanTokenKey []byte
 	// GapReports backs the report_capability_gap__<service> tools: lets
 	// the model flag that a provider service is missing a tool or lookup
 	// a user needed, written to THAT PROVIDER's own project (see
@@ -336,15 +350,16 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		AllowPrivateNetworks: c.deps.AllowPrivateCapabilityNetworks,
 		Caller:               caller,
 		IdentityForwardHosts: c.deps.CapabilityIdentityForwardHosts,
+		Memory:               c.deps.Memory,
+		PlatformAPI:          c.deps.PlatformAPI,
+		PlanTokenKey:         c.deps.PlanTokenKey,
+		ExpectedProject:      params.ProjectName,
+		GapReports:           c.deps.GapReports,
+		Metrics:              c.deps.Metrics,
+		ContextID:            params.ContextID,
 
 		AllowedMCPEndpointHosts: c.deps.CapabilityMCPEndpointHosts,
 		OnDocumentComposed:      c.composeObserver(params),
-
-		Memory:          c.deps.Memory,
-		ExpectedProject: params.ProjectName,
-		GapReports:      c.deps.GapReports,
-		Metrics:         c.deps.Metrics,
-		ContextID:       params.ContextID,
 		OnToolInvocation: func(inv capability.ProviderToolInvocation) {
 			mu.Lock()
 			invocations = append(invocations, inv)
@@ -388,7 +403,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		Model:           tracedModel(c.deps.Model, c.deps.Metrics),
 		System:          system,
 		Messages:        messages,
-		Tools:           tracedTools(composed.Tools, c.deps.Metrics),
+		Tools:           tracedTools(composed.Tools, composed.Mutating, c.deps.Metrics),
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),
@@ -463,24 +478,30 @@ func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []
 	if history.EstimateTokens(turns) <= threshold {
 		return turns
 	}
-	return c.compactNow(ctx, params, turns)
+	// Fail open: compactNow already logged and counted the failure, and
+	// returns turns unchanged, so the turn proceeds on plain Truncate.
+	compacted, _ := c.compactNow(ctx, params, turns)
+	return compacted
 }
 
 // compactNow synchronously summarizes the oldest SummaryBatchTurns turns into
 // one digest and persists [summary]+keep via History.Compact, unconditionally
 // (no threshold check — callers gate that themselves). On any failure
-// (summarize errors, or Compact errors), it returns turns unchanged —
-// compaction never blocks or fails the turn; the caller falls open to plain
-// Truncate exactly as before this feature existed
-// (docs/conversation-summarization-design.md #4).
+// (summarize errors, or Compact errors) it returns turns unchanged plus the
+// error, having already logged and counted it; the automatic caller drops
+// that error and falls open to plain Truncate exactly as before this feature
+// existed (docs/enhancements/conversation-summarization.md #4), while the
+// manual caller reports it. A nil error means the rewrite was persisted —
+// the only trustworthy signal of that, since a digest of a short
+// conversation can legitimately be no smaller than what it replaced.
 //
 // Because the batch is always turns[:batchLen] starting at index 0, a summary
 // turn already at the head of turns (a conversation compacted before) is
 // folded into the new digest alongside the newly-aging raw turns — anchored
 // iterative summarization, not a one-shot summary that never updates again.
-func (c *Conversation) compactNow(ctx context.Context, params Params, turns []history.Turn) []history.Turn {
+func (c *Conversation) compactNow(ctx context.Context, params Params, turns []history.Turn) ([]history.Turn, error) {
 	if len(turns) == 0 {
-		return turns
+		return turns, nil
 	}
 
 	batchLen := SummaryBatchTurns
@@ -495,20 +516,20 @@ func (c *Conversation) compactNow(ctx context.Context, params Params, turns []hi
 		c.logger.Warn("agent.history.summarize_failed",
 			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
 		c.deps.Metrics.RecordCompaction("failed_open")
-		return turns
+		return turns, fmt.Errorf("agent: compact: summarize: %w", err)
 	}
 	if err := c.deps.History.Compact(ctx, params.ProjectName, params.ContextID, summary, keep); err != nil {
 		c.logger.Warn("agent.history.compact_failed",
 			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
 		c.deps.Metrics.RecordCompaction("failed_open")
-		return turns
+		return turns, fmt.Errorf("agent: compact: persist history: %w", err)
 	}
 	c.deps.Metrics.RecordCompaction("success")
 
 	compacted := make([]history.Turn, 0, 1+len(keep))
 	compacted = append(compacted, summary)
 	compacted = append(compacted, keep...)
-	return compacted
+	return compacted, nil
 }
 
 // ErrNothingToCompact is returned by [Conversation.Compact] when the
@@ -539,12 +560,11 @@ func (c *Conversation) Compact(ctx context.Context, params Params) error {
 		return ErrNothingToCompact
 	}
 
-	before := history.EstimateTokens(turns)
-	after := c.compactNow(ctx, params, turns)
-	if history.EstimateTokens(after) >= before {
-		return fmt.Errorf("agent: compact: summarization failed, history left unchanged")
-	}
-	return nil
+	// Report what compactNow actually did, not whether the digest came out
+	// smaller: a persisted rewrite that failed to shrink is still a success,
+	// and calling it a failure would misreport the state of the store.
+	_, err = c.compactNow(ctx, params, turns)
+	return err
 }
 
 // summarize issues one plain, non-tool model completion over turns and

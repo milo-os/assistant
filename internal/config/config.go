@@ -203,6 +203,30 @@ type Config struct {
 	// are untrusted (then prefer a host allow-list). Default false = safe.
 	AllowPrivateCapabilityNetworks bool
 
+	// PlatformAPIURL is the platform API the base tools read and write a
+	// project's own resources through (env PLATFORM_API_URL). Unset defaults to
+	// the SubjectAccessReview endpoint: the platform that decides whether a
+	// caller may act on a project is the same one that serves that project's
+	// resources, so a deployment that names one has already named the other.
+	//
+	// The service holds no credential for this endpoint. Every request over it
+	// carries the calling user's own bearer token (see internal/projectapi),
+	// which is why there is no token path here to go with it.
+	PlatformAPIURL string
+
+	// PlatformAPICACertPath verifies the platform API's certificate (env
+	// PLATFORM_API_CA_CERT_PATH). Unset defaults to the SubjectAccessReview CA
+	// bundle, which is the same server.
+	PlatformAPICACertPath string
+
+	// PlanTokenKey binds plans for the base tools' change path (env
+	// PLAN_TOKEN_KEY; base64 or a raw string of at least 16 bytes). Setting it
+	// lets one process apply another's plan and survives restarts. Unset
+	// generates a key per process with a startup warning: the guarantee still
+	// holds, but an outstanding plan is lost on restart and refused by a
+	// sibling replica. See internal/plantoken.
+	PlanTokenKey string
+
 	// CapabilityIdentityForwardHosts are the operator-sanctioned MCP endpoint
 	// hosts that may receive the calling user's bearer token and the turn's
 	// project (comma-separated env; exact or domain-suffix match). Empty (the
@@ -337,6 +361,16 @@ func Load(getenv func(string) string) (*Config, error) {
 	sarClientCertPath := env("AUTHZ_SAR_CLIENT_CERT_PATH")
 	sarClientKeyPath := env("AUTHZ_SAR_CLIENT_KEY_PATH")
 
+	// ── Platform API (the base tools' read/write path) ────────
+	platformAPIURL := strings.TrimRight(env("PLATFORM_API_URL"), "/")
+	if platformAPIURL == "" {
+		platformAPIURL = sarAPIURL
+	}
+	platformAPICACertPath := env("PLATFORM_API_CA_CERT_PATH")
+	if platformAPICACertPath == "" {
+		platformAPICACertPath = sarCACertPath
+	}
+
 	// ── Model ─────────────────────────────────────────────────
 	anthropicKey := env("ANTHROPIC_API_KEY")
 	gatewayURL := env("GATEWAY_URL")
@@ -426,6 +460,9 @@ func Load(getenv func(string) string) (*Config, error) {
 			TokenReviewClientCertPath: tokenReviewClientCertPath,
 			TokenReviewClientKeyPath:  tokenReviewClientKeyPath,
 		},
+		PlatformAPIURL:                 platformAPIURL,
+		PlanTokenKey:                   env("PLAN_TOKEN_KEY"),
+		PlatformAPICACertPath:          platformAPICACertPath,
 		CapabilitySource:               capabilitySource,
 		CapabilityDocsFixture:          capabilityDocsFixture,
 		CapabilityProviderURL:          capabilityProviderURL,

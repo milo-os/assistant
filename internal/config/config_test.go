@@ -431,3 +431,57 @@ func TestLoad_CapabilityIdentityForwardHostsDefaultEmpty(t *testing.T) {
 		t.Fatalf("hosts = %v, want none", cfg.CapabilityIdentityForwardHosts)
 	}
 }
+
+// ── platform API (the base tools' read/write path) ─────────────
+
+// The platform that decides whether a caller may act on a project is the same
+// one that serves that project's resources, so a deployment that named one has
+// already named the other and configures nothing extra.
+func TestLoad_PlatformAPIDefaultsToTheAuthorizationEndpoint(t *testing.T) {
+	cfg, err := load(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlatformAPIURL != cfg.Auth.SARAPIURL {
+		t.Errorf("platform api url = %q, want the SAR endpoint %q", cfg.PlatformAPIURL, cfg.Auth.SARAPIURL)
+	}
+	if cfg.PlatformAPICACertPath != cfg.Auth.SARCACertPath {
+		t.Errorf("platform api CA = %q, want the SAR CA %q", cfg.PlatformAPICACertPath, cfg.Auth.SARCACertPath)
+	}
+}
+
+func TestLoad_PlatformAPICanBeNamedSeparately(t *testing.T) {
+	cfg, err := load(t, map[string]string{
+		"PLATFORM_API_URL":          "https://api.datum.test/",
+		"PLATFORM_API_CA_CERT_PATH": "/etc/platform/ca.crt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlatformAPIURL != "https://api.datum.test" {
+		t.Errorf("platform api url = %q, want the trailing slash trimmed", cfg.PlatformAPIURL)
+	}
+	if cfg.PlatformAPICACertPath != "/etc/platform/ca.crt" {
+		t.Errorf("platform api CA = %q", cfg.PlatformAPICACertPath)
+	}
+}
+
+// The key lets a plan survive a restart and be applied by another replica.
+// Unset is a supported, warned-about posture, not a boot failure.
+func TestLoad_PlanTokenKeyIsOptional(t *testing.T) {
+	cfg, err := load(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlanTokenKey != "" {
+		t.Errorf("plan token key = %q, want empty by default", cfg.PlanTokenKey)
+	}
+
+	cfg, err = load(t, map[string]string{"PLAN_TOKEN_KEY": "  a-configured-secret-that-is-long  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlanTokenKey != "a-configured-secret-that-is-long" {
+		t.Errorf("plan token key = %q, want it trimmed", cfg.PlanTokenKey)
+	}
+}

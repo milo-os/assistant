@@ -49,8 +49,8 @@ conversation turn calls `Conversation.loadDocuments`
 (`internal/agent/conversation.go:527`), which calls
 `Source.Documents(ctx, projectName)`; each *extended agent-card* request does
 the same through `Conversation.Entitlements`
-(`internal/agent/conversation.go:545`, reached from
-`cmd/assistant/runner.go:292`). In production that `Source` is `HTTPSource`,
+(`internal/agent/conversation.go`, reached from the agent-card path in
+`internal/agentwiring`). In production that `Source` is `HTTPSource`,
 which states its own posture plainly: *"There is no caching in v0 — every call
 performs a fresh fetch"* (`internal/capability/http_source.go`), under a 5s
 timeout (`httpFetchTimeout`, line 18).
@@ -242,7 +242,7 @@ type Source interface {
 Everything downstream — `ScopeDocuments`, `Compose`, `loadDocuments`,
 `Entitlements`, `ProjectSkills`, the extended-card path — is written against
 that seam and does not change. The work is one new implementation, one
-constructor call in `cmd/assistant/runner.go`, the CRD manifest, the grant, and
+constructor call in `internal/agentwiring/wiring.go`, the CRD manifest, the grant, and
 the config enum. The seam was built for this; this is the third producer it
 absorbs.
 
@@ -771,9 +771,10 @@ does not foreclose it: the adapter would read the same kind.
 
 `internal/config/config.go:305-313` currently rejects setting both
 `CAPABILITY_DOCS_FIXTURE` and `CAPABILITY_PROVIDER_URL`, with a pairwise
-exclusion check and a pairwise error message. `cmd/assistant/runner.go:55-69`
-selects between them with a `switch` whose `default` warns about exactly two
-names. Neither extends to a third mode without becoming a combinatorial mess.
+exclusion check and a pairwise error message. The source selection (since main
+moved agent construction into `internal/agentwiring`, in `wiring.go`; it was
+`cmd/assistant/runner.go`) chose between them with a `switch` whose `default`
+warned about exactly two names. Neither extends to a third mode without becoming a combinatorial mess.
 
 Replace the implicit selection with an explicit one:
 
@@ -1173,8 +1174,9 @@ this work; all of them mislead.
 - This repo: `internal/capability/{source,http_source,document,compose}.go`
   (the seam, the two existing producers, `ScopeDocuments`),
   `internal/agent/conversation.go:524-548` (`loadDocuments`, `Entitlements`),
-  `cmd/assistant/runner.go:55-69` (source selection) and `:292`
-  (the extended-card path), `internal/config/config.go:304-313`
+  `internal/agentwiring/wiring.go` (source selection and the extended-card
+  path — both moved there from `cmd/assistant/runner.go`, which is now a thin
+  delegation), `internal/config/config.go`
   (the `CAPABILITY_*` pair), `config/base/rbac.yaml` (the permission promise
   this change amends), `config/components/api-registration/apiservice.yaml`
   (why the group must change), `internal/metrics/metrics.go` (metric naming),

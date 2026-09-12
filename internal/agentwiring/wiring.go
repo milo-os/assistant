@@ -1,0 +1,451 @@
+// Package agentwiring builds the agent-execution stack — model, capability
+// source, conversation/memory/gap-report stores, usage emitter — and adapts
+// it to [assistanta2a.AgentRunner]. It exists so both cmd/assistant (the
+// standalone A2A server, still used by datumctl/patchcli) and
+// cmd/assistant-apiserver (the conversations/sendmessage subresource) build
+// the exact same agent.Conversation from the exact same [config.Config]
+// shape, instead of maintaining two independently-drifting constructors.
+package agentwiring
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"time"
+
+	"github.com/a2aproject/a2a-go/v2/a2a"
+
+	assistanta2a "github.com/milo-os/assistant/internal/a2a"
+	"github.com/milo-os/assistant/internal/agent"
+	"github.com/milo-os/assistant/internal/auth"
+	"github.com/milo-os/assistant/internal/capability"
+	"github.com/milo-os/assistant/internal/capability/crdsource"
+	"github.com/milo-os/assistant/internal/config"
+	"github.com/milo-os/assistant/internal/gapreport"
+	"github.com/milo-os/assistant/internal/history"
+	"github.com/milo-os/assistant/internal/memory"
+	appmetrics "github.com/milo-os/assistant/internal/metrics"
+	"github.com/milo-os/assistant/internal/plantoken"
+	"github.com/milo-os/assistant/internal/projectapi"
+	"github.com/milo-os/assistant/internal/usage"
+)
+
+// NewRunner builds the [assistanta2a.AgentRunner] a chat surface drives: it
+// resolves the model from config, wires the capability source, conversation
+// store, and usage emitter, constructs the agent orchestrator, and adapts it
+// to the A2A seam. metrics is shared with the caller's own HTTP telemetry so
+// conversation/tool/model/compaction/gap-report telemetry lands on the same
+// /metrics endpoint. The returned cleanup releases the conversation store's
+// resources, and stops the CRD status writer's background worker when one was
+// built (call it on shutdown; it is never nil). Both binaries must call it:
+// cmd/assistant defers it in main, cmd/assistant-apiserver folds it into the
+// config's own cleanup — the status writer owns a goroutine, so a caller that
+// drops this function leaks it.
+//
+// The conversation store is returned alongside the runner because callers
+// need it directly for conversation-rename operations — naming a conversation
+// is a row update with no agent in it, so routing it through the runner seam
+// (the way compaction is) would be a category error.
+func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metrics *appmetrics.Metrics) (assistanta2a.AgentRunner, history.Store, func(), error) {
+	model, err := agent.ResolveModel(cfg.Model, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	var persona string
+	if cfg.PersonaPromptFile != "" {
+		raw, err := os.ReadFile(cfg.PersonaPromptFile)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("read persona prompt file %s: %w", cfg.PersonaPromptFile, err)
+		}
+		persona = string(raw)
+		log.Info("agent.persona.source", "type", "file", "path", cfg.PersonaPromptFile)
+	} else {
+		log.Info("agent.persona.source", "type", "default")
+	}
+
+	// Configuration notes the loader could not log itself (it owns no logger):
+	// today, the CAPABILITY_SOURCE inference shim.
+	for _, w := range cfg.Warnings {
+		log.Warn("config.deprecated", "note", w)
+	}
+
+	// Source selection. One explicit mode per deployment (CAPABILITY_SOURCE);
+	// the config loader has already validated that the mode's companion
+	// variables are present and that no other mode's are.
+	var (
+		source capability.Source
+		// statusWriter is non-nil only under CAPABILITY_SOURCE=crd. It is
+		// hoisted out of the switch because it owns a goroutine and must be
+		// folded into the cleanup chain built below, beside the stores.
+		statusWriter *crdsource.StatusWriter
+	)
+	switch cfg.CapabilitySource {
+	case config.CapabilitySourceHTTP:
+		source = capability.NewHTTPSource(cfg.CapabilityProviderURL, nil, log)
+		log.Info("agent.capability.source", "type", "http", "url", cfg.CapabilityProviderURL)
+	case config.CapabilitySourceFixture:
+		source = capability.NewFixtureSource(cfg.CapabilityDocsFixture, log)
+		log.Info("agent.capability.source", "type", "fixture", "path", cfg.CapabilityDocsFixture)
+	case config.CapabilitySourceCRD:
+		// The SAME control-plane coordinates and the SAME credential the
+		// SubjectAccessReview path uses (AUTHZ_SAR_*). The credential is a
+		// CLIENT CERTIFICATE, not the service-account token: Milo validates
+		// tokens only against its own issuer, so a workload-cluster token 401s
+		// before the body is read (internal/auth/transport.go).
+		creds, err := auth.LoadControlPlaneCredentials(
+			cfg.Auth.SARTokenPath, cfg.Auth.SARCACertPath,
+			cfg.Auth.SARClientCertPath, cfg.Auth.SARClientKeyPath)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// Status writeback: the feedback loop to whoever authored a binding.
+		// Same control plane, same credential, same addressing as the read —
+		// the write goes to the object the LIST produced. It never touches a
+		// request goroutine: observations are enqueued and a background worker
+		// PATCHes on transition only, so a control-plane outage degrades to
+		// "status not updated" and never to latency on a chat.
+		//
+		// Only the CRD mode gets one. The fixture and HTTP sources have no
+		// object to write status onto.
+		writer, err := crdsource.NewStatusWriter(crdsource.StatusWriterConfig{
+			APIURL:      cfg.Auth.SARAPIURL,
+			BearerToken: creds.BearerToken,
+			CACert:      creds.CACert,
+			ClientCert:  creds.ClientCert,
+			ClientKey:   creds.ClientKey,
+			Logger:      log,
+			Metrics:     metrics,
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		statusWriter = writer
+
+		crd, err := crdsource.New(crdsource.Config{
+			APIURL:      cfg.Auth.SARAPIURL,
+			BearerToken: creds.BearerToken,
+			CACert:      creds.CACert,
+			ClientCert:  creds.ClientCert,
+			ClientKey:   creds.ClientKey,
+			Observer:    statusWriter,
+			Logger:      log,
+			Metrics:     metrics,
+		})
+		if err != nil {
+			statusWriter.Close()
+			return nil, nil, nil, err
+		}
+		source = crd
+		log.Info("agent.capability.source", "type", "crd",
+			"apiUrl", cfg.Auth.SARAPIURL, "clientCert", creds.ClientCert != nil,
+			"cacheTtl", crdsource.DefaultCacheTTL.String(),
+			"statusWriteback", true)
+	default:
+		log.Warn("agent.capability.source",
+			"type", "none",
+			"reason", "CAPABILITY_SOURCE is unset — no provider capabilities will be composed")
+	}
+
+	emitter := usage.NewEmitter(usage.EmitterConfig{
+		GatewayURL: cfg.Usage.GatewayURL,
+		APIKey:     cfg.Usage.GatewayAPIKey,
+		Source:     cfg.PublicBaseURL + "/a2a",
+		Logger:     log,
+	})
+
+	// StepLimit and MaxOutputTokens are left at zero: the agent layer applies
+	// the TS-parity defaults (step limit 8, MaxOutputTokens 4096) — that policy
+	// lives in internal/agent, where the TS agent/loop.ts had it.
+	// Conversation memory: durable (Postgres) when CONVERSATION_STORE_URL is
+	// set, in-process otherwise. A follow-up message with the same A2A
+	// contextId gets the prior turns replayed into its prompt either way; the
+	// Postgres store additionally survives restarts and is scoped by
+	// (project, contextId) at the query layer.
+	var (
+		store   history.Store
+		cleanup = func() {}
+	)
+	if statusWriter != nil {
+		// Drains what this replica has already decided, inside its own bounded
+		// deadline, then stops the worker. Chained the same way as the stores
+		// below; order within the chain does not matter, since the writer
+		// shares no resource with them.
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); statusWriter.Close() }
+	}
+
+	if cfg.ConversationStoreURL != "" {
+		pg, err := history.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// Chained, never assigned. `store, cleanup = pg, pg.Close` would
+		// silently drop whatever is already in the chain — the status writer is
+		// registered above, so a plain assignment here leaks its worker and
+		// abandons its queued writes in exactly the configuration production
+		// runs (durable store set). The two stores below already chain; this
+		// one did not.
+		store = pg
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); pg.Close() }
+	} else {
+		store = history.NewMemoryStore()
+		log.Info("history.store", "type", "memory",
+			"note", "CONVERSATION_STORE_URL not set — conversation history will not survive restarts")
+	}
+
+	// Project memory (memory_remember/memory_forget): same database as
+	// conversation history, a separate table. Durable when
+	// CONVERSATION_STORE_URL is set, in-process otherwise — same fallback
+	// shape as history, just for project-scoped facts instead of per-turn
+	// replay.
+	var mem memory.Store
+	if cfg.ConversationStoreURL != "" {
+		pg, err := memory.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		mem = pg
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); pg.Close() }
+	} else {
+		mem = memory.NewMemoryStore()
+		log.Info("memory.store", "type", "memory",
+			"note", "CONVERSATION_STORE_URL not set — project memory will not survive restarts")
+	}
+
+	// Capability-gap reports (report_capability_gap__<service>): same database
+	// as history/memory, a separate table, same durable-vs-in-process
+	// fallback. Unlike memory this is keyed by the PROVIDER's own project
+	// (spec.reportingProject on the capability document), never by the
+	// conversation's project — see internal/gapreport.
+	var gaps gapreport.Store
+	if cfg.ConversationStoreURL != "" {
+		pg, err := gapreport.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		gaps = pg
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); pg.Close() }
+	} else {
+		gaps = gapreport.NewMemoryStore()
+		log.Info("gapreport.store", "type", "memory",
+			"note", "CONVERSATION_STORE_URL not set — capability-gap reports will not survive restarts")
+	}
+
+	// The base platform tools' path to a project's own resources. The service
+	// puts no credential of its own on it: composition binds the client to the
+	// calling user's token for the turn, so what a tool can read is exactly
+	// what the person who asked can read.
+	platformAPI, err := newPlatformAPI(cfg, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Resolve the plan-token key even without a platform API to use it, so a
+	// bad key fails at boot rather than at the first attempted change.
+	planTokenKey, err := plantoken.ResolveKey(cfg.PlanTokenKey, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// The Composed half of the status feedback loop, wired only when there is a
+	// status writer — i.e. only under CAPABILITY_SOURCE=crd, where a document
+	// corresponds to a CapabilityBinding object that can carry conditions. Taken
+	// as a method value rather than passing the writer itself so the agent
+	// package keeps knowing nothing about crdsource.
+	//
+	// Unlike Accepted (observed on a cache miss, once per 60s TTL), this fires on
+	// EVERY turn. It is affordable because the writer coalesces on transition: a
+	// binding whose outcome is unchanged enqueues nothing at all.
+	var observeComposed func(projectName, bindingName string, composeErr error)
+	if statusWriter != nil {
+		observeComposed = statusWriter.ObserveComposed
+	}
+
+	conv := agent.New(agent.Deps{
+		Model:                          model,
+		ModelMode:                      string(cfg.Model.Mode),
+		Source:                         source,
+		Persona:                        persona,
+		Emitter:                        emitter,
+		History:                        store,
+		Memory:                         mem,
+		GapReports:                     gaps,
+		PlatformAPI:                    platformAPI,
+		PlanTokenKey:                   planTokenKey,
+		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
+		CapabilityIdentityForwardHosts: cfg.CapabilityIdentityForwardHosts,
+		CapabilityMCPEndpointHosts:     cfg.CapabilityMCPEndpointHosts,
+		ObserveComposedBinding:         observeComposed,
+		Logger:                         log,
+		Metrics:                        metrics,
+	})
+	return conversationRunner{conv: conv}, store, cleanup, nil
+}
+
+// newPlatformAPI builds the client the base platform tools read and write a
+// project through, or nil when the deployment named no platform API — in which
+// case the base tools are simply not composed and a conversation runs on
+// provider capabilities alone.
+//
+// The CA bundle is read best-effort, matching the auth package's posture: an
+// absent file leaves the client on the system roots, which either works or
+// fails at the first request with a TLS error that says so, rather than
+// crash-looping a pod whose certificate mounts a moment late.
+func newPlatformAPI(cfg *config.Config, log *slog.Logger) (*projectapi.Client, error) {
+	if cfg.PlatformAPIURL == "" {
+		log.Warn("agent.platform_api",
+			"type", "none",
+			"reason", "PLATFORM_API_URL is unset and no control-plane endpoint could be derived — the base platform tools will not be available")
+		return nil, nil
+	}
+	caCert, _ := os.ReadFile(cfg.PlatformAPICACertPath)
+	client, err := projectapi.New(projectapi.Config{BaseURL: cfg.PlatformAPIURL, CACert: caCert})
+	if err != nil {
+		return nil, err
+	}
+	log.Info("agent.platform_api", "url", cfg.PlatformAPIURL, "caCert", len(caCert) > 0)
+	return client, nil
+}
+
+// conversationRunner adapts an [agent.Conversation] to [assistanta2a.AgentRunner]:
+// it drives the event stream, forwarding text deltas and tool activity to the
+// sink, then returns the terminal result.
+type conversationRunner struct {
+	conv *agent.Conversation
+}
+
+func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest, sink assistanta2a.RunSink) assistanta2a.RunResult {
+	stream := r.conv.Run(ctx, agent.Params{
+		UserText:    req.UserText,
+		ProjectName: req.ProjectName,
+		ContextID:   req.ContextID,
+		TaskID:      req.TaskID,
+		Mentions:    agentMentions(req.Mentions),
+	})
+	defer stream.Close()
+
+	activity := newToolActivityTracker()
+	for {
+		ev, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			// A stream error still finalizes into a terminal Result below.
+			break
+		}
+		switch ev.Kind {
+		case agent.EventText:
+			if ev.Text != "" {
+				sink.OnTextDelta(ev.Text)
+			}
+		case agent.EventToolCall, agent.EventToolResult:
+			activity.forward(ev, sink)
+		}
+	}
+
+	res := stream.Result()
+	return assistanta2a.RunResult{
+		State: assistanta2a.RunState(res.State),
+		Text:  res.Text,
+		Error: res.Error,
+	}
+}
+
+// agentMentions restates the transport's mention list as the orchestration
+// layer's own type — the two packages deliberately share no types (see
+// assistanta2a.AgentRunner), so this adapter is where they meet.
+func agentMentions(ms []assistanta2a.Mention) []agent.Mention {
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]agent.Mention, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, agent.Mention{Kind: m.Kind, Name: m.Name, APIGroup: m.APIGroup})
+	}
+	return out
+}
+
+// toolActivityTracker turns the run loop's tool-call/tool-result event pair
+// into the sink's started/finished callbacks, timing the gap between them.
+//
+// Elapsed is measured from the moment the model asked for the tool rather than
+// from the loop's own execution start (which it does not report): that is also
+// what the user is waiting on, and the difference is the tail of one model
+// stream.
+type toolActivityTracker struct {
+	started map[string]time.Time
+	// names remembers the tool name per call id, since providers may omit the
+	// name on the result.
+	names map[string]string
+}
+
+func newToolActivityTracker() *toolActivityTracker {
+	return &toolActivityTracker{started: map[string]time.Time{}, names: map[string]string{}}
+}
+
+func (t *toolActivityTracker) forward(ev agent.Event, sink assistanta2a.RunSink) {
+	key := ev.ToolCallID
+	if key == "" {
+		key = ev.ToolName // providers that assign no id: one call per name in flight
+	}
+	if ev.Kind == agent.EventToolCall {
+		t.started[key] = time.Now()
+		t.names[key] = ev.ToolName
+		sink.OnToolStart(assistanta2a.ToolActivity{
+			ID:      ev.ToolCallID,
+			Name:    ev.ToolName,
+			Summary: assistanta2a.SummarizeToolInput(ev.ToolInput),
+		})
+		return
+	}
+
+	name := ev.ToolName
+	if name == "" {
+		name = t.names[key]
+	}
+	var elapsed time.Duration
+	if start, ok := t.started[key]; ok {
+		elapsed = time.Since(start)
+	}
+	delete(t.started, key)
+	delete(t.names, key)
+	sink.OnToolFinish(assistanta2a.ToolActivity{
+		ID:      ev.ToolCallID,
+		Name:    name,
+		OK:      !ev.ToolFailed,
+		Elapsed: elapsed,
+	})
+}
+
+// Compact implements [assistanta2a.Compactor] over the same [agent.Conversation]
+// this runner drives Run turns against, so manual "/compact" and the
+// automatic threshold-triggered path in internal/agent operate on identical
+// wiring. agent.ErrNothingToCompact is translated to the a2a-layer sentinel so
+// internal/server can recognize the case without importing internal/agent.
+func (r conversationRunner) Compact(ctx context.Context, req assistanta2a.CompactRequest) error {
+	err := r.conv.Compact(ctx, agent.Params{
+		ProjectName: req.ProjectName,
+		ContextID:   req.ContextID,
+	})
+	if errors.Is(err, agent.ErrNothingToCompact) {
+		return assistanta2a.ErrNothingToCompact
+	}
+	return err
+}
+
+// ProjectSkills implements [assistanta2a.SkillAdvertiser] over the same
+// [agent.Conversation] this runner drives turns against, so the card and the
+// next turn read the same documents through the same scope gate. Entitlement
+// derivation degrades to nothing on a source failure (see
+// Conversation.Entitlements), hence no error path here.
+func (r conversationRunner) ProjectSkills(ctx context.Context, req assistanta2a.CardRequest) ([]a2a.AgentSkill, error) {
+	return assistanta2a.ServiceSkills(r.conv.Entitlements(ctx, req.ProjectName)), nil
+}

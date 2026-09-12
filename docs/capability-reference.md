@@ -84,6 +84,115 @@ services. Loading a skill is not a provider tool invocation — no
 as input like the rest of the prompt. Executable skill bundles
 (scripts) are deliberately unsupported.
 
+## Base platform tools (always present)
+
+Every project's composition carries a set of tools that belong to no provider.
+They are **un-namespaced** — `resources_list`, not `<service>__resources_list` —
+which is the same convention the other built-ins use (`load_skill`,
+`memory_remember`, `memory_forget`) and is what makes them impossible for a
+provider to shadow: every provider tool name carries a `<server>__` prefix.
+
+| Tool | What it answers |
+|---|---|
+| `resources_list(group, version, kind, namespace?)` | Every resource of one kind in the project, with what the platform is reporting about each. Kinds held in a namespace default to `default`. |
+| `resources_get(group, version, kind, name, namespace?)` | One resource as an editable manifest, with the platform's own bookkeeping removed, plus its conditions alongside. |
+| `schema_get(group, version, kind, path?)` | What a kind's fields are and which are required, from the project's own published description. `path` narrows a large kind to one part. |
+| `locations_list(service)` | Where a named service is offered to this project, joined from `ServiceAvailability` (`services.miloapis.com/v1alpha1`) to the `Location` (`locations.miloapis.com/v1alpha1`) it names, with topology and readiness. |
+| `quota_get(service?)` | Limit, used and available per resource type, from `AllowanceBucket` (`quota.miloapis.com/v1alpha1`, namespace `milo-system`, label `quota.miloapis.com/consumer-kind=Project`), converted into the unit `ResourceRegistration` publishes. |
+
+Three more tools make up the change path, described below.
+
+### The change path
+
+Three tools. Only one of them changes anything.
+
+Patch composes them only when a plan-token key is available (`PLAN_TOKEN_KEY`,
+or one generated for the process). A service that cannot check a token must not
+issue one.
+
+| Tool | What it does |
+|---|---|
+| `resources_validate(manifests[])` | Asks the platform to judge each manifest and keeps nothing. Returns the field path behind each rejection, whether the resource already exists, and what applying would change. **Writes nothing.** |
+| `resources_plan(manifests[])` | Validates everything, decides create or update per resource, orders them so a manifest referring to another goes after it, reports the differences, and returns canonical manifests with a **plan token**. **Writes nothing.** |
+| `resources_apply(manifests[], planToken)` | Re-derives the token from what it was handed and refuses any mismatch. Then dry-runs once more and applies in plan order. **The only tool here that writes.** |
+
+#### The plan token
+
+The token is an `HMAC-SHA256` over:
+
+- the canonical JSON of every manifest, in plan order
+- the project
+- the resource version of each object the plan saw
+- the expiry, 15 minutes out
+
+Anything that moves fails to re-derive: a manifest edited after the plan (one
+character is enough), a reordered list, a token minted in another project, or a
+resource someone else changed in between. Apply refuses rather than writing
+something nobody agreed to. Every refusal says what happened, that nothing
+changed, and to plan again.
+
+The token proves the change is the one shown. It cannot prove the person agreed.
+That is a human step, required by Patch's fixed operating rules: nothing the
+assistant reads in a tool result, a provider document, or a resource's status
+counts as the person's answer. See `internal/plantoken`.
+
+#### Ordering
+
+A manifest whose spec carries a `*Ref` or `*Refs` field naming another manifest
+in the batch is applied after it. A `kind` on the reference is honored when
+present. A manifest that refers to nothing else keeps the order you gave it.
+Order is part of what the token covers, so a reordered list is refused.
+
+#### What counts as a change
+
+`Composed.Mutating` lists the composed tools that can change something:
+
+- provider tools flagged in a capability document's `mcpServers[].mutating`
+- `resources_plan` and `resources_apply`
+
+`resources_plan` is listed even though it writes nothing, because it alone
+authorizes a write. An operator asking what this project's assistant can change
+wants both answers. Each tool's trace span carries the same value as
+`tool.mutating`.
+
+### The two rules that hold for all of them
+
+**They act as the caller.** Composition binds the platform client to the
+caller's own bearer token and the turn's project, once, and hands the tools a
+view that carries no other identity (`internal/projectapi`). The service holds
+no credential for a customer's project, so a tool call can read nothing the
+person could not read themselves. With no caller credential or no project the
+tools are **not composed at all** — there is no fallback to reading as the
+service.
+
+**The project is never an argument.** No input schema has a project field and no
+handler looks for one. The project comes from the request a SubjectAccessReview
+already approved, for the same reason `X-Datum-Project` does: an argument naming
+a project would be steerable by anything the model reads.
+
+### Two failures that must not read alike
+
+`locations_list` refuses loudly when the project does not serve
+`ServiceAvailability` or `Location`, naming the missing kind and saying the
+person did nothing wrong. It never degrades to an empty list. An empty list is a
+real answer — the service is offered nowhere this project may use — and
+returning it when nothing actually looked would tell a customer to wait for a
+location that is already there. The two call for opposite actions.
+
+`quota_get` behaves the same way: a project that does not serve the allowance
+kinds is told the answer is unknown, not that there is no limit.
+
+### Metering
+
+A base tool fires **no** `tool-invocations` billing event, the same as
+`load_skill` and the memory tools. The tool event names the provider service
+that did the work (see [Metering](architecture/metering.md)), and there is no
+provider here — the work is the platform reading the customer's own project as
+the customer. Billing it to a provider would attribute it to the wrong party;
+billing it to Patch would make reading your own project cost you twice, since
+the tokens it adds are already billed as input. A provider tool that happens to
+do the same read still meters, because that provider ran it.
+
 ### Capability provider API (published contract, v1)
 
 Capability documents reach the assistant through the `Source` seam
