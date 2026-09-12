@@ -169,7 +169,6 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
 
       try {
         for await (const event of sendMessage(
-          ctx.pluginFetch,
           ctx.projectName,
           currentChatIdRef.current,
           { text: trimmed },
