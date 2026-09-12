@@ -60,12 +60,40 @@ What the production overlay establishes, at a glance:
   with a public HTTPS URL, dev tokens left set in a non-dev auth mode, a
   plaintext gateway to an external host).
 
+### Capability source, and the `crd` cutover
+
+Production runs `CAPABILITY_SOURCE=http` today: capability documents are pulled
+per turn from the service catalog's provider API. The `crd` source — reading
+`CapabilityBinding` objects from each project's Milo control plane behind a 60s
+cache, and writing `status.conditions` back — is implemented and pre-staged in
+the overlay as a commented block, but **not enabled**. Two gates are open and
+neither is this repository's to close: the catalog's projection controller is
+unpushed (so nothing writes the objects, and flipping today would compose zero
+capabilities for every project), and the assistant's root-RBAC grant has not
+been observed resolving against a real project path.
+
+The procedure — both gates, the flip, what to watch in the first ten minutes,
+and the one-env-var rollback — lives with the triage it shares an hour with, in
+[`docs/runbooks/capability-source-degraded.md`](runbooks/capability-source-degraded.md#cutover-turning-on-capability_sourcecrd).
+It is a runbook and not a section here because the operator reaching for it is
+either cutting over or backing out, and both need the same "which failure is
+this" table above the fold.
+
+Note that a green `config/overlays/dev-crd` is not evidence for the production
+topology: kind has one apiserver and no project router, so the control-plane
+path resolves to the same server and root RBAC applies trivially. It proves the
+object model and the cache; the flip needs a staging soak against a real Milo.
+
 ## Operations
 
 - **Liveness** `/healthz` (bare process check) · **Readiness** `/readyz`
   (503 until Postgres and, in gateway mode, the model gateway are reachable).
 - **Metrics** `/metrics` (Prometheus): request rate/latency/in-flight,
-  task-store and readiness errors. Billing usage is a separate CloudEvents
-  stream — see [conversations-and-metering.md](architecture/metering.md).
+  task-store and readiness errors, and — under `CAPABILITY_SOURCE=crd` — the
+  capability fetch/cache/status-write series, which are the *only* signal for a
+  capability failure because one degrades a chat rather than failing it. Nothing
+  in this repo scrapes production; see
+  [operations/dashboards-and-alerts.md](operations/dashboards-and-alerts.md).
+  Billing usage is a separate CloudEvents stream — see [conversations-and-metering.md](architecture/metering.md).
 - **Logs** are structured JSON with a per-request id (`X-Request-Id` honored or
   minted); prompt/PII content is never logged at info level.

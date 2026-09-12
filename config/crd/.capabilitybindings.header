@@ -1,0 +1,31 @@
+# CapabilityBinding — the assistant-owned CRD that carries capability
+# documents, replacing the per-turn pull from a catalog adapter.
+#
+# GENERATED from pkg/apis/capabilities/v1alpha1 by controller-gen; the Go types
+# are the source of truth. Regenerate with:
+#   controller-gen crd paths=./pkg/apis/capabilities/v1alpha1/... \
+#     output:crd:dir=config/crd
+#
+# Why a CRD and not the aggregated apiserver: capability config is WRITTEN by
+# providers and READ by the assistant, which is the opposite direction from
+# conversations. etcd-backed storage, admission validation, and a watch come
+# free; the aggregated server would have had to grow all three.
+#
+# Why this group is not assistant.miloapis.com: config/components/api-registration
+# registers APIService v1alpha1.assistant.miloapis.com, so the kube-aggregator
+# owns that whole group/version. A CRD registered there would be admitted and
+# then permanently shadowed — writes appear to succeed, reads route to the
+# aggregated server, which has never heard of the kind.
+#
+# The schema is a field-for-field mirror of capability.CapabilitySpec
+# (internal/capability/document.go). Moving the required-field checks here means
+# a malformed document is rejected at kubectl apply, by the producer, instead of
+# being silently skipped hours later inside a customer's turn.
+#
+# Why scope: Cluster. A Milo project is a virtual control plane over one
+# apiserver, partitioned by an etcd key prefix, and it has its own namespace set
+# (milo-system, default) with nothing named after the project. The plane IS the
+# tenancy boundary, so an object inside it needs no namespace — the same reason
+# the service catalog's AgentBinding, which produces these, is cluster-scoped.
+# Namespacing it would have meant LISTing a namespace nobody creates and every
+# project composing as though it had bought nothing.

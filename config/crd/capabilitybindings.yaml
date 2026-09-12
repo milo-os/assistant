@@ -1,0 +1,449 @@
+# CapabilityBinding — the assistant-owned CRD that carries capability
+# documents, replacing the per-turn pull from a catalog adapter.
+#
+# GENERATED from pkg/apis/capabilities/v1alpha1 by controller-gen; the Go types
+# are the source of truth. Regenerate with:
+#   controller-gen crd paths=./pkg/apis/capabilities/v1alpha1/... \
+#     output:crd:dir=config/crd
+#
+# Why a CRD and not the aggregated apiserver: capability config is WRITTEN by
+# providers and READ by the assistant, which is the opposite direction from
+# conversations. etcd-backed storage, admission validation, and a watch come
+# free; the aggregated server would have had to grow all three.
+#
+# Why this group is not assistant.miloapis.com: config/components/api-registration
+# registers APIService v1alpha1.assistant.miloapis.com, so the kube-aggregator
+# owns that whole group/version. A CRD registered there would be admitted and
+# then permanently shadowed — writes appear to succeed, reads route to the
+# aggregated server, which has never heard of the kind.
+#
+# The schema is a field-for-field mirror of capability.CapabilitySpec
+# (internal/capability/document.go). Moving the required-field checks here means
+# a malformed document is rejected at kubectl apply, by the producer, instead of
+# being silently skipped hours later inside a customer's turn.
+#
+# Why scope: Cluster. A Milo project is a virtual control plane over one
+# apiserver, partitioned by an etcd key prefix, and it has its own namespace set
+# (milo-system, default) with nothing named after the project. The plane IS the
+# tenancy boundary, so an object inside it needs no namespace — the same reason
+# the service catalog's AgentBinding, which produces these, is cluster-scoped.
+# Namespacing it would have meant LISTing a namespace nobody creates and every
+# project composing as though it had bought nothing.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: capabilitybindings.capabilities.assistant.miloapis.com
+spec:
+  group: capabilities.assistant.miloapis.com
+  names:
+    categories:
+    - assistant
+    kind: CapabilityBinding
+    listKind: CapabilityBindingList
+    plural: capabilitybindings
+    shortNames:
+    - capbinding
+    - capbindings
+    singular: capabilitybinding
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.serviceName
+      name: Service
+      type: string
+    - jsonPath: .spec.configurationVersion
+      name: Config
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+      name: Accepted
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          CapabilityBinding is one project-scoped entitlement: a provider service and
+          the knowledge, tools, and skills it grants that project's assistant.
+
+          CLUSTER-SCOPED, and the scope is the tenancy statement. A Milo project is a
+          virtual control plane — one apiserver partitioned by an etcd key prefix
+          ("/projects/<project>/...") — so an object written through a project's
+          control-plane path is already inside that project and can never be read
+          through another's. The project plane has its own independent namespace set
+          (milo-system, default); nothing creates a namespace named after the project,
+          so namespacing this object would have expressed a partition that does not
+          exist while making "which namespace does the assistant LIST?" an unanswerable
+          question. The service catalog's AgentBinding — the producer this type mirrors
+          — is cluster-scoped for exactly this reason, and its controller writes these
+          with a name and no namespace.
+
+          The failure mode avoided: an assistant that LISTed
+          /namespaces/<project>/capabilitybindings against a project plane would get a
+          well-formed, permanently empty list, and every project would silently compose
+          as though it had bought nothing.
+
+          A provider does not write these directly in the platform: the service catalog
+          materializes one per (project, entitled service) from its own registration
+          and entitlement records. Dev and e2e write them by hand, which is exactly the
+          point of the assistant owning the schema.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              CapabilityBindingSpec is the meat of a capability document: which provider
+              service it entitles and the knowledge/tools/authority it projects.
+
+              Every JSON tag below is a byte-for-byte match of the Go type in
+              internal/capability/document.go. The capability source marshals objects of
+              this type and feeds the bytes straight through capability.ParseDocuments, so
+              a tag that drifts here does not fail a build — it silently drops a field from
+              every project's prompt. Change both or neither.
+            properties:
+              authority:
+                description: Authority describes the read scope and time budget granted
+                  to the agent.
+                properties:
+                  maxTaskDurationSeconds:
+                    description: |-
+                      MaxTaskDurationSeconds bounds how long a task driven by this service's
+                      tools may run. Nil means the assistant's own default applies.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  reads:
+                    items:
+                      description: AuthorityRead names a resource kind the agent is
+                        authorized to read.
+                      properties:
+                        gvk:
+                          description: |-
+                            GVKRef is the {group, kind} reference style used across the service catalog
+                            (no version).
+                          properties:
+                            group:
+                              type: string
+                            kind:
+                              minLength: 1
+                              type: string
+                          required:
+                          - kind
+                          type: object
+                      required:
+                      - gvk
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                type: object
+              configurationVersion:
+                description: |-
+                  ConfigurationVersion is the PROVIDER's own revision of the reviewed
+                  configuration this binding carries — the review gate's audit handle,
+                  distinct from metadata.generation (which only tracks this object) and
+                  from the document schema version. Required so that a capability that
+                  reached a customer's prompt can always be traced back to the exact
+                  reviewed configuration it came from.
+                minLength: 1
+                type: string
+              knowledge:
+                description: Knowledge is the Tier-1 knowledge this service contributes.
+                properties:
+                  concepts:
+                    items:
+                      description: |-
+                        KnowledgeConcept is a short, provider-authored gloss on one of its resource
+                        kinds.
+                      properties:
+                        gvk:
+                          description: |-
+                            GVKRef is the {group, kind} reference style used across the service catalog
+                            (no version).
+                          properties:
+                            group:
+                              type: string
+                            kind:
+                              minLength: 1
+                              type: string
+                          required:
+                          - kind
+                          type: object
+                        summary:
+                          minLength: 1
+                          type: string
+                      required:
+                      - gvk
+                      - summary
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  sources:
+                    items:
+                      description: |-
+                        KnowledgeSource is a fetchable provider document. The assistant fetches it
+                        per turn under a short timeout and a byte cap; an unreachable source degrades
+                        the turn, it does not fail it.
+                      properties:
+                        title:
+                          description: |-
+                            Title is what the provenance header attributes the text to; the URL is
+                            used when it is empty.
+                          type: string
+                        type:
+                          description: KnowledgeSourceType is the kind of a knowledge
+                            source document.
+                          enum:
+                          - LLMDocs
+                          - Runbook
+                          - Markdown
+                          type: string
+                        url:
+                          minLength: 1
+                          type: string
+                      required:
+                      - type
+                      - url
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                type: object
+              reportingProject:
+                description: |-
+                  ReportingProject is the Milo project where this service's own team
+                  reviews capability-gap reports (see internal/gapreport) — resolved by
+                  the service catalog from its own service registration, distinct from the
+                  consumer project whose control plane holds this binding.
+                  Optional: when a binding declares Tools but no ReportingProject,
+                  capability-gap reporting is simply unavailable for that service (no tool
+                  is registered) rather than an error.
+                type: string
+              serviceAgentRef:
+                description: |-
+                  ServiceAgentRef names the provider's agent registration this binding
+                  projects.
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              serviceName:
+                description: |-
+                  ServiceName is the fully-qualified service name
+                  ("streaming.streamco.example"). It is the dimension tool-invocation
+                  metering is reported under, so an empty or wrong value misattributes
+                  usage — hence required rather than derived.
+                minLength: 1
+                type: string
+              serviceRef:
+                description: |-
+                  ServiceRef is the catalog's stable, short identifier for the provider
+                  service ("streamco"). It namespaces skills and is sanitized before it
+                  reaches any field a consumer treats as an ID.
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              skills:
+                description: |-
+                  Skills are reviewed procedures; only name and description enter the
+                  prompt, the body is fetched on demand.
+                items:
+                  description: |-
+                    Skill is a provider-published, reviewed procedure the assistant may follow
+                    — the middle rung between knowledge (facts) and tools (callable endpoints).
+                    Only Name and Description enter the prompt; the body at Source is fetched on
+                    demand via the built-in load_skill tool (progressive disclosure), so a
+                    provider can publish many skills at near-zero prompt cost. A skill never
+                    grants privileges: it can only direct the model toward tools that are
+                    independently allow-listed.
+                  properties:
+                    description:
+                      description: |-
+                        Description is the one line that enters the prompt, and therefore the
+                        only thing the model can match a request against — required because a
+                        skill nobody can select is prompt cost with no payoff.
+                      minLength: 1
+                      type: string
+                    name:
+                      minLength: 1
+                      type: string
+                    source:
+                      description: Source is the HTTP(S) URL of the skill body (markdown/plain
+                        text).
+                      minLength: 1
+                      type: string
+                  required:
+                  - description
+                  - name
+                  - source
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              tools:
+                description: Tools is the Tier-2 tool surface this service contributes.
+                properties:
+                  mcpServers:
+                    items:
+                      description: MCPServer is one provider MCP server the assistant
+                        may connect to.
+                      properties:
+                        endpoint:
+                          minLength: 1
+                          type: string
+                        mutating:
+                          description: |-
+                            Mutating names the tools in Include that change provider state, so the
+                            assistant can hold them to a confirmation policy instead of treating
+                            every allow-listed call as a safe read.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        name:
+                          description: |-
+                            Name namespaces this server's tools as "<name>__<tool>", so two
+                            providers may publish the same tool name.
+                          minLength: 1
+                          type: string
+                        toolSelector:
+                          description: ToolSelector is the allow-list of tool names
+                            to expose from an MCP server.
+                          properties:
+                            include:
+                              description: |-
+                                Include is the reviewed allow-list. It is not a hint: a tool the server
+                                advertises but this list omits is never exposed to the model, and the AI
+                                gateway enforces the same list independently. An empty Include therefore
+                                means "no tools from this server", never "all of them".
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          type: object
+                      required:
+                      - endpoint
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                type: object
+            required:
+            - configurationVersion
+            - serviceAgentRef
+            - serviceName
+            - serviceRef
+            type: object
+          status:
+            description: |-
+              CapabilityBindingStatus is the assistant's report back to whoever wrote the
+              binding. It is the ONLY feedback channel a capability producer has: the
+              assistant degrades rather than fails on a bad document (a skipped binding
+              never surfaces in a chat as an error), so without a written status a producer
+              cannot tell "the assistant is serving this" from "the assistant silently
+              dropped it two weeks ago".
+            properties:
+              conditions:
+                description: |-
+                  Conditions are the assistant's verdict on this binding. Types are
+                  CapabilityBindingConditionAccepted and
+                  CapabilityBindingConditionComposed; both are written by the assistant
+                  only. No other controller owns a condition here.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation the conditions below were
+                  computed from. Conditions whose observedGeneration trails
+                  metadata.generation describe the PREVIOUS spec — a producer that just
+                  wrote an update must wait for this to catch up before believing a stale
+                  True.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

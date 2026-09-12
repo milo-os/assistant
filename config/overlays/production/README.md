@@ -23,7 +23,11 @@ kubectl kustomize config/overlays/production   # render + review, then apply via
 - Availability alerts (`alerts.yaml`) with runbooks in `docs/runbooks/`. These
   read the cluster's view of the Deployment — "is it running at all?" — and are
   complementary to `config/components/observability`, whose rules read the
-  assistant's own metrics. Nothing is duplicated between them.
+  assistant's own metrics. Nothing is duplicated between them. One exception
+  lives in the same file: the `assistant.capability` group reads the assistant's
+  own metrics, because the failure it watches (a project silently running on
+  stale or absent capability configuration) only exists in production, and the
+  observability component is never part of a production render.
 
 ## Posture vs. dev
 
@@ -40,7 +44,14 @@ kubectl kustomize config/overlays/production   # render + review, then apply via
 ## Placeholders to substitute (search `REPLACE_WITH_`)
 
 - `kustomization.yaml`: `PUBLIC_BASE_URL`, `GATEWAY_URL`, `GATEWAY_MODEL`,
-  `CAPABILITY_PROVIDER_URL`. The image tag is **not** among them: it lives in
+  `CAPABILITY_PROVIDER_URL`, and the two AI-gateway host lists —
+  `CAPABILITY_IDENTITY_FORWARD_HOSTS` (who may receive the caller's bearer
+  token) and `CAPABILITY_MCP_ENDPOINT_HOSTS` (what may be dialed at all). They
+  take the same value in practice and are deliberately separate variables so
+  that widening one cannot silently widen the other; leaving
+  `CAPABILITY_MCP_ENDPOINT_HOSTS` unset disables the dial check entirely, which
+  costs the gateway's copy of the tool allow-list, metering, and
+  caller-identity forwarding for any endpoint that is not the gateway. The image tag is **not** among them: it lives in
   `config/base` (`REPLACE_WITH_RELEASE_TAG`), which is where
   `.github/workflows/build.yaml` stamps the released tag before publishing the
   kustomize bundle. Do not add an `images:` block to this overlay — it would run
@@ -102,3 +113,12 @@ For an external control plane, set `AUTHZ_SAR_API_URL` / `AUTHZ_SAR_TOKEN_PATH`
   untrusted providers.
 - **RBAC + ServiceAccount** for the SAR caller are environment-specific and not
   included here.
+- **Capability source**: this overlay runs `CAPABILITY_SOURCE=http`. The `crd`
+  source is implemented and pre-staged as a commented block beside it, gated on
+  the catalog's projection controller landing and on one 200-vs-403 LIST with
+  the assistant's certificate against a project control-plane path. Procedure
+  and rollback: `docs/runbooks/capability-source-degraded.md`.
+- **Metrics scrape**: `alerts.yaml`'s `assistant.capability` group reads the
+  assistant's own `/metrics`, and this overlay ships no `ServiceMonitor`. Point
+  your scrape at `assistant:7820/metrics` or those rules evaluate over nothing
+  and stay permanently green.

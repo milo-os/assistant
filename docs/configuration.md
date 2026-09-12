@@ -10,19 +10,22 @@ Environment variables, model backends, and the authentication/authorization seam
 | `HOST` | `0.0.0.0` | HTTP listener host |
 | `PUBLIC_BASE_URL` | `http://localhost:${PORT}` | Base URL for the card interface `url` (→ `<base>/a2a`) and CloudEvents `source` |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
-| `AUTHN_TOKENREVIEW_API_URL` | derived in-cluster | Control-plane endpoint for TokenReview; required off-cluster |
-| `AUTHZ_SAR_API_URL` | derived in-cluster | Control-plane endpoint for SubjectAccessReview; required off-cluster |
-| `AUTHN_TOKENREVIEW_API_URL` | in-cluster (derived) | Control-plane base URL for the TokenReview call; unset in tokenreview mode ⇒ derived from `KUBERNETES_SERVICE_HOST/PORT` |
+| `AUTHN_TOKENREVIEW_API_URL` | in-cluster (derived) | Control-plane base URL for the TokenReview call; unset ⇒ derived from `KUBERNETES_SERVICE_HOST/PORT`. Required off-cluster |
+| `AUTHZ_SAR_API_URL` | derived in-cluster | Control-plane base URL for the SubjectAccessReview call; required off-cluster. **Also the control plane `CAPABILITY_SOURCE=crd` reads `CapabilityBinding` objects from** |
+| `AUTHZ_SAR_CA_CERT_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | CA bundle verifying that control plane's certificate |
+| `AUTHZ_SAR_CLIENT_CERT_PATH` / `AUTHZ_SAR_CLIENT_KEY_PATH` | — | Client certificate identifying the assistant to the control plane. Unset on a plain Kubernetes apiserver, which accepts the service-account token; **required against Milo**, which validates tokens only against its own issuer and 401s a workload-cluster token |
 | `AUTHN_TOKENREVIEW_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Assistant's own SA token for the TokenReview call |
 | `AUTHN_TOKENREVIEW_CA_CERT_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | Apiserver CA bundle for the TokenReview call |
 | `PLATFORM_API_URL` | `AUTHZ_SAR_API_URL` | Platform API the **base platform tools** read and write a project's own resources through. The platform that decides whether a caller may act on a project is the same one that serves that project's resources, so this normally needs no setting. Every request over it carries the **calling user's** own bearer token — the service holds no credential for it, which is why there is no token path beside it. Unset and underivable ⇒ the base tools are not composed |
 | `PLATFORM_API_CA_CERT_PATH` | `AUTHZ_SAR_CA_CERT_PATH` | CA bundle verifying the platform API's certificate (same server as the SAR endpoint by default) |
 | `PLAN_TOKEN_KEY` | generated per process | Secret that binds a plan to what the person was shown (base64, or a raw string of at least 16 bytes). Set it so one replica can apply a plan another made, and so plans survive a restart. Unset, Patch generates one per process **and warns at startup**: the guarantee still holds, but an outstanding plan is lost on restart or refused by another replica, and the person is asked to plan again |
-| `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file (fixture source); mutually exclusive with `CAPABILITY_PROVIDER_URL` |
-| `CAPABILITY_PROVIDER_URL` | — | Base URL of the capability-provider HTTP API (HTTP source); mutually exclusive with `CAPABILITY_DOCS_FIXTURE`. Both unset ⇒ no provider capabilities |
+| `CAPABILITY_SOURCE` | — | Which capability source to build: `fixture` \| `http` \| `crd`. Unset ⇒ no provider capabilities (built-ins only), except for the one-release inference described in [Capability source](#capability-source) |
+| `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file. Required by, and only by, `CAPABILITY_SOURCE=fixture`; setting it under another mode is an error |
+| `CAPABILITY_PROVIDER_URL` | — | Base URL of the capability-provider HTTP API. Required by, and only by, `CAPABILITY_SOURCE=http`; setting it under another mode is an error |
 | `CONVERSATION_STORE_URL` | — | `postgres://` URL for durable conversation history. Unset ⇒ in-memory (process lifetime). Set but unreachable ⇒ boot fails (no silent fallback to amnesia) |
 | `CAPABILITY_ALLOW_PRIVATE_NETWORKS` | `false` | Relax the capability SSRF guard's loopback/RFC1918 block. In-cluster capability endpoints (the AI gateway, provider pods) are private ClusterIPs, so every real deployment sets this `true`; link-local/cloud-metadata stay blocked either way. Leave `false` only when all endpoints are public and providers untrusted |
 | `CAPABILITY_IDENTITY_FORWARD_HOSTS` | — | Comma-separated hosts whose MCP endpoints may receive the **calling user's** bearer token and the turn's project (`Authorization` + `X-Datum-Project`), so a provider that reads the customer's own resources can act as that user. An entry matches a host exactly and as a domain suffix (`datum.net` also permits `mcp.datum.net`). Unset ⇒ forwarded to nobody. A capability document is provider-controlled data, so naming an endpoint never grants it a credential — only this list does. See [Identity and access](architecture/identity-and-access.md#acting-as-the-caller) |
+| `CAPABILITY_MCP_ENDPOINT_HOSTS` | — | Comma-separated hosts an MCP endpoint may be **dialed at**, matched exactly and as a domain suffix. An endpoint outside the list is skipped before any connection is opened, logged as `capability.mcp.endpoint_not_sanctioned`, and reported on the binding as `Composed=False`. Empty ⇒ the check is disabled and any endpoint may be dialed. Production sets it to the AI gateway. Deliberately **not** the same knob as `CAPABILITY_IDENTITY_FORWARD_HOSTS` — see [Two host lists, not one](#two-host-lists-not-one) |
 | `MODEL_MODE` | `anthropic` if key else `mock` | `anthropic` \| `mock` \| `gateway` |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_MODE=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Anthropic model id |
@@ -36,6 +39,96 @@ Environment variables, model backends, and the authentication/authorization seam
 
 > `GATEWAY_URL` (AI gateway, model traffic) is distinct from
 > `USAGE_GATEWAY_URL` (the metering collector) — different subsystems.
+
+## Capability source
+
+Provider capabilities — knowledge, tools, skills — reach the assistant through
+one `Source` implementation, chosen explicitly by `CAPABILITY_SOURCE`. Three
+modes ship, and each takes exactly the configuration it uses:
+
+| `CAPABILITY_SOURCE` | What it reads | What it needs |
+| --- | --- | --- |
+| `fixture` | A capability-documents JSON file on disk | `CAPABILITY_DOCS_FIXTURE` |
+| `http` | The capability-provider HTTP API, per turn, uncached | `CAPABILITY_PROVIDER_URL` |
+| `crd` | `CapabilityBinding` objects in each project's control plane, behind a 60s cache | Nothing of its own — the `AUTHZ_SAR_*` control-plane settings below |
+| unset | Nothing. The assistant composes base platform tools only | — |
+
+Validation is per mode and refuses anything half-configured: an unknown value is
+an error, a mode missing its companion variable is an error, and a companion
+variable set for a mode that does not use it is **also** an error. That last one
+looks pedantic and is not: it is almost always a half-finished overlay edit, and
+failing at boot is how the operator finds out, rather than discovering at the
+next incident that the fixture they thought they removed is still the source of
+truth.
+
+**The inference shim is temporary — set the mode explicitly now.** Before the
+enum existed the mode was implied by whichever companion variable was set. So
+for one release, when `CAPABILITY_SOURCE` is unset and exactly one of
+`CAPABILITY_DOCS_FIXTURE` or `CAPABILITY_PROVIDER_URL` is set, that mode is
+inferred and a deprecation warning is logged at startup. When **both** are set
+and no mode is given, boot fails rather than picking one — the operator has not
+said which they meant, and guessing would silently serve the wrong catalog. The
+inference and its warning are removed in the next release; an overlay that still
+relies on them stops composing capabilities at that point, so declare the mode
+while the warning is still the only consequence.
+
+### `crd` mode takes the control plane it already has
+
+`CAPABILITY_SOURCE=crd` has no companion variable. The control-plane base URL,
+CA bundle, and credential it uses are the ones the SubjectAccessReview path is
+already configured with — `AUTHZ_SAR_API_URL`, `AUTHZ_SAR_CA_CERT_PATH`,
+`AUTHZ_SAR_CLIENT_CERT_PATH`, `AUTHZ_SAR_CLIENT_KEY_PATH`. Two ways to name one
+control plane is two ways to point half the service at the wrong one, and the
+half that ends up misdirected here is the one that decides what a project is
+entitled to.
+
+**The credential is a client certificate, not the service-account token.** Milo
+validates service-account tokens only against its own issuer, so a token minted
+by the workload cluster is rejected with a 401 before the body is read; an
+in-cluster service identifies itself to Milo by presenting a certificate signed
+by the control-plane CA (`internal/auth/transport.go`). A deployment that sets
+only `AUTHZ_SAR_TOKEN_PATH` and expects capability reads to work has configured
+the path that silently 401s — every project degrades to built-ins, and the only
+evidence is `capability.crd.fetch_failed` plus a `refresh_failed` rate on
+`assistant_capability_fetch_total`.
+
+Reads are one LIST per project per 60 seconds, cached, serving the last good
+answer if a refresh fails. The TTL is a constant rather than configuration, for
+the same reason the SAR cache's TTL is: it is a staleness budget the platform
+has already justified once, and a second, differently-tuned copy of it would be
+a second thing to reason about during an incident. See
+[capability-reference.md](capability-reference.md#crd-source-capabilitybinding)
+for the object and the degradation contract.
+
+### Two host lists, not one
+
+`CAPABILITY_MCP_ENDPOINT_HOSTS` and `CAPABILITY_IDENTITY_FORWARD_HOSTS` hold the
+same value in production — the AI gateway — and are still two variables on
+purpose, because they answer different questions. One says an endpoint **may be
+dialed at all**; the other says it **may receive the calling user's bearer
+token**. Collapsing them would mean that an operator widening the reachable set
+— to try a new provider endpoint, say — silently adds an entry to the
+credential-forwarding list that nobody reviewed. Widening reachability is a
+routine change; widening who gets a customer's credential is not, and the two
+must not share an edit.
+
+Neither is `ComposeOptions.AllowedHosts`, the SSRF guard's allow-list. That one
+governs *all three* provider-URL sinks — knowledge sources, skill bodies, and
+MCP endpoints alike. Setting it to the gateway would confine knowledge and skill
+fetches to the gateway too, and those legitimately point at providers' own
+documentation hosts. The constraint expressed here is narrower than SSRF: MCP
+traffic goes through the gateway, and nothing else about a provider's URLs
+changes.
+
+The failure this prevents is a catalog-side one. The capability projection is
+responsible for rewriting each MCP `endpoint` to the gateway's MCPRoute URL; if a
+regression publishes a provider's raw address instead, the assistant would
+otherwise dial it faithfully — and the gateway copy of the tool allow-list, the
+metering of that call, and (on a host that happened to match the forward list)
+the identity check would all be bypassed at once. The check runs at the dial
+site, in `connectTools`, because that is the step an attacker or a buggy
+controller cannot route around. Empty disables it, which is what keeps the
+fixture path, `e2e/`, and the dev overlays working unchanged.
 
 ## Model modes
 
@@ -134,10 +227,21 @@ re-checks and permits immediately.
 
 ### What the assistant is permitted to do
 
-Only `system:auth-delegator` — create TokenReviews and SubjectAccessReviews
-(`config/base/rbac.yaml`). It holds no read access to any project resource: it
-asks the control plane questions about the caller, and never acquires the
-caller's authority.
+In the cluster it runs in, only `system:auth-delegator` — create TokenReviews
+and SubjectAccessReviews (`config/base/rbac.yaml`). It never acquires the
+caller's authority: it asks the control plane questions about the caller, and
+the answer is a yes or a no.
+
+In `CAPABILITY_SOURCE=crd` mode it also reads one project resource, as itself:
+`get`/`list` on `capabilitybindings` and `patch` on
+`capabilitybindings/status`, granted by a ClusterRole at Milo root
+(`config/milo/rbac/control-plane-auth-delegator.yaml`) rather than in this
+cluster, because that is where the objects are. Reading a project's entitlement
+with the service's own identity is a different thing from acting with the
+caller's — nothing there forwards or borrows a user's credential — but the
+"reads no project resource" half of the old promise is no longer literally true,
+and a reader checking that claim against the code should know which half
+survived.
 
 ### Boot requirements
 

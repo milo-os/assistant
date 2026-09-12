@@ -125,7 +125,9 @@ func TestLoad_PersonaPromptFileDefaultsEmpty(t *testing.T) {
 	}
 }
 
-func TestLoad_CapabilitySourcesMutuallyExclusive(t *testing.T) {
+// Both companions set with no explicit mode is still refused — and the error
+// now names CAPABILITY_SOURCE, because declaring the mode is the fix.
+func TestLoad_CapabilitySourcesAmbiguousWithoutMode(t *testing.T) {
 	_, err := load(t, map[string]string{
 		"CAPABILITY_DOCS_FIXTURE": "/tmp/caps.json",
 		"CAPABILITY_PROVIDER_URL": "http://capability-adapter",
@@ -134,14 +136,135 @@ func TestLoad_CapabilitySourcesMutuallyExclusive(t *testing.T) {
 	if !errors.As(err, &cfgErr) {
 		t.Fatalf("want *config.Error, got %v", err)
 	}
-	found := false
-	for _, fe := range cfgErr.Errors {
-		if fe.Field == "CAPABILITY_PROVIDER_URL" {
-			found = true
+	if !hasField(cfgErr, "CAPABILITY_SOURCE") {
+		t.Fatalf("expected a CAPABILITY_SOURCE error, got %+v", cfgErr.Errors)
+	}
+}
+
+func hasField(e *Error, field string) bool {
+	for _, fe := range e.Errors {
+		if fe.Field == field {
+			return true
 		}
 	}
-	if !found {
-		t.Fatalf("expected a CAPABILITY_PROVIDER_URL mutual-exclusion error, got %+v", cfgErr.Errors)
+	return false
+}
+
+func TestLoad_CapabilitySourceExplicitModes(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want CapabilitySourceMode
+	}{
+		{"fixture", map[string]string{"CAPABILITY_SOURCE": "fixture", "CAPABILITY_DOCS_FIXTURE": "/tmp/caps.json"}, CapabilitySourceFixture},
+		{"http", map[string]string{"CAPABILITY_SOURCE": "http", "CAPABILITY_PROVIDER_URL": "http://adapter"}, CapabilitySourceHTTP},
+		// crd takes no companion: it reads the control plane AUTHZ_SAR_* names.
+		{"crd", map[string]string{"CAPABILITY_SOURCE": "crd"}, CapabilitySourceCRD},
+		{"unset", nil, CapabilitySourceNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := load(t, tc.env)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.CapabilitySource != tc.want {
+				t.Errorf("capability source = %q, want %q", cfg.CapabilitySource, tc.want)
+			}
+			if len(cfg.Warnings) != 0 {
+				t.Errorf("explicit configuration should warn about nothing, got %v", cfg.Warnings)
+			}
+		})
+	}
+}
+
+func TestLoad_CapabilitySourceUnknownValue(t *testing.T) {
+	_, err := load(t, map[string]string{"CAPABILITY_SOURCE": "informer"})
+	var cfgErr *Error
+	if !errors.As(err, &cfgErr) || !hasField(cfgErr, "CAPABILITY_SOURCE") {
+		t.Fatalf("want a CAPABILITY_SOURCE enum error, got %v", err)
+	}
+}
+
+// Per-mode validation: the companion a mode needs, and none it does not.
+func TestLoad_CapabilitySourcePerModeValidation(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   map[string]string
+		field string
+	}{
+		{"fixture without path", map[string]string{"CAPABILITY_SOURCE": "fixture"}, "CAPABILITY_DOCS_FIXTURE"},
+		{"http without url", map[string]string{"CAPABILITY_SOURCE": "http"}, "CAPABILITY_PROVIDER_URL"},
+		{"fixture with provider url", map[string]string{"CAPABILITY_SOURCE": "fixture", "CAPABILITY_DOCS_FIXTURE": "/x", "CAPABILITY_PROVIDER_URL": "http://a"}, "CAPABILITY_PROVIDER_URL"},
+		{"http with fixture", map[string]string{"CAPABILITY_SOURCE": "http", "CAPABILITY_PROVIDER_URL": "http://a", "CAPABILITY_DOCS_FIXTURE": "/x"}, "CAPABILITY_DOCS_FIXTURE"},
+		{"crd with fixture", map[string]string{"CAPABILITY_SOURCE": "crd", "CAPABILITY_DOCS_FIXTURE": "/x"}, "CAPABILITY_DOCS_FIXTURE"},
+		{"crd with provider url", map[string]string{"CAPABILITY_SOURCE": "crd", "CAPABILITY_PROVIDER_URL": "http://a"}, "CAPABILITY_PROVIDER_URL"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := load(t, tc.env)
+			var cfgErr *Error
+			if !errors.As(err, &cfgErr) || !hasField(cfgErr, tc.field) {
+				t.Fatalf("want a %s error, got %v", tc.field, err)
+			}
+		})
+	}
+}
+
+// The one-release shim: existing overlays that only set a companion variable
+// keep working, and say so.
+func TestLoad_CapabilitySourceInferenceShim(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want CapabilitySourceMode
+	}{
+		{"fixture", map[string]string{"CAPABILITY_DOCS_FIXTURE": "/tmp/caps.json"}, CapabilitySourceFixture},
+		{"http", map[string]string{"CAPABILITY_PROVIDER_URL": "http://adapter"}, CapabilitySourceHTTP},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := load(t, tc.env)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.CapabilitySource != tc.want {
+				t.Errorf("inferred source = %q, want %q", cfg.CapabilitySource, tc.want)
+			}
+			if len(cfg.Warnings) == 0 {
+				t.Error("inference must warn — a shim nobody is told about is a shim nobody removes")
+			}
+		})
+	}
+}
+
+func TestLoad_CapabilityMCPEndpointHosts(t *testing.T) {
+	cfg, err := load(t, map[string]string{
+		"CAPABILITY_MCP_ENDPOINT_HOSTS": " gateway.svc.cluster.local , ,mcp.datum.test ",
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := []string{"gateway.svc.cluster.local", "mcp.datum.test"}
+	if len(cfg.CapabilityMCPEndpointHosts) != len(want) {
+		t.Fatalf("hosts = %v, want %v", cfg.CapabilityMCPEndpointHosts, want)
+	}
+	for i, h := range want {
+		if cfg.CapabilityMCPEndpointHosts[i] != h {
+			t.Errorf("hosts[%d] = %q, want %q", i, cfg.CapabilityMCPEndpointHosts[i], h)
+		}
+	}
+}
+
+// Empty means the dial-site check is disabled, which is what keeps the fixture,
+// e2e, and dev overlays working unchanged.
+func TestLoad_CapabilityMCPEndpointHostsDefaultEmpty(t *testing.T) {
+	cfg, err := load(t, nil)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.CapabilityMCPEndpointHosts) != 0 {
+		t.Errorf("hosts = %v, want empty", cfg.CapabilityMCPEndpointHosts)
 	}
 }
 

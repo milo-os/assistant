@@ -1,14 +1,56 @@
-# The assistant's own identity, and the only cluster permission it needs.
+# The assistant's own identity, and the cluster permissions it needs.
 #
 # Both auth seams are answered by the control plane: a TokenReview resolves the
 # caller's identity, a SubjectAccessReview decides whether that caller may act
 # on a project. Issuing either requires create on the corresponding review
 # resource, which is exactly what `system:auth-delegator` grants — the same
-# binding the aggregated apiserver uses for its delegated auth.
+# binding the aggregated apiserver uses for its delegated auth. The assistant
+# asks the control plane questions about the caller; it never gains the caller's
+# authority.
 #
-# Note what this does NOT grant: no read access to any project resource. The
-# assistant asks the control plane questions about the caller; it never gains
-# the caller's authority.
+# That second clause is the one that carries the weight, and it is unchanged by
+# the capability work. The first clause used to be stronger — "no read access to
+# any project resource" — and is now qualified: with CAPABILITY_SOURCE=crd the
+# assistant reads one project resource, `capabilitybindings`, as itself. It
+# reads capability CONFIGURATION, one project at a time, with its own identity;
+# it still never forwards, borrows, or acquires a caller's credential, and it
+# still reads no project data on a caller's behalf.
+#
+# There is deliberately NO capabilitybindings grant in this file, and that is a
+# correction rather than an omission. A milo project is a virtual project
+# control plane, not a namespace in this cluster: `CapabilityBinding` objects
+# live behind
+#   /apis/resourcemanager.miloapis.com/v1alpha1/projects/{project}/control-plane
+# and the assistant reaches them with a cached per-project LIST over that path
+# (internal/auth/sar.go:73 already composes the same prefix for every
+# authorization check). A ClusterRole here would grant read on a kind that has
+# no objects in this cluster — it would apply cleanly, audit cleanly, and
+# authorize nothing the service actually does, while reading to a future
+# maintainer as though tenant isolation were an RBAC matter.
+#
+# Where the grant actually lives (corrected 2026-09): a ClusterRole applied to
+# MILO ROOT — config/milo/rbac/control-plane-auth-delegator.yaml — bound to the
+# assistant's client-certificate identity, granting get/list on
+# capabilitybindings and patch on capabilitybindings/status. It is RBAC there,
+# not Milo IAM: Milo runs --authorization-mode=RBAC,Webhook and the IAM/Webhook
+# leg cannot authorize a certificate identity at all, because it requires a
+# subject UID that x509 auth never supplies (see that file, and
+# config/milo/iam/roles/capability-viewer.yaml for the full reasoning). An
+# earlier revision of this comment said access was "decided by Milo IAM, per
+# project"; both halves were wrong — it is RBAC, and root RBAC is evaluated for
+# project paths, so the grant spans every project plane.
+#
+# Two consequences worth stating so they are not rediscovered the hard way.
+# Because the assistant reads one project per request rather than caching every
+# tenant's config in one address space, capability.ScopeDocuments is
+# defense-in-depth again — the second of two independent checks, not the only
+# boundary — and the blast radius of a bug in it is bounded by what a single
+# project's control plane will serve. And a dev overlay that runs CRD mode
+# against a single kind apiserver, where the project path resolves to the same
+# server, does need an ordinary grant for this kind — a ClusterRole, since
+# CapabilityBinding is cluster-scoped; it lives in
+# config/overlays/dev-crd/binding-reader-rbac.yaml, where its scope is visibly a
+# development convenience, and not in base where it would ship to production.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

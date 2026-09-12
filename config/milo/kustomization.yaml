@@ -1,18 +1,62 @@
 # The assistant's projection INTO the Milo control plane.
 #
 # This is not deployed alongside the service — it is applied to Milo itself, by
-# a separate Flux Kustomization in datum-cloud/infra
-# (apps/patch-assistant/base/milo-service-configuration.yaml) that points at
-# `./milo/` inside this repo's published kustomize bundle and targets the
-# milo-system namespace.
+# a separate Flux Kustomization in datum-cloud/infra that points at `./milo/`
+# inside this repo's published kustomize bundle and targets the milo-system
+# namespace.
 #
 # Why it is load-bearing: with AUTHZ_MODE=sar the assistant asks Milo whether
 # the caller may `create` conversations.assistant.miloapis.com in the project's
-# namespace, and the check FAILS CLOSED. Until the ProtectedResource below
+# namespace, and the check FAILS CLOSED. Until the ProtectedResource in iam/
 # registers that permission with Milo's IAM, nothing can grant it and every
 # request 403s.
+#
+# ─── HOW THIS DIRECTORY REACHES MILO ─────────────────────────────────────────
+#
+# datum-cloud/infra apps/patch-assistant/base/milo-service-configuration.yaml.
+# A Flux Kustomization named patch-assistant-milo-configuration applies
+# `path: ./milo/` — this directory — from the OCIRepository/assistant-kustomize
+# bundle into milo-system, with prune: true on a 1h interval. What distinguishes
+# a Kustomization that targets MILO from one that targets the workload cluster
+# is the kubeConfig: it authenticates with an installer certificate
+# (CN system:control@services.miloapis.com) rather than the local service
+# account.
+#
+# So anything added here ships to Milo automatically — including the
+# capabilitybindings CRD composed in below and the RBAC in rbac/. There is no
+# infra change to make for this directory to be delivered.
+#
+# An earlier revision of this header claimed that app did not exist and that the
+# delivery path was unbuilt. That was read off a stale local checkout of the
+# infra repository; it is present on origin/main. The claim is withdrawn rather
+# than deleted, because it was wrong in a way worth not repeating: verify
+# sibling repositories against their REMOTE, not the working tree on a laptop.
+#     prune: true
+#     wait: true
+#
+# Without that kubeConfig the manifests apply to the workload cluster, where a
+# ProtectedResource has no controller and an iam.miloapis.com Role is not even a
+# registered kind — so a wrong target fails loudly for the IAM objects, but the
+# CRD below would apply cleanly to the wrong cluster and be silently useless.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
+
+resources:
+  # The CapabilityBinding CRD, applied to MILO ROOT — once, cluster-wide — and
+  # not to the assistant's workload cluster (where it lived until 2026-09).
+  #
+  # Milo exempts apiextensions.k8s.io/customresourcedefinitions from its
+  # project-partitioning storage decorator
+  # (milo/internal/apiserver/storage/project/restoptions.go:35-38: "Leave CRD
+  # *definitions* global so discovery is shared cluster-wide") while wrapping
+  # every other resource. Definitions are therefore global and only INSTANCE
+  # data is per-project: one registration here makes the kind discoverable in
+  # every project control plane, and the objects themselves stay partitioned per
+  # project, which is the tenancy property the capability source relies on.
+  #
+  # It is a `resources` entry rather than a component because a CRD is a plain
+  # cluster object; nothing about it is conditional on an overlay.
+  - ../crd
 
 components:
   - iam/

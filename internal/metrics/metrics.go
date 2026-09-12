@@ -53,6 +53,57 @@ type Metrics struct {
 	// GapReportTotal is assistant_gap_report_total, labeled by outcome
 	// (success/error) — see internal/capability's report_capability_gap tool.
 	GapReportTotal *prometheus.CounterVec
+
+	// ── Capability source (CRD) ───────────────────────────────
+	//
+	// None of the series below carries a project label, and none ever should.
+	// Project cardinality is set by tenant count, a number this repository
+	// neither controls nor can bound, and a per-tenant time series is how a
+	// metrics backend falls over. An operator debugging one project reads the
+	// logs, which already carry projectName on every capability line.
+
+	// CapabilityFetchTotal is assistant_capability_fetch_total, labeled by
+	// outcome (hit/miss/refresh_failed/stale_served/empty). One counter answers
+	// both "is the cache working" and "is the control plane failing":
+	// stale_served is the alertable series — a nonzero rate means projects are
+	// running on configuration the control plane can no longer confirm.
+	CapabilityFetchTotal *prometheus.CounterVec
+	// CapabilityFetchDuration is assistant_capability_fetch_duration_seconds,
+	// labeled by outcome (ok/error), over the LIST itself. The whole point of
+	// the cache is to take this latency off the turn path; that claim is only
+	// provable if the uncommon path is measured.
+	CapabilityFetchDuration *prometheus.HistogramVec
+	// CapabilityCacheEntryAge is assistant_capability_cache_entry_age_seconds,
+	// observed at SERVE time. A histogram, not a gauge: entries are per project,
+	// so there is no single "the cache" age to gauge, and the number an operator
+	// wants during an outage is the p99 of what is actually being served.
+	CapabilityCacheEntryAge prometheus.Histogram
+	// CapabilityCacheEntries is assistant_capability_cache_entries, the resident
+	// entry count — the series that says whether the bounded cache is at its cap
+	// and evicting live entries.
+	CapabilityCacheEntries prometheus.Gauge
+
+	// CapabilityStatusWriteTotal is assistant_capability_status_write_total,
+	// labeled by outcome (ok/error/forbidden/dropped), over the status
+	// conditions written back onto CapabilityBinding objects. Three of the four
+	// outcomes are distinct questions, which is why they are not one "error":
+	// "forbidden" is the standing open question about whether Milo evaluates a
+	// status write as capabilitybindings.patch on the parent or as a distinct
+	// subresource permission — if it is the latter, EVERY write 403s in
+	// production and nothing else is visibly wrong, so it must not hide inside
+	// a generic error rate. "dropped" is the bounded queue shedding under a
+	// control-plane outage, which is the designed degradation ("status not
+	// updated") and not a fault. No project label, for the reason above.
+	CapabilityStatusWriteTotal *prometheus.CounterVec
+
+	// CapabilityScopeDropped is assistant_capability_scope_dropped_total,
+	// labeled by reason ("mismatch"), incremented by capability.ScopeDocuments.
+	// Tenant isolation is the one boundary that must not be observable only by
+	// grepping logs: "mismatch" is a document whose own namespace named another
+	// project (a Source bug or an attempted crossing), and any non-zero value is
+	// worth an alert. It is labeled rather than bare so a second reason can be
+	// added without breaking a dashboard.
+	CapabilityScopeDropped *prometheus.CounterVec
 }
 
 // New builds an unregistered Metrics set. The caller that owns a Prometheus
@@ -82,6 +133,35 @@ func New() *Metrics {
 			Name: "assistant_gap_report_total",
 			Help: "Total capability-gap reports by outcome (success/error).",
 		}, []string{"outcome"}),
+		CapabilityFetchTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "assistant_capability_fetch_total",
+			Help: "Total capability-document lookups by outcome (hit/miss/refresh_failed/stale_served/empty).",
+		}, []string{"outcome"}),
+		CapabilityFetchDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "assistant_capability_fetch_duration_seconds",
+			Help:    "Capability-binding LIST duration in seconds by outcome (ok/error).",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"outcome"}),
+		CapabilityCacheEntryAge: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "assistant_capability_cache_entry_age_seconds",
+			Help: "Age in seconds of the capability cache entry served, observed at serve time.",
+			// The TTL is 60s, so a healthy deployment lives entirely in the
+			// first few buckets; everything above 60 is a stale serve, and the
+			// long tail is what an outage looks like.
+			Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 900, 3600},
+		}),
+		CapabilityCacheEntries: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "assistant_capability_cache_entries",
+			Help: "Capability cache entries currently resident (one per active project).",
+		}),
+		CapabilityStatusWriteTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "assistant_capability_status_write_total",
+			Help: "Total CapabilityBinding status-condition writes by outcome (ok/error/forbidden/dropped).",
+		}, []string{"outcome"}),
+		CapabilityScopeDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "assistant_capability_scope_dropped_total",
+			Help: "Capability documents dropped by the tenant-scope gate, by reason (mismatch).",
+		}, []string{"reason"}),
 	}
 }
 
@@ -91,6 +171,8 @@ func New() *Metrics {
 func (m *Metrics) Collectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		m.TurnDuration, m.ToolCalls, m.ModelCallDuration, m.CompactionTotal, m.GapReportTotal,
+		m.CapabilityFetchTotal, m.CapabilityFetchDuration, m.CapabilityCacheEntryAge,
+		m.CapabilityCacheEntries, m.CapabilityStatusWriteTotal, m.CapabilityScopeDropped,
 	}
 }
 
@@ -137,4 +219,65 @@ func (m *Metrics) RecordGapReport(outcome string) {
 		return
 	}
 	m.GapReportTotal.WithLabelValues(outcome).Inc()
+}
+
+// RecordCapabilityFetch counts one capability-document lookup under outcome
+// ("hit"/"miss"/"refresh_failed"/"stale_served"/"empty"). A single lookup can
+// record more than one: a failed refresh that falls back to a retained entry
+// records refresh_failed AND stale_served, because the two questions
+// ("is the control plane answering" and "are users on old config") have
+// different answers and different alerts.
+func (m *Metrics) RecordCapabilityFetch(outcome string) {
+	if m == nil {
+		return
+	}
+	m.CapabilityFetchTotal.WithLabelValues(outcome).Inc()
+}
+
+// RecordCapabilityFetchDuration observes one capability LIST round-trip under
+// outcome ("ok"/"error").
+func (m *Metrics) RecordCapabilityFetchDuration(outcome string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.CapabilityFetchDuration.WithLabelValues(outcome).Observe(d.Seconds())
+}
+
+// RecordCapabilityCacheEntryAge observes the age of the cache entry being
+// served. Called at serve time only — an entry nobody reads has no age worth
+// reporting.
+func (m *Metrics) RecordCapabilityCacheEntryAge(age time.Duration) {
+	if m == nil {
+		return
+	}
+	m.CapabilityCacheEntryAge.Observe(age.Seconds())
+}
+
+// SetCapabilityCacheEntries publishes the resident capability-cache entry count.
+func (m *Metrics) SetCapabilityCacheEntries(n int) {
+	if m == nil {
+		return
+	}
+	m.CapabilityCacheEntries.Set(float64(n))
+}
+
+// RecordCapabilityStatusWrite counts one CapabilityBinding status-condition
+// write attempt under outcome ("ok"/"error"/"forbidden"/"dropped"). "dropped"
+// is recorded without any API call having been made — the bounded queue shed
+// the write rather than let a control-plane outage back up onto the request
+// path.
+func (m *Metrics) RecordCapabilityStatusWrite(outcome string) {
+	if m == nil {
+		return
+	}
+	m.CapabilityStatusWriteTotal.WithLabelValues(outcome).Inc()
+}
+
+// RecordCapabilityScopeDropped counts one document dropped by the tenant-scope
+// gate under reason ("mismatch").
+func (m *Metrics) RecordCapabilityScopeDropped(reason string) {
+	if m == nil {
+		return
+	}
+	m.CapabilityScopeDropped.WithLabelValues(reason).Inc()
 }

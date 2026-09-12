@@ -67,3 +67,16 @@ func newControlPlaneTransport(caCert, clientCert, clientKey []byte) (*http.Trans
 	}
 	return transport, nil
 }
+
+// NewControlPlaneTransport is [newControlPlaneTransport] for callers outside
+// this package — today the CRD capability source, which LISTs a project's
+// CapabilityBindings over the same control-plane connection the SAR path uses.
+//
+// It is exported rather than duplicated because the credential choice is the
+// easy thing to get wrong: a second client built from the service-account token
+// would 401 on every request for the reason documented above, and would do so
+// in a source whose failure mode is a silent degrade to "no capabilities". One
+// transport constructor means one place where that decision lives.
+func NewControlPlaneTransport(caCert, clientCert, clientKey []byte) (*http.Transport, error) {
+	return newControlPlaneTransport(caCert, clientCert, clientKey)
+}

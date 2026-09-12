@@ -1,0 +1,148 @@
+# CapabilityBinding — the one project resource the assistant reads as itself.
+#
+# Unlike every other resource registered here, this one is not served by the
+# assistant's aggregated apiserver: it is a CRD (config/crd/capabilitybindings.yaml)
+# whose objects live in PROJECT control planes — the definition itself is
+# registered once against Milo root, since Milo keeps CRD definitions global and
+# partitions only instance data (see config/crd/kustomization.yaml). Two parties
+# touch it, and only ONE of them is authorized through this registration:
+#
+#   * the service catalog's projection controller WRITES bindings — create,
+#     update, delete — as a project's entitlements are granted and withdrawn;
+#   * the assistant READS them (get/list, one project at a time, behind a
+#     short-TTL cache) and PATCHES the status subresource back with what it
+#     validated and composed.
+#
+# The assistant's read access does NOT come from this file, and an earlier
+# revision of this header said the opposite ("comes from Milo IAM, not from
+# cluster RBAC"). The correction, 2026-09:
+#
+#   Milo runs --authorization-mode=RBAC,Webhook. IAM is the Webhook leg, and it
+#   cannot authorize the assistant at all. The OpenFGA authorizer hard-requires a
+#   user UID on the review
+#   (openfga-provider/internal/webhook/subjectaccessreview_authorizer.go:333-336)
+#   and never consults groups; the assistant reaches Milo with an x509 client
+#   certificate, which supplies CN and O and never a UID. The IAM API enforces
+#   the same rule at write time —
+#   milo/pkg/apis/iam/v1alpha1/policybinding_types.go:22 requires a non-empty uid
+#   on every PolicyBinding subject except system: groups and
+#   WorkloadIdentityRules — so there is no PolicyBinding that could bind any Role
+#   here to `agent@assistant.datumapis.com`.
+#
+# The assistant is authorized on the RBAC leg instead, by the ClusterRole in
+# ../../rbac/control-plane-auth-delegator.yaml, which is evaluated for project
+# control-plane paths because the project router strips the prefix and recomputes
+# RequestInfo before authorization (milo/pkg/server/filters/projects.go:40-62).
+# Read that file before reasoning about the assistant's access; this one governs
+# the catalog and human callers.
+#
+# This ProtectedResource is still REQUIRED, for two reasons that have nothing to
+# do with the assistant: the Webhook leg fails closed on an unregistered
+# resource for every UID-bearing principal (below), and the catalog's projection
+# controller — which does have a bindable identity — is authorized entirely
+# through it.
+#
+# config/base/rbac.yaml still grants nothing on this kind, and that part was
+# right: a project is a virtual control plane, not a namespace in the cluster the
+# assistant runs in, so a ClusterRole THERE would authorize reads of objects that
+# do not exist. The grant that matters is the one in Milo root. (The same earlier
+# revision also said the assistant *watched* the kind; it does not — it LISTs one
+# project at a time behind a short-TTL cache. Both errors were artifacts of a
+# cluster-wide-informer design the project-control-plane topology makes
+# unimplementable; see docs/enhancements/crd-capability-source.md, "Rejected
+# alternatives".)
+#
+# Registering it is not optional bookkeeping. Milo's authorizer looks up a
+# ProtectedResource by spec.serviceRef.name + spec.plural and FAILS CLOSED when
+# there is none, and it separately rejects any verb not listed in
+# spec.permissions. Without this file the catalog's first attempt to publish an
+# entitlement 403s — and so does the assistant's first LIST — with a message
+# that reads like a missing grant rather than like an unregistered resource.
+#
+# serviceRef.name is the API GROUP, matching how the other files here name the
+# aggregated group — Milo resolves the ProtectedResource from the group on the
+# review. This group is deliberately NOT assistant.miloapis.com; see the CRD's
+# own header for why (the APIService owns that group/version).
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: capabilities.assistant.miloapis.com-capabilitybindings
+spec:
+  serviceRef:
+    name: "capabilities.assistant.miloapis.com"
+  kind: CapabilityBinding
+  plural: capabilitybindings
+  singular: capabilitybinding
+  # Every verb either party actually issues, because an unlisted verb is a
+  # fail-closed 403 rather than a policy decision:
+  #
+  #   create/update/delete  the catalog's projection. A binding is durable state
+  #                         a provider owns: entitlement granted, the reviewed
+  #                         configuration revised, entitlement withdrawn.
+  #                         Omitting delete would be the dangerous gap — an
+  #                         entitlement nobody can revoke, and with a TTL cache
+  #                         revocation IS deletion (a binding merely abandoned
+  #                         is served forever).
+  #   get/list              the assistant's read path, and a human's kubectl.
+  #   watch                 nobody in this repository. The assistant polls on a
+  #                         cache miss; watch is declared for `kubectl get -w`
+  #                         and for the catalog's own controller, which watches
+  #                         what it projects.
+  #   patch                 the assistant's status writeback. A status update is
+  #                         a PATCH to the status subresource, so the review
+  #                         arrives with verb `patch`; without it here the write
+  #                         403s and the feedback loop this design exists to
+  #                         build is silently dead. `update` covers the
+  #                         update-shaped path and is already present for the
+  #                         catalog.
+  #
+  # Note what is NOT expressible here: this list has no subresource axis, so it
+  # cannot distinguish "patch the spec" from "patch status". The split is
+  # enforced by the ROLES instead — capability-publisher omits patch, so the
+  # catalog cannot write status; see config/milo/iam/roles/. Ordinary Kubernetes
+  # RBAC *does* have a subresource axis, which is why the assistant's own grant
+  # (../../rbac/control-plane-auth-delegator.yaml) can be get/list on the object
+  # and patch on capabilitybindings/status only, and this list cannot. Whether
+  # Milo's authorizer evaluates a status write as `capabilitybindings.patch` on
+  # the parent (assumed here) or as a distinct subresource permission still needs
+  # confirmation for the CATALOG's side; it no longer blocks the assistant.
+  permissions:
+    - create
+    - update
+    - patch
+    - delete
+    - get
+    - list
+    - watch
+  # A binding is CLUSTER-SCOPED (spec.scope: Cluster on the CRD), matching the
+  # catalog's AgentBinding: a project control plane IS the tenancy boundary, so
+  # project-plane objects are not namespaced and a namespace would be a second,
+  # weaker copy of a boundary the plane already enforces.
+  #
+  # Parents are still declared, and cluster scope is not a reason to drop them —
+  # exactly the reasoning spelled out in assistantendpoints.yaml, which is also
+  # cluster-scoped. spec.parentResources is the IAM INHERITANCE GRAPH, not the
+  # API scope. Milo's authorizer derives scope from the caller's parent-context
+  # extra (iam.miloapis.com/parent-api-group, /parent-type, /parent-name), not
+  # from the request path, and the catalog reaches this kind through a project
+  # control plane, so its reviews arrive project-scoped. auth-provider-openfga
+  # then checks the permission against the *Project* object, and a parent type
+  # only carries the permissions of its declared descendants: omit Project and
+  # capabilitybindings.create is not a relation Project has, the check errors out
+  # and fails closed, and the capability-publisher grant silently never applies.
+  # Organization is listed so an org-level grant reaches the projects under it —
+  # a catalog operating across a customer's whole org is the normal case. The
+  # platform root is an implicit parent on every resource, so a root-level
+  # binding still works; listing these two only adds paths.
+  #
+  # For reference when this is next revisited: the service catalog ships NO
+  # ProtectedResource for its own cluster-scoped AgentBinding. That is not a
+  # precedent to copy — it means AgentBinding is authorized by the RBAC leg
+  # alone, which works there because the catalog's identity carries
+  # system:masters. Ours deliberately does not, and the catalog's projection
+  # identity does need this registration for the Webhook leg.
+  parentResources:
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Organization
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Project

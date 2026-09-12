@@ -4,6 +4,25 @@ resources:
   - namespace.yaml
   - assistant.yaml
   - rbac.yaml
+  # The CapabilityBinding CRD is deliberately NOT here, as of 2026-09. It used
+  # to be, on the reasoning that the schema should ship wherever the service
+  # ships; that was wrong about where the schema has to live.
+  #
+  # Milo keeps CRD DEFINITIONS global and partitions only INSTANCE data:
+  # milo/internal/apiserver/storage/project/restoptions.go:35-38 exempts
+  # apiextensions.k8s.io/customresourcedefinitions from the project-aware
+  # storage decorator ("Leave CRD *definitions* global so discovery is shared
+  # cluster-wide"), while every other resource is wrapped and partitioned per
+  # project. So the CRD is registered ONCE against Milo root and is thereby
+  # discoverable in every project control plane; it is composed from
+  # ../milo/kustomization.yaml, which is the path applied to Milo itself.
+  #
+  # Installing it here instead authorized nothing and registered nothing where
+  # it mattered: the kind would be established in the assistant's workload
+  # cluster, which holds no CapabilityBinding objects and is not what the
+  # assistant LISTs against, and every project would compose with built-ins
+  # only — with no error anywhere. See ../crd/kustomization.yaml.
+  #
   # The aggregated apiserver. Part of base rather than an overlay opt-in: it
   # serves assistant.miloapis.com (conversations, capabilitygapreports,
   # assistantendpoints), so a deployment without it has no read view of its own

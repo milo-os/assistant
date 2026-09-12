@@ -20,7 +20,9 @@ import (
 
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/agent"
+	"github.com/milo-os/assistant/internal/auth"
 	"github.com/milo-os/assistant/internal/capability"
+	"github.com/milo-os/assistant/internal/capability/crdsource"
 	"github.com/milo-os/assistant/internal/config"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
@@ -37,7 +39,11 @@ import (
 // to the A2A seam. metrics is shared with the caller's own HTTP telemetry so
 // conversation/tool/model/compaction/gap-report telemetry lands on the same
 // /metrics endpoint. The returned cleanup releases the conversation store's
-// resources (call it on shutdown; it is never nil).
+// resources, and stops the CRD status writer's background worker when one was
+// built (call it on shutdown; it is never nil). Both binaries must call it:
+// cmd/assistant defers it in main, cmd/assistant-apiserver folds it into the
+// config's own cleanup — the status writer owns a goroutine, so a caller that
+// drops this function leaks it.
 //
 // The conversation store is returned alongside the runner because callers
 // need it directly for conversation-rename operations — naming a conversation
@@ -61,20 +67,87 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		log.Info("agent.persona.source", "type", "default")
 	}
 
-	// Source selection (fixture and provider URL are mutually exclusive — the
-	// config loader rejects setting both).
-	var source capability.Source
-	switch {
-	case cfg.CapabilityProviderURL != "":
+	// Configuration notes the loader could not log itself (it owns no logger):
+	// today, the CAPABILITY_SOURCE inference shim.
+	for _, w := range cfg.Warnings {
+		log.Warn("config.deprecated", "note", w)
+	}
+
+	// Source selection. One explicit mode per deployment (CAPABILITY_SOURCE);
+	// the config loader has already validated that the mode's companion
+	// variables are present and that no other mode's are.
+	var (
+		source capability.Source
+		// statusWriter is non-nil only under CAPABILITY_SOURCE=crd. It is
+		// hoisted out of the switch because it owns a goroutine and must be
+		// folded into the cleanup chain built below, beside the stores.
+		statusWriter *crdsource.StatusWriter
+	)
+	switch cfg.CapabilitySource {
+	case config.CapabilitySourceHTTP:
 		source = capability.NewHTTPSource(cfg.CapabilityProviderURL, nil, log)
 		log.Info("agent.capability.source", "type", "http", "url", cfg.CapabilityProviderURL)
-	case cfg.CapabilityDocsFixture != "":
+	case config.CapabilitySourceFixture:
 		source = capability.NewFixtureSource(cfg.CapabilityDocsFixture, log)
 		log.Info("agent.capability.source", "type", "fixture", "path", cfg.CapabilityDocsFixture)
+	case config.CapabilitySourceCRD:
+		// The SAME control-plane coordinates and the SAME credential the
+		// SubjectAccessReview path uses (AUTHZ_SAR_*). The credential is a
+		// CLIENT CERTIFICATE, not the service-account token: Milo validates
+		// tokens only against its own issuer, so a workload-cluster token 401s
+		// before the body is read (internal/auth/transport.go).
+		creds, err := auth.LoadControlPlaneCredentials(
+			cfg.Auth.SARTokenPath, cfg.Auth.SARCACertPath,
+			cfg.Auth.SARClientCertPath, cfg.Auth.SARClientKeyPath)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// Status writeback: the feedback loop to whoever authored a binding.
+		// Same control plane, same credential, same addressing as the read —
+		// the write goes to the object the LIST produced. It never touches a
+		// request goroutine: observations are enqueued and a background worker
+		// PATCHes on transition only, so a control-plane outage degrades to
+		// "status not updated" and never to latency on a chat.
+		//
+		// Only the CRD mode gets one. The fixture and HTTP sources have no
+		// object to write status onto.
+		writer, err := crdsource.NewStatusWriter(crdsource.StatusWriterConfig{
+			APIURL:      cfg.Auth.SARAPIURL,
+			BearerToken: creds.BearerToken,
+			CACert:      creds.CACert,
+			ClientCert:  creds.ClientCert,
+			ClientKey:   creds.ClientKey,
+			Logger:      log,
+			Metrics:     metrics,
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		statusWriter = writer
+
+		crd, err := crdsource.New(crdsource.Config{
+			APIURL:      cfg.Auth.SARAPIURL,
+			BearerToken: creds.BearerToken,
+			CACert:      creds.CACert,
+			ClientCert:  creds.ClientCert,
+			ClientKey:   creds.ClientKey,
+			Observer:    statusWriter,
+			Logger:      log,
+			Metrics:     metrics,
+		})
+		if err != nil {
+			statusWriter.Close()
+			return nil, nil, nil, err
+		}
+		source = crd
+		log.Info("agent.capability.source", "type", "crd",
+			"apiUrl", cfg.Auth.SARAPIURL, "clientCert", creds.ClientCert != nil,
+			"cacheTtl", crdsource.DefaultCacheTTL.String(),
+			"statusWriteback", true)
 	default:
 		log.Warn("agent.capability.source",
 			"type", "none",
-			"reason", "neither CAPABILITY_PROVIDER_URL nor CAPABILITY_DOCS_FIXTURE set — no provider capabilities will be composed")
+			"reason", "CAPABILITY_SOURCE is unset — no provider capabilities will be composed")
 	}
 
 	emitter := usage.NewEmitter(usage.EmitterConfig{
@@ -96,12 +169,29 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		store   history.Store
 		cleanup = func() {}
 	)
+	if statusWriter != nil {
+		// Drains what this replica has already decided, inside its own bounded
+		// deadline, then stops the worker. Chained the same way as the stores
+		// below; order within the chain does not matter, since the writer
+		// shares no resource with them.
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); statusWriter.Close() }
+	}
+
 	if cfg.ConversationStoreURL != "" {
 		pg, err := history.NewPostgresStore(ctx, cfg.ConversationStoreURL, log)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		store, cleanup = pg, pg.Close
+		// Chained, never assigned. `store, cleanup = pg, pg.Close` would
+		// silently drop whatever is already in the chain — the status writer is
+		// registered above, so a plain assignment here leaks its worker and
+		// abandons its queued writes in exactly the configuration production
+		// runs (durable store set). The two stores below already chain; this
+		// one did not.
+		store = pg
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); pg.Close() }
 	} else {
 		store = history.NewMemoryStore()
 		log.Info("history.store", "type", "memory",
@@ -164,6 +254,20 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		return nil, nil, nil, err
 	}
 
+	// The Composed half of the status feedback loop, wired only when there is a
+	// status writer — i.e. only under CAPABILITY_SOURCE=crd, where a document
+	// corresponds to a CapabilityBinding object that can carry conditions. Taken
+	// as a method value rather than passing the writer itself so the agent
+	// package keeps knowing nothing about crdsource.
+	//
+	// Unlike Accepted (observed on a cache miss, once per 60s TTL), this fires on
+	// EVERY turn. It is affordable because the writer coalesces on transition: a
+	// binding whose outcome is unchanged enqueues nothing at all.
+	var observeComposed func(projectName, bindingName string, composeErr error)
+	if statusWriter != nil {
+		observeComposed = statusWriter.ObserveComposed
+	}
+
 	conv := agent.New(agent.Deps{
 		Model:                          model,
 		ModelMode:                      string(cfg.Model.Mode),
@@ -177,6 +281,8 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		PlanTokenKey:                   planTokenKey,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
 		CapabilityIdentityForwardHosts: cfg.CapabilityIdentityForwardHosts,
+		CapabilityMCPEndpointHosts:     cfg.CapabilityMCPEndpointHosts,
+		ObserveComposedBinding:         observeComposed,
 		Logger:                         log,
 		Metrics:                        metrics,
 	})

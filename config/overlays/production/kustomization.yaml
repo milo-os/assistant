@@ -96,9 +96,83 @@ patches:
           # capability document merely names.
           - name: CAPABILITY_IDENTITY_FORWARD_HOSTS
             value: "REPLACE_WITH_AI_GATEWAY_HOST"
+          # Hosts an MCP endpoint may be DIALED at, at all. Same comma-separated
+          # shape as the list above and, in practice, the same value — but a
+          # different question: that one is "may receive the user's credential",
+          # this one "may be dialed". They stay separate so widening one cannot
+          # silently widen the other; a credential-forwarding list should never
+          # grow an entry nobody reviewed.
+          #
+          # Every provider tool call is supposed to traverse the AI gateway.
+          # Leave this unset and the check is DISABLED, and three things break
+          # at once for any binding that names a provider's raw address:
+          #   1. The gateway's copy of the reviewed tool allow-list stops being
+          #      consulted. config/components/streamco/mcp-route.yaml is the
+          #      model: the MCPRoute is the enforcement point a compromised or
+          #      misconfigured assistant cannot bypass, and tools deliberately
+          #      left off it stay reachable on a direct connection.
+          #   2. Metering breaks. Provider tool invocations reach billing by
+          #      passing through the gateway; a direct connection is unbilled.
+          #   3. Caller-identity forwarding silently stops, because the raw host
+          #      is not in CAPABILITY_IDENTITY_FORWARD_HOSTS — so every
+          #      read-as-the-caller tool starts failing in a way that reads like
+          #      a provider bug rather than a projection bug.
+          #
+          # This matters MORE under CAPABILITY_SOURCE=crd than under http. With
+          # the HTTP adapter, the component that rewrote a raw endpoint to the
+          # gateway's MCPRoute URL and the component that served it were one
+          # process: the two could not drift. Under crd the rewrite happens in
+          # the catalog's projection controller and the dial happens here, hours
+          # later, from an object in between — so a controller regression can
+          # publish an un-rewritten endpoint that this service would otherwise
+          # faithfully dial. Set it now, before the flip, so the enforcement is
+          # already in place when the producer changes.
+          #
+          # An endpoint outside the list is skipped like any unreachable server,
+          # and the binding gets Accepted=False naming the unsanctioned host.
+          - name: CAPABILITY_MCP_ENDPOINT_HOSTS
+            value: "REPLACE_WITH_AI_GATEWAY_HOST"
           # ── Capabilities: the service catalog's provider API (NOT a fixture) ──
+          # The mode is stated, not inferred from the companion variable below.
+          # Production must not depend on the deprecation shim: when that shim
+          # is dropped, an overlay that relied on it starts up with NO
+          # capability source and every turn quietly degrades to built-ins.
+          - name: CAPABILITY_SOURCE
+            value: http
           - name: CAPABILITY_PROVIDER_URL
             value: "http://REPLACE_WITH_CAPABILITY_PROVIDER_HOST"
+          #
+          # ── The crd cutover, pre-staged ───────────────────────────────────
+          # Replace the two entries above with the one below to move this
+          # deployment onto CapabilityBinding objects read from each project's
+          # control plane. The flip is one env edit in each direction; the
+          # rollback is putting these two lines back (see
+          # docs/runbooks/capability-source-degraded.md, "Cutover and
+          # rollback", which is the procedure — this block is only the diff).
+          #
+          #   - name: CAPABILITY_SOURCE
+          #     value: crd
+          #
+          # crd takes NO companion variable. The control-plane URL, CA bundle
+          # and client certificate it needs are the ones the SAR authorizer is
+          # already configured with; a second way to name the same control
+          # plane is a second way to point half the service at the wrong one.
+          # Config validation rejects a companion variable left set for a mode
+          # that does not use it, so CAPABILITY_PROVIDER_URL must come out in
+          # the same edit — a half-finished overlay fails at boot rather than
+          # booting with a source nobody intended.
+          #
+          # NOT FLIPPED YET, and the two gates are not this repository's to
+          # close:
+          #   1. The catalog's projection controller is unpushed, so nothing is
+          #      writing CapabilityBinding objects. Flipping today would give
+          #      every project an empty LIST — which is indistinguishable from
+          #      "entitled to nothing" — and compose zero capabilities for all
+          #      of them.
+          #   2. The assistant's root-RBAC grant for capabilitybindings has not
+          #      been observed resolving against a real Milo project path. One
+          #      LIST, 200 vs 403, settles it; until it has been run the grant
+          #      is well-evidenced but unverified.
           # ── Usage metering collector ──
           - name: USAGE_GATEWAY_URL
             valueFrom:

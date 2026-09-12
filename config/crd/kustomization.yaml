@@ -1,0 +1,44 @@
+# The assistant's own CRDs. Composed from ../milo/ — NOT from config/base —
+# because a CRD definition belongs to Milo root, not to the cluster the
+# assistant's pods run in.
+#
+# Why the schema has to exist somewhere at all: a capability source that LISTs
+# `capabilitybindings` from a control plane with no such kind installed does not
+# crash, it serves every project zero capabilities — a silent, total capability
+# outage that looks exactly like "no entitlements yet".
+#
+# ─── RESOLVED, 2026-09: which cluster, and why this one ──────────────────────
+#
+# The question this header used to escalate ("do project control planes inherit
+# CRDs from a parent, or does each need its own registration?") is answered, and
+# the answer is in Milo's storage layer rather than in any doc:
+#
+#   milo/internal/apiserver/storage/project/restoptions.go:35-38 exempts
+#   apiextensions.k8s.io/customresourcedefinitions from the project-partitioning
+#   decorator — "Leave CRD *definitions* global so discovery is shared
+#   cluster-wide." Every other group/resource gets wrapped in
+#   ProjectAwareDecorator and is therefore partitioned per project.
+#
+# So CRD DEFINITIONS are global and INSTANCE DATA is per-project. Registering
+# this CRD once against Milo root makes the kind discoverable in every project
+# control plane; the CapabilityBinding objects the catalog writes and the
+# assistant reads are still partitioned per project, which is the tenancy
+# property the design depends on.
+#
+# That makes the old placement wrong in the specific way that is hardest to
+# notice: installed into the assistant's WORKLOAD cluster (config/base), the CRD
+# applies cleanly, kubectl reports it established, nothing errors — and the
+# kind is still absent from every project control plane the assistant actually
+# LISTs, so every project composes with built-ins only. That is defect #2 from
+# docs/enhancements/crd-capability-source.md, reintroduced through the install
+# path it was meant to close. ../base/kustomization.yaml no longer references
+# this directory; ../milo/kustomization.yaml does.
+#
+# What infra must add for this to reach production: see the delivery note at the
+# top of ../milo/kustomization.yaml. Applying it to Milo requires a Flux
+# Kustomization using the milo-configuration-kubeconfig secret, which lives in
+# datum-cloud/infra and not in this repository.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - capabilitybindings.yaml

@@ -86,6 +86,35 @@ tasks:
           echo "→ built {{.PLUGIN_BIN}} (INSTALL=1 to dev-install it for datumctl)"
         fi
 
+  generate:
+    desc: >-
+      Regenerate API machinery for pkg/apis: deepcopy functions and the CRD
+      manifests under config/crd. The Go types are the source of truth; the
+      generated files are checked in so a plain `go build` and a plain
+      `kubectl apply -k config/base` both work without a toolchain.
+    vars:
+      DEEPCOPY_GEN_VERSION: v0.35.3
+      CONTROLLER_GEN_VERSION: v0.21.0
+    cmds:
+      - GOBIN={{.TOOL_DIR}} go install k8s.io/code-generator/cmd/deepcopy-gen@{{.DEEPCOPY_GEN_VERSION}}
+      - GOBIN={{.TOOL_DIR}} go install sigs.k8s.io/controller-tools/cmd/controller-gen@{{.CONTROLLER_GEN_VERSION}}
+      - '{{.TOOL_DIR}}/deepcopy-gen --output-file zz_generated.deepcopy.go --bounding-dirs github.com/milo-os/assistant/pkg/apis ./pkg/apis/capabilities/v1alpha1'
+      # controller-gen rewrites the file wholesale, so the explanatory header in
+      # config/crd/capabilitybindings.yaml is re-applied afterwards.
+      - '{{.TOOL_DIR}}/controller-gen crd paths=./pkg/apis/capabilities/v1alpha1/... output:crd:dir=config/crd'
+      # controller-gen names its output "<group>_<plural>.yaml", which is not the
+      # name the kustomization references. Renaming is not cosmetic: without it
+      # generation writes a file nothing composes while the shipped manifest
+      # keeps its stale copy, so `task generate` reports success and the CRD
+      # silently drifts from the Go types it is supposed to be derived from.
+      - mv config/crd/capabilities.assistant.miloapis.com_capabilitybindings.yaml config/crd/capabilitybindings.yaml
+      - |
+        f=config/crd/capabilitybindings.yaml
+        if ! head -1 "$f" | grep -q '^#'; then
+          echo "→ re-applying the header comment stripped by controller-gen" >&2
+          cat config/crd/.capabilitybindings.header "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+        fi
+
   test:
     desc: Run unit tests (set TEST_DATABASE_URL to include Postgres store tests)
     cmds:
