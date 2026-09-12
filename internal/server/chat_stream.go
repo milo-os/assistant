@@ -87,6 +87,14 @@ func chatStreamHandler(runner assistanta2a.AgentRunner, authenticator auth.Authe
 			return
 		}
 
+		// Same step authMiddleware applies in front of POST /a2a: only past
+		// this point does the caller's own credential go downstream, so
+		// internal/capability can forward it to a capability provider (e.g.
+		// compute's MCP tool). Without it, the executor sees no identity to
+		// forward at all, indistinguishable from Milo's impersonation-header
+		// path this endpoint exists to avoid.
+		ctx = auth.ContextWithBearerToken(ctx, auth.ExtractBearerToken(r.Header.Get("Authorization")))
+
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			// Can't stream on this ResponseWriter (only in tests with an

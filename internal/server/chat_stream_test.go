@@ -12,19 +12,22 @@ import (
 	"testing"
 
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
+	"github.com/milo-os/assistant/internal/auth"
 	"github.com/milo-os/assistant/internal/logger"
 )
 
-// mentionRecordingRunner records the last request it was asked to run and
-// answers with a fixed, empty-of-events completion — enough to verify what
-// chatStreamHandler builds from the request without exercising fakeRunner's
-// streaming behavior too.
+// mentionRecordingRunner records the last request (and the ctx it arrived on)
+// it was asked to run, and answers with a fixed, empty-of-events completion —
+// enough to verify what chatStreamHandler builds from the request without
+// exercising fakeRunner's streaming behavior too.
 type mentionRecordingRunner struct {
 	lastReq assistanta2a.RunRequest
+	lastCtx context.Context
 }
 
-func (m *mentionRecordingRunner) Run(_ context.Context, req assistanta2a.RunRequest, _ assistanta2a.RunSink) assistanta2a.RunResult {
+func (m *mentionRecordingRunner) Run(ctx context.Context, req assistanta2a.RunRequest, _ assistanta2a.RunSink) assistanta2a.RunResult {
 	m.lastReq = req
+	m.lastCtx = ctx
 	return assistanta2a.RunResult{State: assistanta2a.RunCompleted, Text: "ok"}
 }
 
@@ -264,5 +267,42 @@ func TestChatStream_MentionsReachTheRunner(t *testing.T) {
 	}
 	if recorder.lastReq.ProjectName != project {
 		t.Fatalf("projectName = %q, want %q", recorder.lastReq.ProjectName, project)
+	}
+}
+
+// This is the regression this endpoint exists to fix, restated as a test: a
+// capability provider (e.g. compute's MCP tool) only gets a forwardable
+// identity when the caller's raw bearer token is on the context Run receives,
+// via [auth.BearerTokenFromContext]. authMiddleware stamps this for POST /a2a;
+// chatStreamHandler must stamp it too, since it authenticates independently
+// rather than going through that middleware. Caught live in staging: a
+// request through this exact endpoint completed but the tool call inside it
+// reported no identity was forwarded, because this line was missing.
+func TestChatStream_ForwardsBearerTokenForCapabilityProviders(t *testing.T) {
+	recorder := &mentionRecordingRunner{}
+	cfg := testConfig(t)
+	authn, authz := testAuth()
+	app := New(Deps{
+		Config:        cfg,
+		Logger:        logger.Silent(),
+		Authenticator: authn,
+		Authorizer:    authz,
+		Runner:        recorder,
+	})
+	srv := httptest.NewServer(app)
+	defer srv.Close()
+
+	res := postChatStream(t, srv, goodToken, "c1", project, map[string]any{"text": "hi"})
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	_ = readChatFrames(t, res)
+
+	if recorder.lastCtx == nil {
+		t.Fatal("runner never ran")
+	}
+	if got := auth.BearerTokenFromContext(recorder.lastCtx); got != goodToken {
+		t.Fatalf("bearer token on ctx = %q, want %q (capability providers forward this)", got, goodToken)
 	}
 }
