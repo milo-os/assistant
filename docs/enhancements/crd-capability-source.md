@@ -985,7 +985,11 @@ at composition time, reported through `Accepted`.** A new config value —
 `parseHostAllowList` (`internal/capability/urlguard.go:69`) and consulted in
 `connectTools` before dial: an endpoint whose host is outside the list is
 skipped, exactly as an endpoint that fails connect is skipped today, and the
-binding gets `Accepted=False` with a reason naming the unsanctioned host.
+binding gets `Composed=False` with a reason naming the unsanctioned host.
+**Not `Accepted=False`:** the spec is perfectly valid, and saying otherwise
+would tell a provider to go looking for a schema error that is not there. The
+verdict is about dial policy, so it belongs on the condition that reports what
+this turn could actually use.
 Empty means disabled, so dev and the fixture path are unaffected; production
 sets it to the gateway.
 
@@ -1017,7 +1021,7 @@ Three notes on why this specific shape:
 The status condition is the *reporting* channel, not the enforcement — which
 is the whole point of defect #3 applied to this case: a projection regression
 that would otherwise manifest as "identity forwarding mysteriously stopped"
-instead manifests as an `Accepted=False` condition naming the wrong host, on
+instead manifests as a `Composed=False` condition naming the wrong host, on
 the object the catalog team owns.
 
 ---
@@ -1076,7 +1080,7 @@ since landed.
    `kubectl describe capabilitybinding` shows why a broken binding is not
    composing.
 6. **Gateway endpoint enforcement — DONE.** `CAPABILITY_MCP_ENDPOINT_HOSTS`, the check
-   in `connectTools`, and the `Accepted=False` reason for an unsanctioned host;
+   in `connectTools`, and the `Composed=False` reason for an unsanctioned host;
    set it on the gateway host in `config/base/assistant.yaml` beside the
    existing `CAPABILITY_IDENTITY_FORWARD_HOSTS`. Ordered after phase 5 because
    the condition is how the rejection is reported, and must ship with the
