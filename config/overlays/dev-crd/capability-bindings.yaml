@@ -1,0 +1,74 @@
+# Seed bindings for the dev playground — the CapabilityBinding equivalent of
+# overlays/dev/capability-documents.json, field for field.
+#
+# Seeded from the overlay rather than from the service catalog on purpose: the
+# CRD path stays testable in this repository alone, which is the same standalone
+# property the fixture gives us today, one layer up. In production the catalog's
+# projection controller writes these from its own AgentBinding records; nothing
+# here depends on that controller existing.
+#
+# CLUSTER-SCOPED, since 2026-09 — there is no namespace, and that is the point.
+# A CapabilityBinding lives in ONE project's control plane, and the plane is the
+# tenancy boundary: every object in it belongs to that project by construction,
+# so a namespace would be a second, weaker copy of a statement the plane already
+# makes. The catalog's AgentBinding, which produces these, is cluster-scoped for
+# the same reason.
+#
+# The consequence for THIS file is the one that bites: in kind there is only one
+# apiserver and therefore only one plane, so this binding is visible to every
+# project a dev overlay might address. Nothing here states that it entitles
+# demo-project — in production the URL path does, and here nothing does. Do not
+# read a binding appearing for demo-project as evidence that per-project scoping
+# works; see the caveat in kustomization.yaml.
+apiVersion: capabilities.assistant.miloapis.com/v1alpha1
+kind: CapabilityBinding
+metadata:
+  name: streamco-playground-binding
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+spec:
+  serviceRef:
+    name: streaming-streamco-example
+  serviceName: streaming.streamco.example
+  serviceAgentRef:
+    name: streamco-streaming-agent
+  configurationVersion: v1-playground
+  # The provider's OWN project, where its team reviews capability-gap reports —
+  # never the consumer project above.
+  reportingProject: streamco-platform
+  knowledge:
+    sources:
+      - type: LLMDocs
+        title: StreamCo overview
+        url: http://streamco.patch-playground.svc.cluster.local:7810/llms-full.txt
+    concepts:
+      - gvk:
+          group: streaming.streamco.example
+          kind: Stream
+        summary: A live media stream
+  tools:
+    mcpServers:
+      - name: streamco
+        # The AI GATEWAY, not StreamCo directly — as the catalog's projection
+        # controller is required to rewrite it in production. Dialing the
+        # provider directly would bypass the gateway-side copy of the tool
+        # allow-list, go unmetered, and receive no caller identity (the raw host
+        # is not in CAPABILITY_IDENTITY_FORWARD_HOSTS). CAPABILITY_MCP_ENDPOINT_HOSTS
+        # in config/base/assistant.yaml refuses to dial anything else.
+        endpoint: http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local:80/mcp
+        toolSelector:
+          include:
+            - streamco-backend__streams_list
+            - streamco-backend__streams_get
+            - streamco-backend__pipeline_diagnose
+        mutating: []
+  skills:
+    - name: lag-triage
+      description: Step-by-step procedure for triaging pipeline consumer lag
+      source: http://streamco.patch-playground.svc.cluster.local:7810/runbooks/lag.md
+  authority:
+    reads:
+      - gvk:
+          group: streaming.streamco.example
+          kind: "*"
+    maxTaskDurationSeconds: 60

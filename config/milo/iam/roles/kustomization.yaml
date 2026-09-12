@@ -4,4 +4,6 @@ kind: Component
 resources:
   - conversation-creator.yaml
   - conversation-viewer.yaml
+  - capability-publisher.yaml
+  - capability-viewer.yaml
   - user.yaml

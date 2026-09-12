@@ -138,6 +138,28 @@ type Deps struct {
 	// turn's project. Empty (the default) forwards to nobody; a capability
 	// document naming an endpoint never sanctions it. See internal/capability.
 	CapabilityIdentityForwardHosts []string
+	// CapabilityMCPEndpointHosts is the operator-sanctioned set of hosts an MCP
+	// endpoint may be DIALED at — in this platform, the AI gateway, because that
+	// is where the reviewed tool allow-list is enforced a second time and where
+	// provider tool calls are metered. Empty (the default) disables the check.
+	// Separate from CapabilityIdentityForwardHosts on purpose: "may be dialed"
+	// and "may receive the user's credential" are different predicates.
+	CapabilityMCPEndpointHosts []string
+	// ObserveComposedBinding, when non-nil, receives one verdict per capability
+	// document composed on a turn, keyed by (project, binding name): nil error
+	// when that binding's declared capabilities came up, non-nil naming what did
+	// not. Production wires it to the CRD status writer
+	// (crdsource.StatusWriter.ObserveComposed), which turns it into the binding's
+	// Composed condition — the feedback loop that tells a provider their MCP
+	// endpoint is unreachable instead of burying it in this service's logs.
+	//
+	// Set ONLY under CAPABILITY_SOURCE=crd: the
+	// fixture and HTTP sources have no object to write a status onto, and a
+	// document from them has no binding name to key by. Nil (the default)
+	// disables the reporting entirely — composition is byte-for-byte unchanged.
+	//
+	// It must not block: it is called on the turn's own goroutine.
+	ObserveComposedBinding func(projectName, bindingName string, composeErr error)
 	// AllowPrivateCapabilityNetworks relaxes the capability SSRF guard's
 	// loopback/RFC1918 block (link-local/metadata stay blocked either way). The
 	// platform's capability endpoints are in-cluster private ClusterIPs, so real
@@ -256,6 +278,44 @@ type Result struct {
 	UsageEvents []usage.Event
 }
 
+// composeObserver adapts Deps.ObserveComposedBinding to the per-document hook
+// capability.Compose offers, or returns nil to leave the hook off entirely.
+//
+// The writer keys on (project, binding name), and the two halves come from two
+// different places on purpose:
+//
+//   - The PROJECT is the turn's own params.ProjectName — the project the Source
+//     LISTed against, which is the control plane the object lives in. It is
+//     never read off the document: CapabilityBinding is cluster-scoped inside
+//     its project's plane, so doc.Metadata.Namespace is ALWAYS empty. Deriving
+//     the project from it would address every status PATCH at a control-plane
+//     path for no project, and the only symptom would be conditions that never
+//     appear.
+//   - The NAME is the document's own metadata.name, the only identifier of the
+//     specific binding. Metadata is a POINTER and the schema makes it optional,
+//     so a document can carry none at all; a nameless one would otherwise
+//     produce a PATCH against .../capabilitybindings//status — a request for an
+//     object that cannot exist, once per turn, forever.
+//
+// A turn with no project is refused for the same reason, rather than passed on
+// as an empty key.
+func (c *Conversation) composeObserver(params Params) func(capability.CapabilityDocument, error) {
+	observe := c.deps.ObserveComposedBinding
+	if observe == nil {
+		return nil
+	}
+	return func(doc capability.CapabilityDocument, composeErr error) {
+		if params.ProjectName == "" || doc.Metadata == nil || doc.Metadata.Name == "" {
+			c.logger.Warn("agent.capability.compose_status_skipped",
+				"taskId", params.TaskID, "projectName", params.ProjectName,
+				"service", doc.Spec.ServiceName,
+				"reason", "no (project, binding name) key to write status onto")
+			return
+		}
+		observe(params.ProjectName, doc.Metadata.Name, composeErr)
+	}
+}
+
 // Run starts a conversation task and returns a [Stream] of its events. The
 // caller drains the stream with Recv until io.EOF, then reads [Stream.Result].
 // Composition always happens; the MCP sessions are always closed and usage is
@@ -276,11 +336,15 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		AllowPrivateNetworks: c.deps.AllowPrivateCapabilityNetworks,
 		Caller:               caller,
 		IdentityForwardHosts: c.deps.CapabilityIdentityForwardHosts,
-		Memory:               c.deps.Memory,
-		ExpectedProject:      params.ProjectName,
-		GapReports:           c.deps.GapReports,
-		Metrics:              c.deps.Metrics,
-		ContextID:            params.ContextID,
+
+		AllowedMCPEndpointHosts: c.deps.CapabilityMCPEndpointHosts,
+		OnDocumentComposed:      c.composeObserver(params),
+
+		Memory:          c.deps.Memory,
+		ExpectedProject: params.ProjectName,
+		GapReports:      c.deps.GapReports,
+		Metrics:         c.deps.Metrics,
+		ContextID:       params.ContextID,
 		OnToolInvocation: func(inv capability.ProviderToolInvocation) {
 			mu.Lock()
 			invocations = append(invocations, inv)
@@ -544,7 +608,14 @@ func (c *Conversation) loadDocuments(ctx context.Context, params Params) []capab
 // not health.
 func (c *Conversation) Entitlements(ctx context.Context, projectName string) []capability.ServiceEntitlement {
 	docs := c.loadDocuments(ctx, Params{ProjectName: projectName})
-	return capability.Entitlements(capability.ScopeDocuments(docs, projectName, c.logger))
+	// This is the one path that reaches ScopeDocuments without going through
+	// Compose, so the scope options Compose would have built are rebuilt here.
+	// They must match: the card is precisely the surface that enumerates a
+	// project's services, and a card scoped more loosely than the turn would
+	// advertise a service the next turn refuses to compose — the mismatch this
+	// method's contract exists to prevent.
+	return capability.Entitlements(capability.ScopeDocuments(docs, projectName, c.logger,
+		capability.ScopeMetrics(c.deps.Metrics)))
 }
 
 // attributionHeaders returns the gateway attribution headers, or nil in any

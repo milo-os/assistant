@@ -1,4 +1,5 @@
-# Lets the assistant ASK Milo about callers.
+# Lets the assistant ASK Milo about callers — and, since 2026-09, read the
+# capability configuration of the projects it serves as itself.
 #
 # Every request the assistant serves needs two control-plane round-trips: a
 # TokenReview to turn the caller's bearer token into an identity, and a
@@ -37,6 +38,91 @@ rules:
   - apiGroups: ["authorization.k8s.io"]
     resources: ["subjectaccessreviews"]
     verbs: ["create"]
+
+  # ─── Reading project capability config as ITSELF, added 2026-09 ────────────
+  #
+  # With CAPABILITY_SOURCE=crd the assistant LISTs `capabilitybindings` out of
+  # each project control plane and PATCHes status back with what it validated
+  # and composed. Those are the first calls this identity makes that are not a
+  # question about a caller, so they need a grant, and this is where it goes.
+  #
+  # WHY RBAC AND NOT MILO IAM. Milo runs --authorization-mode=RBAC,Webhook, so
+  # there are two legs and a grant on either one suffices. The IAM (Webhook) leg
+  # CANNOT express this grant at all for this principal: the OpenFGA authorizer
+  # hard-requires a user UID on the SubjectAccessReview
+  # (openfga-provider/internal/webhook/subjectaccessreview_authorizer.go:333-336)
+  # and never consults groups, while x509 client-cert authentication supplies
+  # only CN and O — never a UID. The same rule is baked into the IAM API surface:
+  # milo/pkg/apis/iam/v1alpha1/policybinding_types.go:22 validates that every
+  # PolicyBinding subject carries a non-empty uid unless it is a system: group or
+  # a WorkloadIdentityRule. A certificate identity is neither. So no Role +
+  # PolicyBinding combination in ../iam/ can ever authorize this identity.
+  #
+  # That is not a shortcut taken for convenience: short of adding
+  # O=system:masters to the certificate — which is how every other platform
+  # service sidesteps this — a root ClusterRole is the only expressible option.
+  # Bounding it to two resources and three verbs, instead of cluster-admin, is
+  # the whole improvement over house practice.
+  #
+  # ⚠ INTERIM POSTURE, decided 2026-09-12: the certificate WILL carry
+  # O=system:masters for the initial rollout, matching every other platform
+  # service. Read what that does to this file: system:masters is a hardcoded
+  # superuser group in the Kubernetes authorizer, evaluated BEFORE RBAC, so
+  # while the certificate carries it THE RULES BELOW HAVE NO EFFECT. The
+  # assistant holds cluster-admin on every project plane on the platform — not
+  # get/list on one kind — and that is a far larger surface than this service
+  # needs, for a process that composes provider-authored documents and model
+  # output.
+  #
+  # The rules are kept, not deleted, for three reasons: they are the target
+  # state; they document what this service actually requires, which is the
+  # input to narrowing; and the day the certificate drops system:masters they
+  # become load-bearing with no further edit. Narrowing is tracked debt, not an
+  # aspiration — see docs/enhancements/crd-capability-source.md.
+  #
+  # THE GRANT IS PLATFORM-WIDE, and that must not be misread. Milo's project
+  # router strips the /projects/{p}/control-plane prefix and RECOMPUTES
+  # RequestInfo before authorization runs
+  # (milo/pkg/server/filters/projects.go:40-62), so a project-scoped request is
+  # authorized against root RBAC as if it were a root request. The rules below
+  # therefore authorize get/list on capabilitybindings, and patch on their
+  # status, in EVERY project plane on the platform. There is no per-project
+  # RBAC narrowing available; the boundary that keeps one tenant's config out of
+  # another's answer is the per-project LIST plus capability.ScopeDocuments, not
+  # this grant.
+  #
+  # ⚠ LOAD-BEARING ASSUMPTION, UNVERIFIED — DEFERRED, NOT RESOLVED, by the
+  # system:masters interim above: that a ClusterRoleBinding in the CORE control
+  # plane is what gets evaluated for a PROJECT control-plane path. A superuser
+  # certificate is authorized without consulting RBAC at all, so the initial
+  # rollout does not depend on this being true. It becomes load-bearing the
+  # moment the certificate is narrowed, and narrowing is the plan — so the
+  # question must be answered before that step, not forgotten because the first
+  # deploy worked. The evidence is the router code cited above (the prefix is gone and
+  # RequestInfo is rebuilt before the authorizer sees the request) plus a comment
+  # in a service-catalog test overlay describing the same behaviour. Neither is a
+  # production observation, and no test in this repository exercises it. CONFIRM
+  # AGAINST A REAL MILO CONTROL PLANE BEFORE THE PRODUCTION FLIP to
+  # CAPABILITY_SOURCE=crd — issue one LIST with this certificate against a
+  # project path and check for 200 vs 403. If the assumption is false, no
+  # variation of this file fixes it (IAM cannot express the grant, see above) and
+  # the fallback is the catalog-side HTTP adapter reading the same kind, which
+  # needs no standing grant because the assistant reads nothing
+  # (docs/enhancements/crd-capability-source.md, "Rejected alternatives").
+  #
+  # The spec/status split below is expressible only because ORDINARY KUBERNETES
+  # RBAC HAS A SUBRESOURCE AXIS. Milo IAM's permission list does not (see
+  # ../iam/resources/capabilitybindings.yaml), which is why the equivalent
+  # separation over there has to be done by withholding `patch` from a whole
+  # role. Here the assistant can be given get/list on the object and patch on
+  # /status ONLY: a service that could rewrite the spec it was handed is not
+  # reading an entitlement, it is granting itself one.
+  - apiGroups: ["capabilities.assistant.miloapis.com"]
+    resources: ["capabilitybindings"]
+    verbs: ["get", "list"]
+  - apiGroups: ["capabilities.assistant.miloapis.com"]
+    resources: ["capabilitybindings/status"]
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -50,8 +136,21 @@ roleRef:
   name: assistant:control-plane-auth-delegator
 subjects:
   # The client certificate's CN, as presented to Milo's --client-ca-file.
-  # Deliberately NOT a member of system:masters: this identity may only ask
-  # questions about callers, never act on their behalf.
+  # For the initial rollout this certificate also carries O=system:masters, so
+  # this binding is currently redundant — the superuser group is authorized
+  # ahead of RBAC. It is written as if it were the only grant because that is
+  # the state being worked back toward (see the interim note in the rules).
+  #
+  # What stays true under either posture: this identity never acts ON A
+  # CALLER'S BEHALF: it forwards, borrows and acquires no caller credential,
+  # and reads no project DATA for anyone. Note that system:masters makes that
+  # a statement about what this service DOES, no longer about what it COULD do
+  # — which is the substance of the debt. Since
+  # 2026-09 the older, stronger phrasing — "may only ask questions about
+  # callers" — is no longer the whole truth: it also reads project capability
+  # CONFIGURATION as itself, and reports back on it via status. Those are the
+  # only two additions, and keeping that distinction exact is the point of
+  # spelling the rules out here rather than binding a built-in role.
   - apiGroup: rbac.authorization.k8s.io
     kind: User
     name: agent@assistant.datumapis.com

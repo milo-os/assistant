@@ -90,3 +90,44 @@ func NewAuthorizer(cfg *config.Config, logger *slog.Logger) (Authorizer, error) 
 		Verb:        cfg.Auth.SARVerb,
 	})
 }
+
+// ControlPlaneCredentials is the assistant's OWN identity on a control-plane
+// call: the client certificate it presents, the CA bundle it verifies the
+// server with, and (for completeness) the service-account token.
+//
+// The certificate is the one that works. Milo validates service-account tokens
+// only against its own issuer, so a workload-cluster token is rejected with a
+// 401 before the request body is read — see internal/auth/transport.go. The
+// token is carried anyway because a plain Kubernetes apiserver (kind, dev,
+// e2e) does accept it, and a caller that holds neither simply fails to
+// authenticate, which is the correct outcome for a service that cannot prove
+// who it is.
+type ControlPlaneCredentials struct {
+	BearerToken string
+	CACert      []byte
+	ClientCert  []byte
+	ClientKey   []byte
+}
+
+// LoadControlPlaneCredentials reads the credential set at the given mount
+// paths. Token and CA reads are best-effort (a late-mounted token recovers on
+// its own); a configured-but-unreadable client keypair is an error, because
+// falling back to a bearer token the control plane rejects turns a clear boot
+// failure into every request 401ing for reasons the logs do not explain.
+//
+// Exported so the CRD capability source is configured from the SAME paths the
+// SAR authorizer uses (AUTHZ_SAR_*). Two ways to name one control plane is two
+// ways to point half the service at the wrong one.
+func LoadControlPlaneCredentials(tokenPath, caCertPath, clientCertPath, clientKeyPath string) (ControlPlaneCredentials, error) {
+	token, caCert := readServiceAccountCreds(tokenPath, caCertPath)
+	clientCert, clientKey, err := readClientCert(clientCertPath, clientKeyPath)
+	if err != nil {
+		return ControlPlaneCredentials{}, err
+	}
+	return ControlPlaneCredentials{
+		BearerToken: token,
+		CACert:      caCert,
+		ClientCert:  clientCert,
+		ClientKey:   clientKey,
+	}, nil
+}

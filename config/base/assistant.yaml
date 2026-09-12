@@ -2,10 +2,12 @@
 # credential in env — the upstream key lives only at the gateway
 # (components/llm-stub). Auth carries no credential either: callers are
 # identified and authorized by the cluster's control plane, so the pod holds
-# only its own service-account token (rbac.yaml). The capability
-# SOURCE (fixture vs provider API) is deliberately absent here — each overlay
-# adds exactly one, so a mode switch is a clean declarative swap and the
-# mutually-exclusive pair can never both be set.
+# only its own service-account token (rbac.yaml). The capability SOURCE is
+# deliberately absent here — each overlay sets CAPABILITY_SOURCE
+# (fixture|http|crd) and exactly that mode's companion variable, so a mode
+# switch is a clean declarative swap and no two modes can be half-configured at
+# once. The service refuses to boot on a companion variable belonging to a mode
+# it was not told to run.
 #
 # GATEWAY_URL is static because components/gateway pins the managed Envoy
 # Service name (EnvoyProxy spec.provider.kubernetes.envoyService.name) — no
@@ -73,6 +75,27 @@ spec:
             # and the turn's project. Only the AI gateway is sanctioned; a
             # capability document naming another endpoint gets no credential.
             - name: CAPABILITY_IDENTITY_FORWARD_HOSTS
+              value: "patch-ai-gateway.envoy-gateway-system.svc.cluster.local"
+            # Hosts an MCP endpoint may be DIALED at. Same shape as the list
+            # above and, in this cluster, the same value — but a different
+            # question: that one is "may receive the user's credential", this
+            # one "may be dialed at all". They stay separate so widening one
+            # cannot silently widen the other.
+            #
+            # Every provider tool call is supposed to traverse the AI gateway:
+            # that is where the reviewed tool allow-list is enforced a second
+            # time (the copy a compromised assistant cannot bypass) and where
+            # the call is metered. The component that rewrites a provider's raw
+            # endpoint to the gateway's MCPRoute URL is the catalog's projection
+            # controller — no longer the component that dials it — so a
+            # controller regression could publish a raw provider endpoint that
+            # this service would otherwise faithfully dial, unmetered,
+            # un-allow-listed, and (because the raw host is not sanctioned
+            # above) uncredentialed, which reads like a provider outage rather
+            # than a projection bug. An endpoint outside this list is skipped
+            # and logged like any other unreachable server. Empty disables the
+            # check entirely.
+            - name: CAPABILITY_MCP_ENDPOINT_HOSTS
               value: "patch-ai-gateway.envoy-gateway-system.svc.cluster.local"
             # ── Auth ────────────────────────────────────────────────
             # Nothing to set: identity comes from a TokenReview and project

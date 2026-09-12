@@ -97,6 +97,12 @@ patches:
           - name: CAPABILITY_IDENTITY_FORWARD_HOSTS
             value: "REPLACE_WITH_AI_GATEWAY_HOST"
           # ── Capabilities: the service catalog's provider API (NOT a fixture) ──
+          # The mode is stated, not inferred from the companion variable below.
+          # Production must not depend on the deprecation shim: when that shim
+          # is dropped, an overlay that relied on it starts up with NO
+          # capability source and every turn quietly degrades to built-ins.
+          - name: CAPABILITY_SOURCE
+            value: http
           - name: CAPABILITY_PROVIDER_URL
             value: "http://REPLACE_WITH_CAPABILITY_PROVIDER_HOST"
           # ── Usage metering collector ──

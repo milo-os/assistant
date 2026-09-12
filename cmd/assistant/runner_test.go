@@ -50,6 +50,21 @@ func TestNewAgentRunner_PersonaPromptFileRead(t *testing.T) {
 	cleanup()
 }
 
+// CAPABILITY_SOURCE=crd must construct a runner without a live control plane:
+// the source is built from the SAR coordinates, and every read failure degrades
+// rather than failing boot.
+func TestNewAgentRunner_CRDSourceBoots(t *testing.T) {
+	cfg := loadTestConfig(t, map[string]string{"CAPABILITY_SOURCE": "crd"})
+	if cfg.CapabilitySource != config.CapabilitySourceCRD {
+		t.Fatalf("capability source = %q", cfg.CapabilitySource)
+	}
+	_, _, cleanup, err := newAgentRunner(context.Background(), cfg, slog.New(slog.DiscardHandler), appmetrics.New())
+	if err != nil {
+		t.Fatalf("newAgentRunner: %v", err)
+	}
+	cleanup()
+}
+
 // recordingSink captures the tool lifecycle callbacks the runner makes.
 type recordingSink struct {
 	text    []string

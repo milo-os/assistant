@@ -39,6 +39,38 @@ const (
 	ModelModeGateway ModelMode = "gateway"
 )
 
+// CapabilitySourceMode selects which [capability.Source] implementation serves
+// the assistant's capability configuration.
+//
+// It is an explicit enum rather than "whichever companion variable happens to
+// be set" because there are now three modes and the pairwise
+// mutual-exclusion check that served two does not extend: with N modes it is
+// N*(N-1)/2 checks and an error message that names two variables out of
+// several. An operator should declare the mode and be told precisely which
+// companion value that mode needs.
+type CapabilitySourceMode string
+
+const (
+	// CapabilitySourceNone composes no provider capabilities at all — the
+	// built-ins-only assistant. This is what an unconfigured deployment gets,
+	// and it is a supported posture (the README's standalone promise), not an
+	// error.
+	CapabilitySourceNone CapabilitySourceMode = ""
+	// CapabilitySourceFixture reads documents from a JSON file
+	// (CAPABILITY_DOCS_FIXTURE). The standalone/dev/e2e path.
+	CapabilitySourceFixture CapabilitySourceMode = "fixture"
+	// CapabilitySourceHTTP pulls documents per turn from the catalog's
+	// capability-provider API (CAPABILITY_PROVIDER_URL).
+	CapabilitySourceHTTP CapabilitySourceMode = "http"
+	// CapabilitySourceCRD LISTs CapabilityBinding objects from each project's
+	// own Milo control plane, behind a short-TTL cache. It takes NO companion
+	// variable: the control-plane URL, CA bundle, and client certificate are the
+	// ones the SubjectAccessReview path is already configured with (AUTHZ_SAR_*).
+	// Reusing them is deliberate — two ways to name one control plane is two
+	// ways to point half the service at the wrong one.
+	CapabilitySourceCRD CapabilitySourceMode = "crd"
+)
+
 // Defaults mirrored from the TS service.
 const (
 	DefaultPort           = 7820
@@ -131,14 +163,20 @@ type Config struct {
 
 	Auth AuthConfig
 
+	// CapabilitySource selects the capability source implementation
+	// (env CAPABILITY_SOURCE = fixture|http|crd). Unset ⇒ inferred for one
+	// release from whichever companion variable is set, then
+	// [CapabilitySourceNone]. See [CapabilitySourceMode].
+	CapabilitySource CapabilitySourceMode
+
 	// CapabilityDocsFixture is the path to the capability-documents fixture
-	// (env CAPABILITY_DOCS_FIXTURE). Empty ⇒ no fixture source.
+	// (env CAPABILITY_DOCS_FIXTURE). Required by, and only by,
+	// CAPABILITY_SOURCE=fixture.
 	CapabilityDocsFixture string
 
 	// CapabilityProviderURL is the base URL of the capability-provider HTTP API
-	// (env CAPABILITY_PROVIDER_URL). Empty ⇒ no HTTP source. Mutually exclusive
-	// with CapabilityDocsFixture. With both unset, no provider capabilities are
-	// composed.
+	// (env CAPABILITY_PROVIDER_URL). Required by, and only by,
+	// CAPABILITY_SOURCE=http.
 	CapabilityProviderURL string
 
 	// PersonaPromptFile is the path to a file containing the persona section
@@ -172,8 +210,31 @@ type Config struct {
 	// data, so naming an endpoint must never by itself send a credential there.
 	CapabilityIdentityForwardHosts []string
 
+	// CapabilityMCPEndpointHosts are the operator-sanctioned hosts an MCP
+	// endpoint may be DIALED at (comma-separated env
+	// CAPABILITY_MCP_ENDPOINT_HOSTS; exact or domain-suffix match, the same
+	// shape as CapabilityIdentityForwardHosts). In this platform that list is
+	// the AI gateway, because every provider tool call is supposed to traverse
+	// it — that is where the reviewed tool allow-list is enforced a second time
+	// and where the call is metered.
+	//
+	// Deliberately a separate knob from CapabilityIdentityForwardHosts even
+	// though production will hold the same value in both: that one means "may
+	// receive the caller's credential", this one "may be dialed at all", and
+	// sharing a list means widening the reachable set silently widens the set
+	// that gets handed a bearer token. Empty (the default) disables the check,
+	// keeping fixtures, e2e, and dev overlays working.
+	CapabilityMCPEndpointHosts []string
+
 	Model ModelConfig
 	Usage UsageConfig
+
+	// Warnings are non-fatal configuration notes for the caller to log — a
+	// deprecated shape that still works today and will not tomorrow. They are
+	// returned rather than logged here because this package deliberately owns
+	// no logger (it is the one place that reads the environment, and nothing
+	// more).
+	Warnings []string
 }
 
 // FieldError describes a single invalid configuration field.
@@ -205,6 +266,7 @@ func (e *Error) Error() string {
 func Load(getenv func(string) string) (*Config, error) {
 	env := func(k string) string { return strings.TrimSpace(getenv(k)) }
 	var errs []FieldError
+	var warnings []string
 
 	port := DefaultPort
 	if raw := env("PORT"); raw != "" {
@@ -303,14 +365,17 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 
 	// ── Capability source ─────────────────────────────────────
-	// The fixture (local file) and HTTP (provider API) sources are mutually
-	// exclusive: they answer the same seam, so configuring both is ambiguous.
+	// One explicit mode, then per-mode validation. A companion variable set for
+	// a mode that does not use it is an ERROR rather than an ignored leftover:
+	// it is almost always a half-finished overlay edit, and the alternative is a
+	// deployment that silently reads its capabilities from somewhere other than
+	// where the operator believes.
 	capabilityDocsFixture := env("CAPABILITY_DOCS_FIXTURE")
 	capabilityProviderURL := strings.TrimRight(env("CAPABILITY_PROVIDER_URL"), "/")
-	if capabilityDocsFixture != "" && capabilityProviderURL != "" {
-		errs = append(errs, FieldError{"CAPABILITY_PROVIDER_URL",
-			"CAPABILITY_PROVIDER_URL and CAPABILITY_DOCS_FIXTURE are mutually exclusive — set at most one capability source"})
-	}
+	capabilitySource, capWarnings, capErrs := capabilitySourceMode(
+		env("CAPABILITY_SOURCE"), capabilityDocsFixture, capabilityProviderURL)
+	errs = append(errs, capErrs...)
+	warnings = append(warnings, capWarnings...)
 
 	conversationStoreURL := env("CONVERSATION_STORE_URL")
 	if conversationStoreURL != "" &&
@@ -361,12 +426,15 @@ func Load(getenv func(string) string) (*Config, error) {
 			TokenReviewClientCertPath: tokenReviewClientCertPath,
 			TokenReviewClientKeyPath:  tokenReviewClientKeyPath,
 		},
+		CapabilitySource:               capabilitySource,
 		CapabilityDocsFixture:          capabilityDocsFixture,
 		CapabilityProviderURL:          capabilityProviderURL,
 		PersonaPromptFile:              env("PERSONA_PROMPT_FILE"),
 		ConversationStoreURL:           conversationStoreURL,
 		AllowPrivateCapabilityNetworks: isTruthy(env("CAPABILITY_ALLOW_PRIVATE_NETWORKS")),
 		CapabilityIdentityForwardHosts: splitList(env("CAPABILITY_IDENTITY_FORWARD_HOSTS")),
+		CapabilityMCPEndpointHosts:     splitList(env("CAPABILITY_MCP_ENDPOINT_HOSTS")),
+		Warnings:                       warnings,
 		Model: ModelConfig{
 			Mode:               modelMode,
 			AnthropicAPIKey:    anthropicKey,
@@ -482,4 +550,71 @@ func isTruthy(v string) bool {
 	default:
 		return false
 	}
+}
+
+// capabilitySourceMode resolves CAPABILITY_SOURCE and validates the companion
+// variables that mode does (and does not) take.
+//
+// The inference branch is a ONE-RELEASE backward-compatibility shim. Before
+// this enum existed the mode was implied by whichever of the two companion
+// variables was set, and every overlay plus e2e/run-e2e.sh still reads that
+// way; breaking them all in the same commit that adds a third mode would make
+// an additive change look like an outage. It warns rather than passing
+// silently, because a shim nobody is told about is a shim nobody removes.
+// Delete this branch (and the warning) once the overlays declare the mode.
+//
+// Note what inference deliberately does NOT do: when both companion variables
+// are set it refuses rather than picking one. That was an error before and is a
+// worse one now, since the operator has not said which they meant.
+func capabilitySourceMode(raw, fixture, providerURL string) (CapabilitySourceMode, []string, []FieldError) {
+	var warnings []string
+	var errs []FieldError
+
+	mode := CapabilitySourceMode(raw)
+	switch mode {
+	case CapabilitySourceFixture, CapabilitySourceHTTP, CapabilitySourceCRD:
+	case CapabilitySourceNone:
+		switch {
+		case fixture != "" && providerURL != "":
+			return CapabilitySourceNone, nil, []FieldError{{"CAPABILITY_SOURCE",
+				"CAPABILITY_DOCS_FIXTURE and CAPABILITY_PROVIDER_URL are both set and CAPABILITY_SOURCE is unset — set CAPABILITY_SOURCE to fixture, http, or crd and keep only that mode's companion variable"}}
+		case fixture != "":
+			mode = CapabilitySourceFixture
+			warnings = append(warnings, "CAPABILITY_SOURCE is unset; inferring fixture from CAPABILITY_DOCS_FIXTURE. Set CAPABILITY_SOURCE=fixture explicitly — this inference is removed in the next release.")
+		case providerURL != "":
+			mode = CapabilitySourceHTTP
+			warnings = append(warnings, "CAPABILITY_SOURCE is unset; inferring http from CAPABILITY_PROVIDER_URL. Set CAPABILITY_SOURCE=http explicitly — this inference is removed in the next release.")
+		}
+		return mode, warnings, nil
+	default:
+		return CapabilitySourceNone, nil, []FieldError{{"CAPABILITY_SOURCE",
+			fmt.Sprintf(`must be "fixture", "http", or "crd" (or unset for no capability source), got %q`, raw)}}
+	}
+
+	// Explicit mode: the companion it needs, and nothing it does not.
+	switch mode {
+	case CapabilitySourceFixture:
+		if fixture == "" {
+			errs = append(errs, FieldError{"CAPABILITY_DOCS_FIXTURE", "CAPABILITY_SOURCE=fixture requires CAPABILITY_DOCS_FIXTURE (the documents file path)"})
+		}
+		if providerURL != "" {
+			errs = append(errs, FieldError{"CAPABILITY_PROVIDER_URL", "CAPABILITY_SOURCE=fixture does not use CAPABILITY_PROVIDER_URL — unset it or switch to CAPABILITY_SOURCE=http"})
+		}
+	case CapabilitySourceHTTP:
+		if providerURL == "" {
+			errs = append(errs, FieldError{"CAPABILITY_PROVIDER_URL", "CAPABILITY_SOURCE=http requires CAPABILITY_PROVIDER_URL (the capability-provider API base URL)"})
+		}
+		if fixture != "" {
+			errs = append(errs, FieldError{"CAPABILITY_DOCS_FIXTURE", "CAPABILITY_SOURCE=http does not use CAPABILITY_DOCS_FIXTURE — unset it or switch to CAPABILITY_SOURCE=fixture"})
+		}
+	case CapabilitySourceCRD:
+		// No companion of its own: the control plane it reads is AUTHZ_SAR_*.
+		if fixture != "" {
+			errs = append(errs, FieldError{"CAPABILITY_DOCS_FIXTURE", "CAPABILITY_SOURCE=crd does not use CAPABILITY_DOCS_FIXTURE — unset it or switch to CAPABILITY_SOURCE=fixture"})
+		}
+		if providerURL != "" {
+			errs = append(errs, FieldError{"CAPABILITY_PROVIDER_URL", "CAPABILITY_SOURCE=crd does not use CAPABILITY_PROVIDER_URL — unset it or switch to CAPABILITY_SOURCE=http"})
+		}
+	}
+	return mode, warnings, errs
 }

@@ -6,3 +6,4 @@ resources:
   - capabilitygapreports.yaml
   - capabilitygaps.yaml
   - assistantendpoints.yaml
+  - capabilitybindings.yaml

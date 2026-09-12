@@ -1,0 +1,93 @@
+# Read-only access to a project's capability bindings: what this project is
+# entitled to, which tools are allow-listed, and — via status — whether the
+# assistant actually accepted and composed each binding.
+#
+# It answers the question the extended agent card cannot: the card reports
+# entitlement the assistant is serving, but a binding the assistant SKIPPED
+# (failed validation, wrong namespace) simply does not appear there. Someone
+# debugging "why doesn't Patch know about our service" needs to see the object
+# and its Accepted / Composed conditions, which is exactly this role and nothing
+# more.
+#
+# Kept separate from assistant.miloapis.com-user rather than folded into it: a
+# binding's spec exposes provider-internal detail (MCP endpoints, skill source
+# URLs), so which project members should see it is a deployment's call, not a
+# default.
+#
+# ─── RESOLVED, 2026-09: the assistant does NOT get its read from this axis ───
+#
+# This role is the closest thing in the repository to the permission set the
+# assistant itself needs (`get`/`list` on capabilitybindings, in every project it
+# serves, plus `patch` for status, which this role deliberately lacks). It is NOT
+# that grant, and — unlike what this header used to say — it never can be.
+#
+# The question used to be "what BINDS this role to the assistant's identity?",
+# with two candidate answers: (a) an org-scope PolicyBinding inherited by every
+# project beneath, or (b) per-project grants issued by the catalog as part of
+# projection. Both are unavailable, for the same reason:
+#
+#   A PolicyBinding subject must carry a UID. milo/pkg/apis/iam/v1alpha1/
+#   policybinding_types.go:22 validates exactly that — a non-empty uid is
+#   required on every subject except system: groups and WorkloadIdentityRules —
+#   and the OpenFGA authorizer enforces the mirror of it at decision time,
+#   requiring a user UID on the review and never consulting groups
+#   (openfga-provider/internal/webhook/subjectaccessreview_authorizer.go:333-336).
+#   The assistant authenticates with an x509 client certificate, which supplies
+#   CN and O and NEVER a UID. It therefore cannot be a PolicyBinding subject at
+#   any scope. (a) is not available, and (b) inherits the same defect — a
+#   per-project binding is still a PolicyBinding with the same subject.
+#
+# So Milo IAM cannot express a grant for this identity at all, and the decision
+# is not "which IAM shape is least broad" but "which of Milo's two authorization
+# legs can carry it". Milo runs --authorization-mode=RBAC,Webhook; IAM is the
+# Webhook leg; the grant lives on the RBAC leg, in
+# ../../rbac/control-plane-auth-delegator.yaml — a root ClusterRole bounded to
+# capabilitybindings get/list and capabilitybindings/status patch, evaluated for
+# project paths because the project router strips the prefix and recomputes
+# RequestInfo before authorization (milo/pkg/server/filters/projects.go:40-62).
+#
+# Two consequences to carry forward rather than rediscover:
+#
+#   * That grant is PLATFORM-WIDE by construction — root RBAC has no per-project
+#     narrowing — so the blast-radius concern raised against option (a) is real
+#     and unavoidable, not avoided. It is bounded by kind and verb (two
+#     resources, three verbs) instead of by scope. The per-project LIST and
+#     capability.ScopeDocuments remain the boundary that keeps one tenant's
+#     config out of another's answer.
+#   * INTERIM (2026-09-12): for the initial rollout the assistant's certificate
+#     carries O=system:masters, like every other platform service's. While it
+#     does, that ClusterRole is not consulted — superuser is evaluated ahead of
+#     RBAC — so the assistant holds cluster-admin on every project plane, not
+#     get/list on one kind. The narrow rules are kept as the target state.
+#   * Whether a core-control-plane ClusterRoleBinding really does authorize
+#     project control-plane paths is still UNVERIFIED in production — the
+#     evidence is code-reading, not observation. The system:masters interim
+#     DEFERS that question rather than answering it: a superuser request never
+#     reaches RBAC, so a working first deploy proves nothing about it. It must
+#     be confirmed before the certificate is NARROWED. If it turns out false the
+#     fallback is the catalog-side HTTP adapter
+#     (docs/enhancements/crd-capability-source.md, "Rejected alternatives"),
+#     which needs no standing grant because the assistant reads nothing.
+#
+# This file therefore grants a HUMAN a read-only view and nothing else, which is
+# what it has always actually done. It stays written down here because this is
+# the file someone opens looking for "the role the assistant uses", and they
+# should leave knowing there is no such role and why there cannot be one.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: capabilities.assistant.miloapis.com-capability-viewer
+  namespace: milo-system
+  labels:
+    app.kubernetes.io/name: capability-viewer
+    app.kubernetes.io/part-of: assistant.miloapis.com
+spec:
+  launchStage: Beta
+  includedPermissions:
+    - capabilities.assistant.miloapis.com/capabilitybindings.get
+    - capabilities.assistant.miloapis.com/capabilitybindings.list
+    # watch is for a human's `kubectl get -w` while debugging a projection. The
+    # assistant does not watch — it polls on a cache miss — so this permission
+    # is not part of what the assistant would need if this role were ever reused
+    # for it.
+    - capabilities.assistant.miloapis.com/capabilitybindings.watch

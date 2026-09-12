@@ -3,10 +3,13 @@ package capability
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/milo-os/assistant/agentcore"
@@ -77,6 +80,55 @@ type ComposeOptions struct {
 	// OnToolInvocation, if set, fires once at the start of every provider-tool
 	// execution (wired to usage metering by the caller).
 	OnToolInvocation func(ProviderToolInvocation)
+	// OnDocumentComposed, if set, fires exactly ONCE PER SCOPED DOCUMENT at the
+	// end of composition — successes included — with a nil err when that
+	// document's declared capabilities came up and a non-nil one naming what did
+	// not. It is the seam the CRD source's status writer hangs the Composed
+	// condition off (crdsource.BindingObserver.ObserveComposed), so that a
+	// provider whose MCP endpoint is unreachable learns it from
+	// `kubectl describe capabilitybinding` instead of from a warn line inside
+	// someone else's service.
+	//
+	// Successes are reported on purpose. A condition that is only ever written
+	// False is a trap: it would pin a binding to "degraded" forever after one bad
+	// turn, and the operator who fixed the endpoint would have no signal that
+	// they had. The status writer coalesces on transition, so a steady outcome —
+	// True or False — costs one write, not one per turn.
+	//
+	// # What counts as "not composed"
+	//
+	// The condition means: everything this binding DECLARED is actually usable on
+	// this turn. Aggregated into a non-nil err:
+	//
+	//   - an MCP endpoint refused by the operator's dial allow-list
+	//     (capability.mcp.endpoint_not_sanctioned) — the binding names a host the
+	//     platform will not dial, so its tools are unreachable by construction;
+	//   - an MCP server that failed to connect or timed out;
+	//   - a server that connected but could not list its tools;
+	//   - a declared include-list tool the server does not offer;
+	//   - a tool name already registered by another binding in this project, so
+	//     this document's tool is not the one the model can call;
+	//   - TOTAL knowledge loss: every one of a document's knowledge sources
+	//     failed (see renderServiceKnowledge for why total rather than any).
+	//
+	// Deliberately NOT aggregated, because each leaves a working binding and
+	// would only make the condition noisier than the thing it reports:
+	//
+	//   - a knowledge source that failed while its siblings succeeded, and a body
+	//     truncated at the byte cap — the knowledge arrived, just less of it;
+	//   - a skill that could not be fetched. Skill bodies are fetched lazily by
+	//     the load_skill tool DURING the turn, not during composition, so no
+	//     verdict about them exists at this point. Indexing a skill cannot fail.
+	//
+	// A document with no tools and no knowledge sources — knowledge concepts
+	// only, or skills only — trivially composes and is reported with a nil err.
+	// There is nothing it promised that could have failed.
+	//
+	// It runs on the request goroutine after the last session is opened, so an
+	// implementation MUST NOT block. A panicking callback is recovered and logged
+	// rather than allowed to take down the turn: this is a reporting hook, and no
+	// bug in reporting is worth failing a user's chat over.
+	OnDocumentComposed func(doc CapabilityDocument, err error)
 	// Logger receives composition warnings. Nil discards them.
 	Logger *slog.Logger
 	// AllowPrivateNetworks disables the SSRF IP guard's private/loopback/
@@ -109,14 +161,45 @@ type ComposeOptions struct {
 	// connect at all", this the far narrower "may we hand this endpoint the
 	// user's credential". Empty (the default) forwards to nobody. See identity.go.
 	IdentityForwardHosts []string
-	// ExpectedProject, when set, is the namespace/project of the calling request.
-	// It is a defense-in-depth tenant-isolation check on the capability Source:
-	// the Source is responsible for returning only the calling project's
-	// documents, but any document whose Metadata.Namespace disagrees with
-	// ExpectedProject is dropped and logged rather than trusted. Documents that
-	// carry no namespace are passed through — for those the Source remains the
-	// scoping authority (the CRD projection has no spec-level project field to
-	// cross-check; if one is added later, extend ScopeDocuments to verify it).
+	// AllowedMCPEndpointHosts is the OPERATOR-sanctioned set of hosts an MCP
+	// endpoint may be DIALED at — matched exactly and as a domain suffix, the
+	// same shape as IdentityForwardHosts. In this platform that list is the AI
+	// gateway, because every provider tool call is supposed to traverse it.
+	//
+	// It exists because the component that rewrites a provider endpoint to the
+	// gateway's MCPRoute URL (the catalog projection controller) is no longer the
+	// component that dials it (this service), and the two can drift. A controller
+	// regression that published a raw provider endpoint would otherwise be dialed
+	// faithfully, and three things would break at once without any of them
+	// looking like a projection bug: the gateway-side allow-list — the copy a
+	// compromised assistant cannot bypass — stops being consulted, provider tool
+	// calls stop being metered, and caller-identity forwarding fails closed
+	// because the raw host is not in IdentityForwardHosts, so read-as-the-caller
+	// tools start failing as if the provider were broken.
+	//
+	// Deliberately NOT the SSRF allow-list above: that one governs all three
+	// provider-URL sinks, and knowledge sources and skill bodies legitimately
+	// point at a provider's own documentation hosts, which pinning it to the
+	// gateway would break. Deliberately NOT IdentityForwardHosts either, even
+	// though production will hold the same value in both: "may be dialed at all"
+	// and "may receive the user's credential" are different predicates, and
+	// sharing one list means widening the reachable set silently widens the set
+	// that gets handed a bearer token.
+	//
+	// Enforced in connectTools before the connector touches the network, not at
+	// CRD admission — the writer being defended against is the controller that
+	// holds write access to these objects. A non-matching endpoint is skipped and
+	// logged (capability.mcp.endpoint_not_sanctioned) like any other unreachable
+	// server; it never fails the whole composition. Empty (the default) disables
+	// the check entirely, which keeps fixtures, e2e, and dev overlays working.
+	AllowedMCPEndpointHosts []string
+	// ExpectedProject, when set, is the Milo project of the calling request. It
+	// is the tenant-isolation check on the capability Source: any document that
+	// NAMES a namespace disagreeing with it is dropped and logged rather than
+	// trusted. A document with no namespace is kept — that is every
+	// CapabilityBinding, which is cluster-scoped inside its project's own
+	// control plane, where the plane itself is the isolation boundary. See
+	// [ScopeDocuments].
 	ExpectedProject string
 	// Memory, when non-nil, enables the memory_remember / memory_forget
 	// built-in tools (see internal/capability/memory.go) scoped to
@@ -204,9 +287,9 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		logger = slog.New(slog.DiscardHandler)
 	}
 
-	// Tenant-isolation depth: drop any document the Source mis-scoped before it
+	// Tenant isolation: drop any document the Source mis-scoped before it
 	// contributes knowledge or tools (no-op unless ExpectedProject is set).
-	docs = ScopeDocuments(docs, opts.ExpectedProject, logger)
+	docs = ScopeDocuments(docs, opts.ExpectedProject, logger, ScopeMetrics(opts.Metrics))
 
 	// One SSRF guard drives all three provider-URL sinks (knowledge, skills,
 	// MCP). The knowledge/skill fetches share a guarded HTTP client; the MCP
@@ -226,7 +309,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		return nil, err
 	}
 
-	addendum := buildKnowledgeAddendum(ctx, docs, knowledgeOptions{
+	addendum, knowledgeErrs := buildKnowledgeAddendum(ctx, docs, knowledgeOptions{
 		httpClient:           httpClient,
 		guard:                guard,
 		timeout:              opts.KnowledgeTimeout,
@@ -235,7 +318,24 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 		logger:               logger,
 	})
 
-	tools, sessions := connectTools(ctx, docs, opts, guard, sanctioned, logger)
+	// Sanctioned MCP endpoint hosts (the gateway). Same fail-closed parse as the
+	// two allow-lists above: a mis-typed entry must not silently leave the dial
+	// site unguarded.
+	if err := validateEndpointHosts(opts.AllowedMCPEndpointHosts); err != nil {
+		return nil, err
+	}
+	dialable, err := parseHostAllowList(opts.AllowedMCPEndpointHosts, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	tools, sessions, toolErrs := connectTools(ctx, docs, opts, guard, sanctioned, dialable, logger)
+
+	// One verdict per scoped document, successes included. Reported here rather
+	// than inside connectTools because a document's outcome spans both tiers,
+	// and because a caller must get exactly one callback per document however
+	// many servers or sources it declared.
+	reportComposed(docs, knowledgeErrs, toolErrs, opts.OnDocumentComposed, logger)
 
 	// Skills: descriptions into the prompt, bodies behind the built-in
 	// load_skill tool (progressive disclosure).
@@ -322,15 +422,57 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 	}, nil
 }
 
-// ScopeDocuments is the defense-in-depth tenant-isolation seam. The capability
-// Source is trusted to return only the calling project's documents; this guards
-// against a Source bug (or a compromised fan-out) leaking another tenant's
-// document by dropping any whose Metadata.Namespace names a different project.
-// It fails closed only on a positive mismatch: a document with no namespace is
-// kept, because the schema carries no other project handle to cross-check and
-// the Source stays the scoping authority there. With no ExpectedProject the
-// check is disabled and docs pass through unchanged (backward compatible).
-func ScopeDocuments(docs []CapabilityDocument, expectedProject string, logger *slog.Logger) []CapabilityDocument {
+// ScopeOption tunes [ScopeDocuments]. It is variadic rather than a parameter so
+// the call sites that only want the gate — tests, the card path — are not forced
+// to name observability wiring they do not have.
+type ScopeOption func(*scopePolicy)
+
+type scopePolicy struct {
+	metrics *appmetrics.Metrics
+}
+
+// ScopeMetrics records every dropped document as
+// assistant_capability_scope_dropped_total, labeled by reason. Tenant isolation
+// is the one boundary whose enforcement must not be visible only by grepping a
+// log file: without this, an operator cannot alert on a Source that has started
+// offering another project's documents, and the first sign of it is a support
+// ticket. Nil is tolerated (the counter is simply not recorded).
+func ScopeMetrics(m *appmetrics.Metrics) ScopeOption { return func(p *scopePolicy) { p.metrics = m } }
+
+// ScopeDocuments is the tenant-isolation gate for documents that CARRY their
+// own namespace: it drops any document whose Metadata.Namespace names a project
+// other than expectedProject, so that a Source bug — or a compromised fan-out —
+// cannot spend another tenant's knowledge, MCP endpoints, or tools inside this
+// project's turn. A drop is logged as capability.scope.rejected and counted as
+// assistant_capability_scope_dropped_total{reason="mismatch"}.
+//
+// A document with NO namespace is kept, and under the production source that is
+// the normal case rather than a tolerated legacy one. Tenant isolation for the
+// CapabilityBinding CRD is STRUCTURAL, not a field comparison: a Milo project is
+// a virtual control plane over one apiserver partitioned by an etcd key prefix,
+// the LIST is addressed to that project's control-plane path, and so the
+// response can only ever contain that project's objects. The objects are
+// cluster-scoped inside their plane and carry no namespace at all — there is
+// nothing here left to check, and checking would mean dropping every document.
+//
+// This function therefore guards the sources whose payload does carry a
+// namespace — the fixture export and the HTTP provider endpoint, both of which
+// serve JSON that could name any project — where it remains defense in depth
+// behind an already project-scoped Source.
+//
+// A previous revision offered a fail-closed "require a namespace" posture for
+// the CRD source, written when the design assumed a cluster-wide informer over
+// namespace-per-project objects. Both halves of that assumption are false, so
+// the option is gone rather than merely defaulted off: an option that can only
+// ever reject 100% of production traffic is a loaded gun, not a safety.
+//
+// With no expectedProject there is nothing to compare against and the check is
+// disabled entirely — documents pass through unchanged.
+func ScopeDocuments(docs []CapabilityDocument, expectedProject string, logger *slog.Logger, opts ...ScopeOption) []CapabilityDocument {
+	var policy scopePolicy
+	for _, opt := range opts {
+		opt(&policy)
+	}
 	if expectedProject == "" {
 		return docs
 	}
@@ -343,6 +485,7 @@ func ScopeDocuments(docs []CapabilityDocument, expectedProject string, logger *s
 		if ns != "" && ns != expectedProject {
 			logger.Warn("capability.scope.rejected",
 				"service", doc.Spec.ServiceName, "documentNamespace", ns, "expectedProject", expectedProject)
+			policy.metrics.RecordCapabilityScopeDropped("mismatch")
 			continue
 		}
 		kept = append(kept, doc)
@@ -350,7 +493,103 @@ func ScopeDocuments(docs []CapabilityDocument, expectedProject string, logger *s
 	return kept
 }
 
-func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, sanctioned *hostAllowList, logger *slog.Logger) (agentcore.ToolSet, []mcpSession) {
+// validateEndpointHosts rejects an AllowedMCPEndpointHosts entry that is not a
+// bare host. parseHostAllowList only hard-errors on a malformed CIDR, and this
+// knob takes no CIDRs, so without this a mis-typed entry — a full URL
+// ("https://gateway.example/mcp"), a host:port, a CIDR — would normalize into a
+// string that can never match u.Hostname() and the allow-list would quietly
+// sanction nothing. That failure mode is the worst one available here: every
+// endpoint gets skipped and provider tools disappear cluster-wide with no
+// configuration error to point at. Fail closed at startup instead.
+func validateEndpointHosts(entries []string) error {
+	for _, e := range entries {
+		trimmed := strings.TrimSpace(e)
+		if trimmed == "" {
+			continue // blank entries are dropped, as elsewhere
+		}
+		if strings.ContainsAny(trimmed, "/ \t") {
+			return fmt.Errorf("invalid MCP endpoint host %q: expected a bare host, not a URL, host:port, or CIDR", e)
+		}
+	}
+	return nil
+}
+
+// sanctionedEndpointHost reports whether endpoint may be dialed under the
+// operator's MCP endpoint allow-list, and if not, why — the reason is logged so
+// an operator reading it sees the offending host without having to go find the
+// document. An empty list disables the check (every endpoint is dialable).
+//
+// Matching is on the NAME only, never on resolved addresses, for the same
+// reason identityHeaders does so: an operator sanctions a name, and someone who
+// can steer DNS must not be able to talk their way onto the list.
+func sanctionedEndpointHost(endpoint string, dialable *hostAllowList) (string, bool) {
+	if dialable.empty() {
+		return "", true
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "endpoint is not a parseable URL", false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "endpoint has no host", false
+	}
+	if !dialable.permits(host, nil) {
+		return "host is not an operator-sanctioned MCP endpoint host", false
+	}
+	return "", true
+}
+
+// reportComposed fires OnDocumentComposed once per document, folding that
+// document's knowledge and tool verdicts into a single provider-facing error.
+//
+// Both input slices are index-aligned with docs and carry one entry per
+// document (nil meaning "nothing wrong"), which is what makes "exactly one
+// callback per document, successes included" a property of the shape rather
+// than of the control flow above.
+func reportComposed(docs []CapabilityDocument, knowledgeErrs, toolErrs []error, fn func(CapabilityDocument, error), logger *slog.Logger) {
+	if fn == nil {
+		return
+	}
+	for i, doc := range docs {
+		var knowledgeErr, toolErr error
+		if i < len(knowledgeErrs) {
+			knowledgeErr = knowledgeErrs[i]
+		}
+		if i < len(toolErrs) {
+			toolErr = toolErrs[i]
+		}
+		notifyComposed(fn, doc, errors.Join(toolErr, knowledgeErr), logger)
+	}
+}
+
+// notifyComposed makes one callback survivable. The hook is a REPORTING seam
+// owned by the caller (today: a status-condition writer), and a panic in it
+// would otherwise unwind Compose and fail a user's chat turn over a defect in
+// bookkeeping — the exact inversion of priorities this whole feature is written
+// against. Recovered, logged, and the next document is still reported.
+func notifyComposed(fn func(CapabilityDocument, error), doc CapabilityDocument, err error, logger *slog.Logger) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("capability.compose.observer_panic",
+				"service", doc.Spec.ServiceName, "panic", fmt.Sprint(r),
+				"effect", "this document's composition status was not reported; the turn is unaffected")
+		}
+	}()
+	fn(doc, err)
+}
+
+// connectTools connects each document's MCP servers and returns the exposed
+// tools, the sessions to close, and a per-document verdict index-aligned with
+// docs (nil where every declared server and tool came up).
+//
+// The verdict slice is why this returns three values instead of two: every
+// failure below was already a warn line, but a warn line lands in the
+// assistant's log, and the person who can fix an unreachable endpoint reads the
+// binding object instead. Aggregating per DOCUMENT rather than per server is
+// what the Composed condition needs — the condition describes one binding, and
+// one binding may declare several servers.
+func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, sanctioned, dialable *hostAllowList, logger *slog.Logger) (agentcore.ToolSet, []mcpSession, []error) {
 	connect := opts.connect
 	if connect == nil {
 		connect = guardedConnector(defaultConnector(), guard)
@@ -362,18 +601,46 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 
 	tools := agentcore.ToolSet{}
 	var sessions []mcpSession
+	docErrs := make([]error, len(docs))
 
-	for _, doc := range docs {
+	for i, doc := range docs {
 		if doc.Spec.Tools == nil {
 			continue
 		}
 		serviceName := doc.Spec.ServiceName
+		// Per-document accumulator: a document with three servers of which one is
+		// down is still degraded, and the condition should name the one that is.
+		var failures []error
 		for _, server := range doc.Spec.Tools.MCPServers {
+			// Before dialing: the endpoint must be one the operator sanctioned.
+			// A distinct event from capability.mcp.connect_failed on purpose —
+			// "the projection published a non-gateway endpoint" and "the gateway
+			// is down" are different incidents with different owners, and an
+			// operator must be able to separate them in a log query.
+			if reason, ok := sanctionedEndpointHost(server.Endpoint, dialable); !ok {
+				logger.Warn("capability.mcp.endpoint_not_sanctioned",
+					"service", serviceName, "server", server.Name, "endpoint", server.Endpoint, "reason", reason)
+				// Worded so the provider can tell this apart from an outage: the
+				// endpoint was never dialed, and no amount of waiting will change
+				// that. It is a configuration verdict, not a reachability one.
+				failures = append(failures, fmt.Errorf(
+					"mcp server %q: endpoint %s was not dialed: %s", server.Name, server.Endpoint, reason))
+				continue
+			}
+
 			headers := identityHeaders(server.Endpoint, opts.Caller, opts.ExpectedProject, sanctioned)
 			session, err := connectWithTimeout(ctx, connect, server.Endpoint, headers, timeout)
 			if err != nil {
 				logger.Warn("capability.mcp.connect_failed",
 					"service", serviceName, "server", server.Name, "endpoint", server.Endpoint, "error", err.Error())
+				// Names the server and the endpoint, not the transport error:
+				// that string carries resolved addresses and the proxy chain,
+				// which is this cluster's topology rather than anything the
+				// provider can act on. "connect failed" plus the endpoint is the
+				// actionable part; the full error stays in the assistant's log for
+				// the operator, one grep away by server name.
+				failures = append(failures, fmt.Errorf(
+					"mcp server %q: connect to %s failed", server.Name, server.Endpoint))
 				continue
 			}
 			sessions = append(sessions, session)
@@ -387,6 +654,8 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 			if err != nil {
 				logger.Warn("capability.mcp.list_failed",
 					"service", serviceName, "server", server.Name, "error", err.Error())
+				failures = append(failures, fmt.Errorf(
+					"mcp server %q: connected, but listing tools failed", server.Name))
 				continue
 			}
 
@@ -395,12 +664,21 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 				if !ok {
 					logger.Warn("capability.mcp.tool_missing",
 						"service", serviceName, "server", server.Name, "tool", toolName)
+					failures = append(failures, fmt.Errorf(
+						"mcp server %q: tool %q is not offered by the server", server.Name, toolName))
 					continue
 				}
 				namespaced := NamespaceToolName(server.Name, toolName)
 				if _, exists := tools[namespaced]; exists {
 					logger.Warn("capability.mcp.tool_collision",
 						"service", serviceName, "server", server.Name, "tool", namespaced)
+					// Reported as a degradation because THIS document's tool is
+					// not the one the model can reach: another binding won the
+					// name. Deterministic (first registration wins), so it is a
+					// steady condition and one write, and the fix — rename the
+					// server — belongs to whoever reads this binding.
+					failures = append(failures, fmt.Errorf(
+						"tool %q is already provided by another binding in this project", namespaced))
 					continue // first registration wins, deterministically
 				}
 				invocation := ProviderToolInvocation{
@@ -417,9 +695,10 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 				}
 			}
 		}
+		docErrs[i] = errors.Join(failures...)
 	}
 
-	return tools, sessions
+	return tools, sessions, docErrs
 }
 
 // meteredTool wraps a provider tool: it presents the namespaced name to the
