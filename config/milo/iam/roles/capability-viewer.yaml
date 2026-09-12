@@ -54,20 +54,22 @@
 #     resources, three verbs) instead of by scope. The per-project LIST and
 #     capability.ScopeDocuments remain the boundary that keeps one tenant's
 #     config out of another's answer.
-#   * INTERIM (2026-09-12): for the initial rollout the assistant's certificate
-#     carries O=system:masters, like every other platform service's. While it
-#     does, that ClusterRole is not consulted — superuser is evaluated ahead of
-#     RBAC — so the assistant holds cluster-admin on every project plane, not
-#     get/list on one kind. The narrow rules are kept as the target state.
+#   * That shape is the house pattern for a narrow grant, not a departure from
+#     it. Three production ClusterRoles in datum-cloud/infra do the same thing
+#     for the same reason (nso-cell-ipam, milo-ipam, billing-offer-snapshot-
+#     writer): a certificate identity, a root ClusterRole, cross-project by
+#     construction because RBAC has no project axis.
 #   * Whether a core-control-plane ClusterRoleBinding really does authorize
-#     project control-plane paths is still UNVERIFIED in production — the
-#     evidence is code-reading, not observation. The system:masters interim
-#     DEFERS that question rather than answering it: a superuser request never
-#     reaches RBAC, so a working first deploy proves nothing about it. It must
-#     be confirmed before the certificate is NARROWED. If it turns out false the
-#     fallback is the catalog-side HTTP adapter
+#     project control-plane paths is still unobserved FOR THIS IDENTITY — the
+#     evidence is the router code plus two production overlays asserting it of
+#     their own grants. Confirm with one LIST (200 vs 403) before the flip. If
+#     it turns out false the fallback is the catalog-side HTTP adapter
 #     (docs/enhancements/crd-capability-source.md, "Rejected alternatives"),
 #     which needs no standing grant because the assistant reads nothing.
+#   * The assistant's certificate must NOT carry O=system:masters. infra says so
+#     at the issuing site (apps/patch-assistant/base/assistant.yaml:204-207),
+#     and a brief 2026-09-12 decision to add it for the initial rollout was
+#     reversed once that comment and the three precedents above came to light.
 #
 # This file therefore grants a HUMAN a read-only view and nothing else, which is
 # what it has always actually done. It stays written down here because this is

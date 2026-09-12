@@ -35,7 +35,7 @@ this document previously asserted or left open are now settled by code:
 
 | Previously | Now | Evidence |
 |---|---|---|
-| `metadata.namespace == project` | **Cluster-scoped.** A project plane has its own independent namespace set; nothing creates a namespace named for the project. | `milo/internal/apiserver/storage/project/mux.go:225`; the catalog's analogous `AgentBinding` is `scope=Cluster` and its controller writes `ObjectMeta{Name}` with no namespace (`service-catalog@feat/agent-framework-api`, `internal/controller/agentbinding_controller.go:243-244`) |
+| `metadata.namespace == project` | **Cluster-scoped.** A project plane has its own independent namespace set; nothing creates a namespace named for the project. | `milo/internal/apiserver/storage/project/mux.go:225`; the catalog's analogous `AgentBinding` is `scope=Cluster` and its controller writes `ObjectMeta{Name}` with no namespace (`service-catalog, local branch feat/agent-framework-api (unpushed)`, `internal/controller/agentbinding_controller.go:243-244`) |
 | OPEN: where the CRD gets installed | **Resolved: once, at Milo root.** CRD *definitions* are deliberately global; only instance data is partitioned. | `milo/internal/apiserver/storage/project/restoptions.go:35-38` — *"Leave CRD definitions global so discovery is shared cluster-wide"* |
 | OPEN: what grants the assistant standing read | **Resolved: root RBAC, not IAM.** Milo IAM structurally cannot authorize a certificate identity. | `openfga-provider/internal/webhook/subjectaccessreview_authorizer.go:333-336`; `milo/pkg/server/filters/projects.go:40-62` |
 | Per-project informers were "expensive and need machinery we lack" | **Supported and common** via `multicluster-runtime`; we decline on fan-out cost, not impossibility. | `milo/pkg/multicluster-runtime/milo/provider.go:249-267` |
@@ -174,7 +174,7 @@ field and no structural guarantee behind it.
    would force every producer to invent a namespace convention that means
    nothing. The catalog's analogous `AgentBinding` is already `scope=Cluster`
    with `ObjectMeta{Name}` and no namespace
-   (`service-catalog@feat/agent-framework-api`,
+   (`service-catalog, local branch feat/agent-framework-api (unpushed)`,
    `internal/controller/agentbinding_controller.go:243-244`); we follow the
    house pattern rather than invent a second one.
 4. **A cached per-project LIST**, not an external adapter process and not a
@@ -271,7 +271,7 @@ The tenancy axis is the **control-plane path**, not a field. `acme`'s bindings
 are the objects reachable through `projects/acme/control-plane`, full stop. This
 matches the catalog's analogous `AgentBinding`, which is already `scope=Cluster`
 and whose controller writes `ObjectMeta{Name: agent.Name}` with no namespace
-(`service-catalog@feat/agent-framework-api`,
+(`service-catalog, local branch feat/agent-framework-api (unpushed)`,
 `internal/controller/agentbinding_controller.go:243-244`).
 
 `metadata.name` is the binding's identity within a project — the catalog uses
@@ -579,7 +579,7 @@ The assistant authenticates to Milo with an x509 client certificate
 `config/milo/rbac/control-plane-auth-delegator.yaml`), and certificate
 authentication supplies a CN and organizations — never a UID. `PolicyBinding`
 subjects require a UID for the same reason. **No `PolicyBinding` can name this
-identity.** That is why there was no precedent to copy, and why every other
+identity.** That is why every other
 platform service that talks to Milo carries `O=system:masters` and rides RBAC
 instead.
 
@@ -618,38 +618,38 @@ fallback if it does not hold is the catalog-side adapter
 ([below](#keep-the-http-adapter-make-it-the-crd-watcher)), which needs no such
 grant.
 
-### Interim: the certificate carries `system:masters`
+### The certificate must not carry `system:masters`
 
-Decided 2026-09-12, for the initial rollout. The assistant's control-plane
-certificate will carry `O=system:masters`, matching every other platform
-service, rather than waiting on the confirmation above.
+A 2026-09-12 decision to give the runtime certificate `O=system:masters` for
+the initial rollout — sidestepping the confirmation above — was **reversed**.
+Two findings did it.
 
-Two consequences, and the second is the one that matters:
+First, the decision was already made, in the place the certificate is actually
+issued. `datum-cloud/infra`
+`apps/patch-assistant/base/assistant.yaml:204-207`:
 
-1. **The RBAC question is deferred, not answered.** `system:masters` is a
-   hardcoded superuser group evaluated ahead of RBAC, so the rollout does not
-   depend on whether a root `ClusterRoleBinding` reaches project paths. That
-   question returns, unchanged, the moment the certificate is narrowed — and a
-   first deploy that worked is not evidence about it, because RBAC was never
-   consulted.
-2. **The narrow grant stops being the security boundary, because it stops being
-   consulted at all.** The rules in
-   `config/milo/rbac/control-plane-auth-delegator.yaml` describe two kinds and
-   three verbs; the credential in the pod confers cluster-admin on every project
-   plane on the platform. Everything this document argues about bounded
-   authority — the `/status` split that stops the assistant rewriting a spec it
-   was handed, the "authority to read is not residency" argument above — is
-   suspended for the duration. This is a service that composes provider-authored
-   knowledge, skills, and tool descriptions and feeds them to a model; a
-   superuser credential in that process is a materially different risk than a
-   read-only one, and the SSRF guard, the tool allow-list, and the identity-
-   forwarding sanction all bound the *model's* reach, not the *process's*.
+> *"Deliberately NO `organizations: system:masters` here, unlike activity: this
+> identity is granted exactly create on tokenreviews and subjectaccessreviews by
+> config/milo/rbac in the assistant bundle, and nothing else."*
 
-The rules are kept rather than deleted: they are the target state, they record
-what the service actually requires (which is the input to narrowing), and they
-become load-bearing with no further edit the day the certificate drops the
-group. **Narrowing is tracked debt with a real gate — confirming the root-RBAC
-claim — not an aspiration.**
+The same file contrasts it with the aggregated apiserver's separate identity,
+which does carry the group. Adding it here means deleting that comment.
+
+Second, the narrow grant is not the risky path — it is **the house pattern for a
+narrow grant**. Three production ClusterRoles in infra do exactly this shape, a
+certificate identity bound by a root ClusterRole, cross-project by construction:
+`nso-cell-ipam`, `milo-ipam`, and `billing-offer-snapshot-writer`. Two of them
+state the cross-project consequence about themselves in comments, and
+`billing-offer-snapshot-writer` gives this design's reasoning almost verbatim:
+*"IAM User subjects require a backing User object the mutator can resolve, and
+that identity is never registered."*
+
+The interim would have bought one API call's worth of schedule — the 200-vs-403
+LIST — at the cost of running a process that composes provider-authored prose
+with cluster-admin on every project plane. It is recorded here rather than
+deleted because the reasoning that produced it was sound given what was known:
+it looked like the only alternative to a question nobody could answer. The
+question turned out to be well-evidenced already.
 
 ### Cache bounds
 
@@ -901,7 +901,7 @@ projected spec.
 **Status of that work, stated precisely, because this document has twice
 described it loosely.** It is not shipped, and it is not a playground toy. The
 projection controller — API types, reconciler, webhooks, validation, samples,
-and tests — is real work on the **unmerged branch `feat/agent-framework-api` in
+and tests — is real work on the **local, unpushed branch `feat/agent-framework-api` in
 `milo-os/service-catalog`** (head `ed94982`, *"test: cover agent reconcilers,
 projection gates, and admission rules"*). It is owned by another team, and the
 production flip depends on it landing on `main`. Earlier revisions of this
@@ -1093,16 +1093,22 @@ since landed.
    proof). Update `docs/architecture/capabilities.md`,
    `docs/capability-reference.md`, and `docs/configuration.md`.
 
-Production flip is a separate, reversible step. Two of its three previous gates
-are now closed by evidence rather than by work: CRD registration is a single
-root apply, and the grant mechanism is decided. The third — empirical
-confirmation that a root `ClusterRoleBinding` authorizes requests arriving on
-project paths — is **deferred** by the `system:masters` interim above rather
-than answered, and returns as the gate on narrowing the certificate.
+Production flip is a separate, reversible step, with two gates.
 
-That leaves one gate on the flip itself: the catalog's projection controller
-landing on `main`. `CAPABILITY_SOURCE=crd`, with `http` one env-var edit away
-for a rollback.
+1. **The catalog's projection controller landing on a pushed branch.** It is
+   real, tested work, but it currently exists only as a local branch on one
+   machine.
+2. **One LIST, 200 vs 403**, with the assistant's certificate against a project
+   control-plane path. The mechanism is well-evidenced — the router's
+   installation point plus two production overlays asserting the behaviour of
+   their own grants — but it has not been observed for *this* identity, and it
+   is cheap to observe.
+
+The third previous gate is closed by evidence rather than work: CRD
+registration is a single root apply, and `config/milo/` already reaches Milo
+through an existing Flux Kustomization.
+
+`CAPABILITY_SOURCE=crd`, with `http` one env-var edit away for a rollback.
 
 ---
 
@@ -1212,7 +1218,7 @@ this work; all of them mislead.
   (UID required, so IAM cannot bind a certificate identity);
   `ipam/internal/access/namespace.go:88-96` (the TTL-cache-over-informer
   precedent, and the never-cache-a-negative rule);
-  `service-catalog@feat/agent-framework-api`
+  `service-catalog, local branch feat/agent-framework-api (unpushed)`
   `internal/controller/agentbinding_controller.go:243-244` and
   `api/v1alpha1/agentbinding_types.go:97` (cluster scope, no namespace);
   `infra/apps/billing-system/base/milo-control-plane.yaml` (the Flux delivery
