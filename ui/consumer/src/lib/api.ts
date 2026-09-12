@@ -2,13 +2,15 @@ import type { PluginFetch } from '@datum-cloud/portal-plugin-sdk';
 import { parseAssistantEventStream, type AssistantStreamEvent } from './sse';
 
 /**
- * Fetch wrapper for the assistant's aggregated apiserver resources, group
+ * Fetch wrapper for the assistant's read views and its chat-send call.
+ *
+ * `listConversations`/`getConversationMessages` go through the caller-supplied
+ * `pluginFetch` (`@datum-cloud/portal-plugin-sdk`'s `usePluginFetch()`)
+ * against the aggregated apiserver's resources, group
  * `assistant.miloapis.com/v1alpha1` (assistant repo Part 1 —
- * `internal/apiserver/registry/conversation/`). Every call here goes through
- * the caller-supplied `pluginFetch` (`@datum-cloud/portal-plugin-sdk`'s
- * `usePluginFetch()`), which is already scoped to the current project's
- * control plane and authenticated through the portal's Milo proxy — this
- * file never picks a base URL or auth itself.
+ * `internal/apiserver/registry/conversation/`) — already scoped to the
+ * current project's control plane and authenticated through the portal's
+ * Milo proxy.
  *
  * The K8s *namespace* segment, however, must still be the real project name,
  * NOT a fixed "default": `usePluginFetch()`'s control-plane proxy stamps the
@@ -17,9 +19,12 @@ import { parseAssistantEventStream, type AssistantStreamEvent } from './sse';
  * service's `internal/tenant.ProjectFromContext` requires that stamped
  * project to equal the namespace exactly, 403ing otherwise (a project-scoped
  * token must not be able to read another project's rows by aiming the
- * namespace elsewhere). So every call here takes the project name and uses
+ * namespace elsewhere). So every read here takes the project name and uses
  * it as the namespace — the one piece `usePluginFetch()` scopes the URL
  * *prefix* by but doesn't put in the K8s path itself.
+ *
+ * `sendMessage` is different: it does NOT use `pluginFetch` at all. See its
+ * own doc comment.
  */
 
 const GROUP_VERSION = 'assistant.miloapis.com/v1alpha1';
@@ -128,22 +133,34 @@ export async function getConversationMessages(
 }
 
 /**
- * `POST .../conversations/{name}/sendmessage` — the streaming subresource.
- * Returns an async generator of `AssistantStreamEvent`s as they arrive over
- * SSE; the caller drives it (e.g. in a `for await` loop) to update UI state
+ * `POST /api/assistant-chat/conversations/{name}/sendmessage` — turn
+ * execution, streamed back as SSE. Deliberately NOT a `pluginFetch` call
+ * like every other function in this file: it goes straight to the portal's
+ * own origin (same-origin `fetch`, cookie session), which proxies to the
+ * assistant's standalone A2A server rather than the aggregated apiserver's
+ * `conversations/{id}/sendmessage` subresource. See
+ * `cloud-portal/app/server/routes/assistant-chat.ts` for why — in short,
+ * identity forwarding to capability providers (compute's MCP tool) only
+ * works over A2A's own bearer-token auth path, not through Milo's
+ * aggregation-layer impersonation. The portal route translates A2A's wire
+ * protocol back into this exact same event vocabulary, so
+ * `parseAssistantEventStream`/`AssistantStreamEvent` below need no changes.
+ *
+ * Returns an async generator of `AssistantStreamEvent`s as they arrive;
+ * the caller drives it (e.g. in a `for await` loop) to update UI state
  * incrementally. Aborting `signal` cancels the underlying fetch/stream.
  */
 export async function* sendMessage(
-  pluginFetch: PluginFetch,
   projectName: string,
   conversationName: string,
   body: SendMessageRequest,
   signal?: AbortSignal
 ): AsyncGenerator<AssistantStreamEvent> {
-  const response = await pluginFetch(
-    `${conversationsPath(projectName)}/${encodeURIComponent(conversationName)}/sendmessage`,
+  const response = await fetch(
+    `/api/assistant-chat/conversations/${encodeURIComponent(conversationName)}/sendmessage?projectId=${encodeURIComponent(projectName)}`,
     {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',

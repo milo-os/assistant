@@ -1,10 +1,12 @@
 // Package server wires the assistant's HTTP surface: liveness at GET /healthz,
 // readiness at GET /readyz, Prometheus telemetry at GET /metrics, the public
 // agent card at /.well-known/agent-card.json (+ the legacy /.well-known/agent.json
-// alias), and the POST /a2a JSON-RPC endpoint. The A2A protocol itself (JSON-RPC
-// framing, SSE, task store) is owned by a2a-go; this package adds the mux, the
-// auth middleware, request-id correlation, operational metrics, and the
-// dependency wiring.
+// alias), the POST /a2a JSON-RPC endpoint, and POST
+// /chat/conversations/{contextId}/sendmessage — a second front door onto the
+// same Runner in a flat SSE vocabulary, for callers that don't speak A2A (see
+// chat_stream.go). The A2A protocol itself (JSON-RPC framing, SSE, task store)
+// is owned by a2a-go; this package adds the mux, the auth middleware,
+// request-id correlation, operational metrics, and the dependency wiring.
 package server
 
 import (
@@ -153,6 +155,11 @@ func New(deps Deps) http.Handler {
 	// Naming a conversation ("/rename"): same auth as POST /v1alpha1/compact, and
 	// like it a plain store mutation rather than an A2A method — see rename.go.
 	mux.Handle("POST /v1alpha1/conversations/rename", renameHandler(deps.Renamer, deps.Authenticator, deps.Authorizer, logger))
+	// Chat-turn execution in the flat SSE vocabulary, for callers (cloud-portal)
+	// that don't want to speak A2A's JSON-RPC framing — see chat_stream.go. Same
+	// bearer-token authn/project authz as POST /a2a, same Runner and turn
+	// semantics, different wire shape.
+	mux.Handle("POST /chat/conversations/{contextId}/sendmessage", chatStreamHandler(deps.Runner, deps.Authenticator, deps.Authorizer, logger))
 
 	// Outer-to-inner: tracing → request-id/logging → metrics → routes.
 	// otelhttp is outermost so it extracts an inbound W3C traceparent (or
