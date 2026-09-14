@@ -47,11 +47,13 @@ func toV1Messages(in []assistant.ConversationMessage) []ConversationMessage {
 func convert_v1alpha1_Conversation_To_assistant(in *Conversation, out *assistant.Conversation) error {
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Spec = assistant.ConversationSpec{Archived: in.Spec.Archived}
 	out.Status = assistant.ConversationStatus{
 		LastActiveAt: in.Status.LastActiveAt,
 		MessageCount: in.Status.MessageCount,
 		Title:        in.Status.Title,
 		Name:         in.Status.Name,
+		ArchivedAt:   in.Status.ArchivedAt.DeepCopy(),
 	}
 	return nil
 }
@@ -59,11 +61,13 @@ func convert_v1alpha1_Conversation_To_assistant(in *Conversation, out *assistant
 func convert_assistant_Conversation_To_v1alpha1(in *assistant.Conversation, out *Conversation) error {
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Spec = ConversationSpec{Archived: in.Spec.Archived}
 	out.Status = ConversationStatus{
 		LastActiveAt: in.Status.LastActiveAt,
 		MessageCount: in.Status.MessageCount,
 		Title:        in.Status.Title,
 		Name:         in.Status.Name,
+		ArchivedAt:   in.Status.ArchivedAt.DeepCopy(),
 	}
 	return nil
 }

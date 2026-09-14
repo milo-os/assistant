@@ -125,9 +125,12 @@ type (
 	}
 	// pickerListMsg delivers the picker's conversation listing (or an error).
 	// See chat_picker.go for the picker itself.
+	// archived says which Show option it was fetched for, so a listing that
+	// lands after the user switched options is recognized as stale.
 	pickerListMsg struct {
-		items []assistantv1alpha1.Conversation
-		err   error
+		archived bool
+		items    []assistantv1alpha1.Conversation
+		err      error
 	}
 	// pickerTranscriptMsg delivers the selected conversation's full transcript
 	// (or an error) to resume from.
@@ -142,6 +145,26 @@ type (
 	pickerPreviewMsg struct {
 		contextID string
 		items     []assistantv1alpha1.ConversationMessage
+		err       error
+	}
+	// pickerArchiveMsg ends a picker ctrl+a: the conversation that was
+	// archived (or, with archived false, unarchived), its label for the
+	// notice line, and err nil on success.
+	pickerArchiveMsg struct {
+		contextID string
+		title     string
+		archived  bool
+		err       error
+	}
+	// pickerDeleteMsg ends a confirmed picker ctrl+d.
+	pickerDeleteMsg struct {
+		contextID string
+		title     string
+		err       error
+	}
+	// archiveDoneMsg ends an /archive of the current conversation.
+	archiveDoneMsg struct {
+		contextID string
 		err       error
 	}
 )
@@ -607,6 +630,18 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildViewport()
 		return m, nil
 
+	case archiveDoneMsg:
+		m.working = false
+		if msg.err != nil {
+			m.turns = append(m.turns, m.st.err.Render("⚠ archive failed: "+msg.err.Error()))
+			m.raw = append(m.raw, transcriptTurn{role: "system", content: "archive failed: " + msg.err.Error()})
+		} else {
+			m.turns = append(m.turns, m.st.subtle.Render(archivedNote))
+			m.raw = append(m.raw, transcriptTurn{role: "system", content: archivedNote})
+		}
+		m.rebuildViewport()
+		return m, nil
+
 	case tea.MouseWheelMsg:
 		if m.picker.open || m.overlay != "" {
 			// The transcript isn't on screen; scrolling it here would leave the
@@ -627,6 +662,10 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case pickerListMsg:
+		if msg.archived != m.picker.archived {
+			// Fetched for the other Show option; the user has switched since.
+			return m, nil
+		}
 		m.picker.loading = false
 		if msg.err != nil {
 			m.picker.err = msg.err.Error()
@@ -644,6 +683,12 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.picker.preview[msg.contextID] = msg.items
 		return m, nil
+
+	case pickerArchiveMsg:
+		return m, m.onPickerArchived(msg)
+
+	case pickerDeleteMsg:
+		return m, m.onPickerDeleted(msg)
 
 	case pickerTranscriptMsg:
 		m.picker.loading = false
@@ -698,6 +743,12 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.onCtrlC()
 	case "ctrl+d":
+		// In the picker's list ctrl+d is delete (behind a y/n), so it goes to
+		// the picker rather than quitting; a direct `resume <id>` load has no
+		// list, and keeps the escape hatch.
+		if m.picker.open && !m.picker.direct {
+			return m.onPickerKey(msg)
+		}
 		// The shell rule: EOF ends the session only on an empty line, so a
 		// stray ctrl+d cannot throw a half-typed message away.
 		if m.picker.open || m.overlay != "" || m.ta.Value() == "" {
@@ -774,6 +825,9 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "/resume":
 			m.resetComposer()
 			return m, m.openPicker()
+		case "/archive":
+			m.resetComposer()
+			return m, m.startArchive()
 		case "/clear":
 			m.resetComposer()
 			m.contextID = ""
@@ -1105,6 +1159,7 @@ var helpText = []struct{ cmd, desc string }{
 	{"/clear", "start a fresh conversation, clearing this transcript"},
 	{"/compact", "compact this conversation's history now"},
 	{"/rename <name>", "name this conversation (shown wherever it's listed)"},
+	{"/archive", "archive this conversation (hidden from /resume until you show archived ones)"},
 	{"/export", "save this transcript to a file"},
 	{"/status", "show the current project, conversation, and turn count"},
 	{"/help", "show this list"},
@@ -1167,7 +1222,11 @@ func commandArg(text, command string) (arg string, ok bool) {
 // commandNames is every literal slash command the input recognizes, for
 // autocomplete matching — helpText groups /quit and /exit into one display
 // row, but they're two distinct completable commands here.
-var commandNames = []string{"/resume", "/clear", "/compact", "/rename", "/export", "/status", "/help", "/quit", "/exit"}
+//
+// There is deliberately no /delete: the conversation it would destroy is the
+// one on screen, one mistyped completion away from /clear. Delete lives in the
+// picker, behind its own y/n, and on the command line.
+var commandNames = []string{"/resume", "/clear", "/compact", "/rename", "/archive", "/export", "/status", "/help", "/quit", "/exit"}
 
 // commandDescriptions is what the suggestion list shows next to each command
 // (see suggestionBar); unlike helpText it keys /quit and /exit separately
@@ -1177,6 +1236,7 @@ var commandDescriptions = map[string]string{
 	"/clear":   "start a fresh conversation, clearing this transcript",
 	"/compact": "compact this conversation's history now",
 	"/rename":  "name this conversation: /rename <name>",
+	"/archive": "archive this conversation (find it again in /resume)",
 	"/export":  "save this transcript to a file",
 	"/status":  "show the current project, conversation, and turn count",
 	"/help":    "show the command list",
@@ -2042,6 +2102,37 @@ func (m *chatModel) startRename(name string) tea.Cmd {
 func (m *chatModel) rename(name string) {
 	err := requestRename(m.ctx, m.baseURL, m.token, m.project, m.contextID, name)
 	m.prog.Send(renameDoneMsg{name: name, err: err})
+}
+
+// archivedNote is what /archive leaves in the transcript. An archived
+// conversation disappears from everywhere the user would normally look, so the
+// note says where it went and that nothing further is needed to bring it back.
+const archivedNote = "archived — it no longer shows in /resume or --continue. Find it in /resume " +
+	"(tab to Show, → Archived) or with 'conversations list --archived'; sending another message here unarchives it."
+
+// startArchive archives the current conversation through the aggregated API —
+// the same [ReadView] write `conversations archive` and the picker's ctrl+a
+// use. With no conversation yet there is nothing to archive, and that is
+// answered in the transcript rather than by a request. Unlike /compact and
+// /rename (goroutine + prog.Send) it returns a tea.Cmd, the picker's pattern,
+// capturing everything it needs by value.
+func (m *chatModel) startArchive() tea.Cmd {
+	if m.contextID == "" {
+		m.turns = append(m.turns, m.st.subtle.Render("nothing to archive — no conversation yet"))
+		m.rebuildViewport()
+		return nil
+	}
+	m.working = true
+	m.rebuildViewport()
+	ctx, view, project, id := m.ctx, m.view, m.project, m.contextID
+	archive := func() tea.Msg {
+		_, err := view.setConversationArchived(ctx, project, id, true)
+		if err != nil {
+			err = errors.New(readViewErrorText(view, err))
+		}
+		return archiveDoneMsg{contextID: id, err: err}
+	}
+	return tea.Batch(m.sp.Tick, archive)
 }
 
 // contentWidth is the usable inner width: terminal width minus the outer box's

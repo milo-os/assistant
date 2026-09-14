@@ -19,8 +19,10 @@ import (
 // +genclient
 
 // Conversation is one durable chat conversation. name == the A2A context id;
-// namespace == the milo project. Read-only in v1 (populated by the chat flow,
-// surfaced here for list/get).
+// namespace == the milo project. Conversations are created by the chat flow,
+// never through this API. Update (PUT/PATCH) changes only spec.archived —
+// every other field in the submitted object is ignored — and delete removes
+// the conversation and its transcript permanently.
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type Conversation struct {
 	metav1.TypeMeta `json:",inline"`
@@ -28,7 +30,19 @@ type Conversation struct {
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// +optional
+	Spec ConversationSpec `json:"spec,omitempty"`
+	// +optional
 	Status ConversationStatus `json:"status,omitempty"`
+}
+
+// ConversationSpec is the part of a conversation its owner controls.
+type ConversationSpec struct {
+	// Archived hides the conversation from the default list (select archived
+	// ones with fieldSelector=spec.archived=true) without deleting it; it
+	// stays readable and resumable by name. Sending another message in the
+	// conversation sets it back to false.
+	// +optional
+	Archived bool `json:"archived,omitempty"`
 }
 
 // ConversationStatus reports rollup information about a conversation.
@@ -47,6 +61,10 @@ type ConversationStatus struct {
 	// one. Clients show it in place of Title where set.
 	// +optional
 	Name string `json:"name,omitempty"`
+	// ArchivedAt is when the conversation was archived; unset when it is not.
+	// Archiving an already-archived conversation keeps the original time.
+	// +optional
+	ArchivedAt *metav1.Time `json:"archivedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

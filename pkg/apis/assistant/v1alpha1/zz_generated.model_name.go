@@ -76,6 +76,11 @@ func (in ConversationMessages) OpenAPIModelName() string {
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ConversationSpec) OpenAPIModelName() string {
+	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.ConversationSpec"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
 func (in ConversationStatus) OpenAPIModelName() string {
 	return "com.miloapis.assistant.pkg.apis.assistant.v1alpha1.ConversationStatus"
 }

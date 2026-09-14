@@ -190,6 +190,45 @@ type Store interface {
 	Renamer
 }
 
+// Archiver hides a conversation from default listings without destroying it,
+// and brings it back. It is its own interface for the same reason [Renamer]
+// is: the conversations apiserver's update path needs this one method, not
+// the chat-path [Store].
+//
+// Archive is deliberately a flag rather than a move to somewhere else: an
+// archived conversation keeps its key, its turns and its name, stays gettable
+// and resumable by id, and continuing it ([Store.Append]) unarchives it — the
+// user sending another message is the clearest possible signal they want it
+// back in the list.
+type Archiver interface {
+	// SetArchived archives (archived=true) or unarchives the conversation. An
+	// already-archived conversation keeps its original archive time, so
+	// re-archiving is idempotent rather than a way to reorder the archive.
+	// Like Rename it leaves last-active untouched. An unknown (project,
+	// context) key yields [ErrConversationNotFound].
+	SetArchived(ctx context.Context, projectName, contextID string, archived bool) error
+}
+
+// Deleter permanently removes a conversation and every message in it. There
+// is no soft-delete and no undo — that is what [Archiver] is for — so callers
+// that face a human are expected to confirm first.
+type Deleter interface {
+	// Delete removes the conversation. An unknown (project, context) key
+	// yields [ErrConversationNotFound], so a delete that raced another delete
+	// reports the truth instead of a silent success.
+	Delete(ctx context.Context, projectName, contextID string) error
+}
+
+// Editor is everything the conversations apiserver does with the store: the
+// read view plus the two lifecycle writes it serves (update of spec.archived,
+// and delete). Spelled out so the apiserver's dependency stays narrower than
+// the chat path's [Store] — it never appends, compacts or renames.
+type Editor interface {
+	Reader
+	Archiver
+	Deleter
+}
+
 // Renamer sets a conversation's user-given name. It is spelled as its own
 // interface, the way [Lister] and [Reader] are, so the HTTP layer's rename
 // endpoint can depend on this one method instead of the whole chat-path
@@ -214,6 +253,8 @@ type memoryMeta struct {
 	createdAt    time.Time
 	lastActiveAt time.Time
 	name         string
+	// archivedAt is when the conversation was archived; zero when it is not.
+	archivedAt time.Time
 }
 
 type storeKey struct {
@@ -226,6 +267,7 @@ var (
 	_ Lister  = (*MemoryStore)(nil)
 	_ Reader  = (*MemoryStore)(nil)
 	_ Renamer = (*MemoryStore)(nil)
+	_ Editor  = (*MemoryStore)(nil)
 )
 
 // NewMemoryStore returns an empty in-memory store.
@@ -252,7 +294,7 @@ func (s *MemoryStore) Turns(_ context.Context, projectName, contextID string) ([
 // Append implements [Store]. Over-long turn text is truncated to
 // MaxStoredContentLen, and a conversation retains at most
 // MaxTurnsPerConversation turns (oldest dropped) so a long-lived process cannot
-// grow without bound.
+// grow without bound. A new turn unarchives the conversation (see [Archiver]).
 func (s *MemoryStore) Append(_ context.Context, projectName, contextID string, turn Turn) error {
 	turn = clampTurn(turn)
 	s.mu.Lock()
@@ -261,6 +303,7 @@ func (s *MemoryStore) Append(_ context.Context, projectName, contextID string, t
 	now := time.Now()
 	if m, ok := s.meta[key]; ok {
 		m.lastActiveAt = now
+		m.archivedAt = time.Time{}
 	} else {
 		s.meta[key] = &memoryMeta{createdAt: now, lastActiveAt: now}
 	}
@@ -279,6 +322,9 @@ func (s *MemoryStore) Append(_ context.Context, projectName, contextID string, t
 // Compact implements [Store.Compact]: replaces the conversation's turn slice
 // under the same mutex Append uses, and touches lastActiveAt the same way
 // Append does — compaction is conversation activity, not a background sweep.
+// It leaves the archive state alone: compaction can run on the service's own
+// initiative, and a sweep the user never asked for must not undo an archive
+// they did.
 func (s *MemoryStore) Compact(_ context.Context, projectName, contextID string, summary Turn, keep []Turn) error {
 	summary = clampTurn(summary)
 	turns := make([]Turn, 0, 1+len(keep))
@@ -312,9 +358,42 @@ func (s *MemoryStore) Rename(_ context.Context, projectName, contextID, name str
 	return nil
 }
 
-// ListConversations implements [Lister]: the project's conversations, newest
-// activity first. limit <= 0 uses 100.
-func (s *MemoryStore) ListConversations(_ context.Context, projectName string, limit int) ([]Conversation, error) {
+// SetArchived implements [Archiver]. Like Rename it leaves lastActiveAt
+// alone: filing a conversation away is not activity in it.
+func (s *MemoryStore) SetArchived(_ context.Context, projectName, contextID string, archived bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.meta[storeKey{project: projectName, context: contextID}]
+	if !ok {
+		return ErrConversationNotFound
+	}
+	switch {
+	case !archived:
+		m.archivedAt = time.Time{}
+	case m.archivedAt.IsZero():
+		m.archivedAt = time.Now()
+	}
+	return nil
+}
+
+// Delete implements [Deleter]: the turns and the metadata go together, so
+// nothing of the conversation — not even its name — outlives it.
+func (s *MemoryStore) Delete(_ context.Context, projectName, contextID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := storeKey{project: projectName, context: contextID}
+	if _, ok := s.meta[key]; !ok {
+		return ErrConversationNotFound
+	}
+	delete(s.meta, key)
+	delete(s.turns, key)
+	return nil
+}
+
+// ListConversations implements [Lister]: the project's conversations on the
+// archived side opts selects, newest activity first. A limit <= 0 uses 100.
+func (s *MemoryStore) ListConversations(_ context.Context, projectName string, opts ListOptions) ([]Conversation, error) {
+	limit := opts.Limit
 	if limit <= 0 {
 		limit = 100
 	}
@@ -326,6 +405,9 @@ func (s *MemoryStore) ListConversations(_ context.Context, projectName string, l
 			continue
 		}
 		m := s.meta[key]
+		if archived := !m.archivedAt.IsZero(); archived != opts.Archived {
+			continue
+		}
 		out = append(out, Conversation{
 			ProjectName:  key.project,
 			ContextID:    key.context,
@@ -334,6 +416,7 @@ func (s *MemoryStore) ListConversations(_ context.Context, projectName string, l
 			TurnCount:    int64(len(turns)),
 			Title:        TitleOf(openingUserText(turns)),
 			Name:         m.name,
+			ArchivedAt:   m.archivedAt,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastActiveAt.After(out[j].LastActiveAt) })
@@ -360,6 +443,7 @@ func (s *MemoryStore) GetConversation(_ context.Context, projectName, contextID 
 		TurnCount:    int64(len(s.turns[key])),
 		Title:        TitleOf(openingUserText(s.turns[key])),
 		Name:         m.name,
+		ArchivedAt:   m.archivedAt,
 	}, nil
 }
 

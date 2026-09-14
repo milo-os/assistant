@@ -31,6 +31,12 @@ const (
 	KindConvShow
 	// KindConvRename names one conversation.
 	KindConvRename
+	// KindConvArchive archives one conversation.
+	KindConvArchive
+	// KindConvUnarchive brings one archived conversation back.
+	KindConvUnarchive
+	// KindConvDelete permanently deletes one conversation.
+	KindConvDelete
 	// KindGapList lists a provider project's distinct capability gaps.
 	KindGapList
 	// KindGapReports lists the individual reports behind those gaps.
@@ -68,14 +74,26 @@ type Invocation struct {
 	// Project is the Milo project the task runs against — for the gaps read
 	// view, the PROVIDER's own project.
 	Project string
-	// ContextID continues an existing conversation (KindChat, KindCompact,
-	// KindConvRename); for KindResume it is optional and skips the picker.
+	// ContextID continues an existing conversation (KindChat, KindCompact),
+	// or names the one a conversations subcommand acts on; for KindResume it
+	// is optional and skips the picker.
 	ContextID string
 	// Continue resumes the project's most recently active conversation
 	// (-c/--continue, resume's --last) when ContextID is empty.
 	Continue bool
 	// Name is the conversation name KindConvRename sets.
 	Name string
+	// Archived makes KindConvList list the archive instead of the
+	// conversations that are not archived.
+	Archived bool
+	// Yes skips KindConvDelete's confirmation prompt.
+	Yes bool
+	// StdinTerminal reports that stdin is a terminal, so KindConvDelete can
+	// ask for confirmation there. Without it (and without Yes) a delete
+	// refuses rather than deleting unconfirmed. The entrypoints set it from
+	// [StdinIsTerminal]; it is a field rather than a check inside Execute so
+	// tests can drive both sides.
+	StdinTerminal bool
 	// Interactive selects the line-based REPL, TUI the full-screen chat UI.
 	Interactive bool
 	TUI         bool
@@ -110,21 +128,25 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 	}
 
 	inv := Invocation{
-		Kind:        cmd.kind,
-		JSON:        cmd.json,
-		Message:     cmd.message,
-		Project:     cmd.project,
-		ContextID:   cmd.contextID,
-		Continue:    cmd.continueLast,
-		Name:        cmd.name,
-		Interactive: cmd.interactive,
-		TUI:         cmd.tui,
-		Kubeconfig:  cmd.kubeconfig,
-		ID:          cmd.id,
+		Kind:          cmd.kind,
+		JSON:          cmd.json,
+		Message:       cmd.message,
+		Project:       cmd.project,
+		ContextID:     cmd.contextID,
+		Continue:      cmd.continueLast,
+		Name:          cmd.name,
+		Archived:      cmd.archived,
+		Yes:           cmd.yes,
+		StdinTerminal: StdinIsTerminal(),
+		Interactive:   cmd.interactive,
+		TUI:           cmd.tui,
+		Kubeconfig:    cmd.kubeconfig,
+		ID:            cmd.id,
 	}
 
-	// The apiserver read views use kubectl and the caller's k8s identity, not
-	// the A2A service — no PATCH_URL/PATCH_TOKEN needed.
+	// The apiserver views — reads, and the archive/delete writes — use kubectl
+	// and the caller's k8s identity rather than the A2A service, so they need
+	// no PATCH_URL/PATCH_TOKEN.
 	if !inv.needsService() {
 		return inv.Execute(ctx, io)
 	}
@@ -147,10 +169,12 @@ func Run(ctx context.Context, argv []string, getenv func(string) string, io Io) 
 }
 
 // needsService reports whether this command talks to the assistant service (as
-// opposed to the aggregated apiserver read views, which use kubectl).
+// opposed to the aggregated apiserver — the read views, and the conversation
+// archive/delete writes that go through the same [ReadView]).
 func (inv Invocation) needsService() bool {
 	switch inv.Kind {
-	case KindConvList, KindConvShow, KindGapList, KindGapReports:
+	case KindConvList, KindConvShow, KindConvArchive, KindConvUnarchive, KindConvDelete,
+		KindGapList, KindGapReports:
 		return false
 	}
 	return true
@@ -176,6 +200,12 @@ func (inv Invocation) Execute(ctx context.Context, io Io) int {
 		return runConversationsShow(ctx, inv, io)
 	case KindConvRename:
 		return runConversationsRename(ctx, inv, io)
+	case KindConvArchive:
+		return runConversationsArchive(ctx, inv, io, true)
+	case KindConvUnarchive:
+		return runConversationsArchive(ctx, inv, io, false)
+	case KindConvDelete:
+		return runConversationsDelete(ctx, inv, io)
 	case KindGapList:
 		return runGapsList(ctx, inv, io)
 	case KindGapReports:

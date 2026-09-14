@@ -197,6 +197,31 @@ func renderRenameResult(err error, contextID, name string, jsonOut bool, io Io) 
 	return 0
 }
 
+// renderConversationAction reports one conversation lifecycle write — verb is
+// the past tense the output uses ("archived", "unarchived", "deleted") — in the
+// same shape as [renderRenameResult]: {"<verb>": ok, "contextId": …} for -o
+// json, "<verb> <id>" otherwise.
+func renderConversationAction(verb string, err error, contextID string, jsonOut bool, io Io) int {
+	if jsonOut {
+		body := map[string]any{verb: err == nil, "contextId": contextID}
+		if err != nil {
+			body["error"] = err.Error()
+		}
+		if b, mErr := json.Marshal(body); mErr == nil {
+			io.Out(string(b) + "\n")
+		}
+	} else if err != nil {
+		io.Err("patch: " + err.Error() + "\n")
+	} else {
+		io.Out(verb + " " + contextID + "\n")
+	}
+
+	if err != nil {
+		return 1
+	}
+	return 0
+}
+
 // renderCard prints an agent card, either pretty or as raw JSON.
 func renderCard(card *a2a.AgentCard, jsonOut bool, io Io) {
 	if jsonOut {

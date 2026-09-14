@@ -33,7 +33,8 @@ func newRootCmd() *cobra.Command {
 		"service; pick one back up with 'resume', or continue it non-interactively\n" +
 		"with 'chat --context-id'.\n" +
 		"'conversations' and 'gaps' read the aggregated API for the same project,\n" +
-		"using the same datumctl credentials."
+		"using the same datumctl credentials; 'conversations' also archives and\n" +
+		"deletes through it."
 	root.Example = "  datumctl assistant\n" +
 		"  datumctl assistant -c\n" +
 		"  datumctl assistant chat \"Why is the api-backend workload not available?\"\n" +
@@ -159,7 +160,9 @@ func newResumeCmd() *cobra.Command {
 		Long: "Open the full-screen chat straight into the conversation picker: type to\n" +
 			"search the project's conversations (newest first, each shown by its name\n" +
 			"or opening message), ↑/↓ to browse, ctrl+t to preview a transcript, enter\n" +
-			"to resume. With a context id it skips the picker and loads that\n" +
+			"to resume. ctrl+a archives the highlighted conversation and ctrl+d deletes\n" +
+			"it (after a y/n); tab to the Show option and ←/→ to see archived ones.\n" +
+			"With a context id it skips the picker and loads that\n" +
 			"conversation directly; with --last it skips straight to the most recently\n" +
 			"active one.\n\n" +
 			"Listing and loading go through the conversations apiserver with your\n" +
@@ -213,23 +216,29 @@ func newConversationsCmd() *cobra.Command {
 		Use:     "conversations",
 		Aliases: []string{"conversation", "conv"},
 		Short:   "Browse your durable chat history",
-		Long: "Read the conversations the assistant has stored for a project, through\n" +
-			"the aggregated API — the same project and the same datumctl credentials\n" +
-			"the rest of these commands use. 'rename' is the exception: naming a\n" +
-			"conversation is a write, so it goes to the assistant service instead.",
+		Long: "Browse and manage the conversations the assistant has stored for a\n" +
+			"project, through the aggregated API — the same project and the same\n" +
+			"datumctl credentials the rest of these commands use.\n\n" +
+			"'archive' hides a conversation from 'list', the resume picker and -c\n" +
+			"without deleting it: 'list --archived' shows it, it stays resumable by id,\n" +
+			"and 'unarchive' — or sending it another message — brings it back.\n" +
+			"'delete' removes a conversation and its transcript permanently.\n\n" +
+			"'rename' is the one subcommand that goes to the assistant service\n" +
+			"instead of the aggregated API.",
 	}
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List conversations in a project",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			inv, err := readViewInvocation(cmd, patchcli.KindConvList)
+			inv, err := listInvocation(cmd)
 			if err != nil {
 				return err
 			}
 			return run(cmd, inv)
 		},
 	}
+	list.Flags().Bool("archived", false, "List archived conversations instead")
 	show := &cobra.Command{
 		Use:   "show <context-id>",
 		Short: "Print one conversation's transcript",
@@ -243,8 +252,58 @@ func newConversationsCmd() *cobra.Command {
 			return run(cmd, inv)
 		},
 	}
-	// Unlike its siblings this one writes, so it goes to the assistant service
-	// rather than the read-only aggregated API — see internal/patchcli.
+	// archive, unarchive and delete write to the same aggregated API list and
+	// show read, as the same identity — see internal/patchcli/readview.go.
+	archive := &cobra.Command{
+		Use:   "archive <context-id>",
+		Short: "Hide a conversation from the list without deleting it",
+		Long: "Archive a conversation: it drops out of 'conversations list', the resume\n" +
+			"picker and -c, but is kept — 'list --archived' shows it, 'resume <id>'\n" +
+			"still opens it, and 'unarchive' (or sending it another message) brings\n" +
+			"it back.",
+		Args:    cobra.ExactArgs(1),
+		Example: "  datumctl assistant conversations archive 01a05ee5-…",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			inv, err := conversationInvocation(cmd, patchcli.KindConvArchive, args)
+			if err != nil {
+				return err
+			}
+			return run(cmd, inv)
+		},
+	}
+	unarchive := &cobra.Command{
+		Use:   "unarchive <context-id>",
+		Short: "Bring an archived conversation back into the list",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			inv, err := conversationInvocation(cmd, patchcli.KindConvUnarchive, args)
+			if err != nil {
+				return err
+			}
+			return run(cmd, inv)
+		},
+	}
+	del := &cobra.Command{
+		Use:   "delete <context-id>",
+		Short: "Permanently delete a conversation and its transcript",
+		Long: "Delete a conversation and every message in it. This cannot be undone —\n" +
+			"'archive' is the way to get one out of sight and keep it.\n\n" +
+			"It asks for confirmation first; --yes skips the question, and is required\n" +
+			"when stdin is not a terminal.",
+		Args: cobra.ExactArgs(1),
+		Example: "  datumctl assistant conversations delete 01a05ee5-…\n" +
+			"  datumctl assistant conversations delete 01a05ee5-… --yes",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			inv, err := deleteInvocation(cmd, args)
+			if err != nil {
+				return err
+			}
+			return run(cmd, inv)
+		},
+	}
+	del.Flags().BoolP("yes", "y", false, "Delete without asking for confirmation")
+	// Unlike its siblings this one goes to the assistant service rather than
+	// the aggregated API — see internal/patchcli.
 	rename := &cobra.Command{
 		Use:   "rename <context-id> <name>",
 		Short: "Name a conversation",
@@ -268,8 +327,43 @@ func newConversationsCmd() *cobra.Command {
 			return run(cmd, inv)
 		},
 	}
-	cmd.AddCommand(list, show, rename)
+	cmd.AddCommand(list, show, rename, archive, unarchive, del)
 	return cmd
+}
+
+// listInvocation is `conversations list`, carrying --archived through to the
+// field selector.
+func listInvocation(cmd *cobra.Command) (patchcli.Invocation, error) {
+	inv, err := readViewInvocation(cmd, patchcli.KindConvList)
+	if err != nil {
+		return inv, err
+	}
+	inv.Archived, _ = cmd.Flags().GetBool("archived")
+	return inv, nil
+}
+
+// conversationInvocation is a conversations subcommand that acts on the one
+// conversation named by its argument.
+func conversationInvocation(cmd *cobra.Command, kind patchcli.Kind, args []string) (patchcli.Invocation, error) {
+	inv, err := readViewInvocation(cmd, kind)
+	if err != nil {
+		return inv, err
+	}
+	inv.ContextID = args[0]
+	return inv, nil
+}
+
+// deleteInvocation is `conversations delete`: --yes, and whether there is a
+// terminal to ask on instead — the two things that decide whether it may
+// proceed.
+func deleteInvocation(cmd *cobra.Command, args []string) (patchcli.Invocation, error) {
+	inv, err := conversationInvocation(cmd, patchcli.KindConvDelete, args)
+	if err != nil {
+		return inv, err
+	}
+	inv.Yes, _ = cmd.Flags().GetBool("yes")
+	inv.StdinTerminal = patchcli.StdinIsTerminal()
+	return inv, nil
 }
 
 func newGapsCmd() *cobra.Command {

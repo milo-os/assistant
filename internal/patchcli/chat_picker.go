@@ -8,7 +8,10 @@
 // Listing and transcripts come from the conversations apiserver through the
 // same ReadView as `patch conversations`, never the chat transport:
 // per the apiserver design, discovery and resuming are separate paths, and
-// this overlay is the discovery half.
+// this overlay is the discovery half. It is also where a conversation's
+// lifecycle is managed by hand — ctrl+a archives (or unarchives) and ctrl+d
+// deletes the highlighted row, through that same ReadView — since this is the
+// one screen that shows a person all of their conversations at once.
 package patchcli
 
 import (
@@ -16,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -39,11 +43,17 @@ type pickerState struct {
 	err    string
 
 	search textinput.Model
-	// focusSort moves tab focus from the search box to the sort option, so
-	// ←/→ change it instead of moving the search cursor.
-	focusSort bool
+	// focus is where tab has moved the keyboard: the search box, or one of
+	// the two options on the search line, so ←/→ change that option instead
+	// of moving the search cursor.
+	focus pickerFocus
 	// sortCreated orders rows by creation time instead of last activity.
 	sortCreated bool
+	// archived shows the archive (spec.archived=true) instead of the
+	// conversations in everyday use. It is a separate listing fetched from
+	// the apiserver, not a filter over one already held, because the default
+	// listing never contains archived conversations at all.
+	archived bool
 	// comfortable adds a detail line (size, id) under every row (ctrl+o);
 	// transcript shows the highlighted conversation's preview under the
 	// list (ctrl+t). Both are off by default so the list stays dense.
@@ -64,7 +74,31 @@ type pickerState struct {
 	preview        map[string][]assistantv1alpha1.ConversationMessage
 	previewErr     map[string]string
 	previewPending map[string]bool
+
+	// confirmDelete is the context id ctrl+d is waiting on a y for; the next
+	// key either confirms it or cancels it (see onPickerKey).
+	confirmDelete string
+	// acting is the context id an archive or delete request is in flight
+	// for. One at a time: the notice line reports a single outcome, and a
+	// second request racing the first would leave it reporting the wrong one.
+	acting string
+	// notice is a one-line status under the list — the outcome of the last
+	// archive/delete, or its progress while acting — and noticeErr marks it a
+	// failure. Unlike err it never replaces the list: a failed archive leaves
+	// every row where it was.
+	notice    string
+	noticeErr bool
 }
+
+// pickerFocus is which part of the picker's search line has the keyboard.
+type pickerFocus int
+
+const (
+	pickerFocusSearch pickerFocus = iota
+	pickerFocusSort
+	pickerFocusShow
+	pickerFocusCount
+)
 
 // newPickerState returns an open, loading picker with a focused, empty search
 // box and its preview caches ready to write to (a zero pickerState's maps are
@@ -152,11 +186,31 @@ func (m *chatModel) resumeDirect(contextID string) tea.Cmd {
 }
 
 // onPickerKey handles input while the picker is open. Navigation keys move
-// the cursor, enter resumes, esc cancels, tab/←/→ drive the sort option,
-// ctrl+o/ctrl+t toggle the detail line and the transcript preview, and
-// everything else edits the search box — so typing narrows the list rather
-// than leaking into the chat input underneath.
+// the cursor, enter resumes, esc cancels, tab cycles focus from the search box
+// through the Sort and Show options (←/→ change whichever is focused),
+// ctrl+o/ctrl+t toggle the detail line and the transcript preview, ctrl+a
+// archives the highlighted conversation (unarchives it, when showing the
+// archive), ctrl+d deletes it behind an inline y/n, and everything else edits
+// the search box — so typing narrows the list rather than leaking into the
+// chat input underneath.
 func (m *chatModel) onPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// A pending delete owns the very next key. Only an explicit y may destroy
+	// a conversation; anything else — esc, an arrow, a stray letter — cancels,
+	// and is consumed rather than also acting on the list, so the reflexive
+	// esc that backs out of the question does not close the picker as well.
+	if id := m.picker.confirmDelete; id != "" {
+		m.picker.confirmDelete = ""
+		if msg.String() == "y" || msg.String() == "Y" {
+			return m, m.deletePickerConversation(id)
+		}
+		m.picker.notice, m.picker.noticeErr = "not deleted", false
+		return m, nil
+	}
+	// An outcome stays on screen until the user does something else — unless
+	// a request is still running, in which case the line is its progress.
+	if m.picker.acting == "" {
+		m.picker.notice, m.picker.noticeErr = "", false
+	}
 	switch msg.String() {
 	case "esc":
 		m.picker = pickerState{}
@@ -189,7 +243,7 @@ func (m *chatModel) onPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.picker.err = ""
 		return m, tea.Batch(m.loadPickerTranscript(c.Name), m.sp.Tick)
 	case "tab":
-		m.picker.focusSort = !m.picker.focusSort
+		m.picker.focus = (m.picker.focus + 1) % pickerFocusCount
 		return m, nil
 	case "ctrl+o":
 		m.picker.comfortable = !m.picker.comfortable
@@ -197,11 +251,28 @@ func (m *chatModel) onPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+t":
 		m.picker.transcript = !m.picker.transcript
 		return m, m.maybeLoadPreview()
+	case "ctrl+a":
+		c, ok := m.pickerActionTarget()
+		if !ok {
+			return m, nil
+		}
+		return m, m.archivePickerConversation(c, !m.picker.archived)
+	case "ctrl+d":
+		c, ok := m.pickerActionTarget()
+		if !ok {
+			return m, nil
+		}
+		m.picker.confirmDelete = c.Name
+		return m, nil
 	case "left", "right":
-		if m.picker.focusSort {
+		switch m.picker.focus {
+		case pickerFocusSort:
 			m.picker.sortCreated = !m.picker.sortCreated
 			m.picker.refilter()
 			return m, m.maybeLoadPreview()
+		case pickerFocusShow:
+			m.picker.archived = !m.picker.archived
+			return m, m.reloadPickerList()
 		}
 	}
 	if m.picker.direct || (msg.Text == "" && !isEditingKey(msg.String())) {
@@ -217,27 +288,176 @@ func (m *chatModel) onPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// loadPickerList fetches the project's conversation listing in the background
-// (the same read path as `patch conversations list`), newest activity first.
-// It captures ctx/view/project by value at call time rather than reading m
-// inside the closure — like stream(), this runs off the Update goroutine, so
-// it must never touch mutable model state directly; only the returned Msg,
-// handled in Update, may.
-func (m *chatModel) loadPickerList() tea.Cmd {
+// pickerActionTarget is the conversation ctrl+a/ctrl+d act on: the highlighted
+// row — unless there is none, the listing is still loading, this is a direct
+// `resume <id>` load with no list behind it, or another archive/delete is
+// still in flight.
+func (m *chatModel) pickerActionTarget() (assistantv1alpha1.Conversation, bool) {
+	if m.picker.direct || m.picker.loading || m.picker.acting != "" {
+		return assistantv1alpha1.Conversation{}, false
+	}
+	return m.picker.selected()
+}
+
+// pickerNoticeTitleWidth caps how much of a conversation's title the notice
+// line quotes, leaving room on one line for the verb and the outcome.
+const pickerNoticeTitleWidth = 48
+
+// archivePickerConversation archives (archived=true) or unarchives c in the
+// background. Same off-goroutine rule as loadPickerList: everything the
+// request needs is captured by value here, and only the returned
+// pickerArchiveMsg — handled in Update — touches the model.
+func (m *chatModel) archivePickerConversation(c assistantv1alpha1.Conversation, archived bool) tea.Cmd {
+	title := previewLine(conversationTitle(c), pickerNoticeTitleWidth)
+	verb := "archiving "
+	if !archived {
+		verb = "unarchiving "
+	}
+	m.picker.acting = c.Name
+	m.picker.notice, m.picker.noticeErr = verb+title+"…", false
+	ctx, view, project, id := m.ctx, m.view, m.project, c.Name
+	return func() tea.Msg {
+		_, err := view.setConversationArchived(ctx, project, id, archived)
+		if err != nil {
+			err = errors.New(readViewErrorText(view, err))
+		}
+		return pickerArchiveMsg{contextID: id, title: title, archived: archived, err: err}
+	}
+}
+
+// deletePickerConversation deletes the conversation with the given id in the
+// background, once its y/n has been answered. Same capture-by-value rule as
+// archivePickerConversation.
+func (m *chatModel) deletePickerConversation(contextID string) tea.Cmd {
+	title := m.picker.titleOf(contextID)
+	m.picker.acting = contextID
+	m.picker.notice, m.picker.noticeErr = "deleting "+title+"…", false
 	ctx, view, project := m.ctx, m.view, m.project
 	return func() tea.Msg {
-		out, err := view.get(ctx, project, conversationsPath(project))
+		err := view.deleteConversation(ctx, project, contextID)
 		if err != nil {
-			return pickerListMsg{err: errors.New(readViewErrorText(view, err))}
+			err = errors.New(readViewErrorText(view, err))
+		}
+		return pickerDeleteMsg{contextID: contextID, title: title, err: err}
+	}
+}
+
+// onPickerArchived folds an archive/unarchive result into the picker. On
+// success the row leaves this listing locally — it now belongs to the other
+// Show option — rather than refetching a list whose only change is known.
+func (m *chatModel) onPickerArchived(msg pickerArchiveMsg) tea.Cmd {
+	if !m.picker.open || m.picker.acting != msg.contextID {
+		// The picker was closed (or reopened) while the request ran; there is
+		// no notice line left to report on.
+		return nil
+	}
+	m.picker.acting = ""
+	if msg.err != nil {
+		verb := "archive "
+		if !msg.archived {
+			verb = "unarchive "
+		}
+		m.picker.notice, m.picker.noticeErr = "could not "+verb+msg.title+": "+msg.err.Error(), true
+		return nil
+	}
+	m.picker.removeItem(msg.contextID)
+	if msg.archived {
+		m.picker.notice = "archived " + msg.title + " — tab to Show, → Archived to find it"
+	} else {
+		m.picker.notice = "unarchived " + msg.title + " — it is back with your active conversations"
+	}
+	m.picker.noticeErr = false
+	return m.maybeLoadPreview()
+}
+
+// onPickerDeleted folds a delete result into the picker, and into the chat
+// underneath when that is the conversation that was deleted: left alone, the
+// chat would keep the old context id, and its next turn would quietly start a
+// new conversation under that id with none of the history still on screen.
+func (m *chatModel) onPickerDeleted(msg pickerDeleteMsg) tea.Cmd {
+	if msg.err == nil && msg.contextID != "" && msg.contextID == m.contextID {
+		m.contextID = ""
+		m.convName = ""
+		m.turns = nil
+		m.raw = nil
+		m.answer.Reset()
+		m.activity, m.turnActivity = nil, nil
+		m.follow = true
+		m.turns = append(m.turns, m.st.subtle.Render("this conversation was deleted — your next message starts a new one"))
+		m.rebuildViewport()
+	}
+	if !m.picker.open || m.picker.acting != msg.contextID {
+		return nil
+	}
+	m.picker.acting = ""
+	if msg.err != nil {
+		m.picker.notice, m.picker.noticeErr = "could not delete "+msg.title+": "+msg.err.Error(), true
+		return nil
+	}
+	m.picker.removeItem(msg.contextID)
+	m.picker.notice, m.picker.noticeErr = "deleted "+msg.title, false
+	return m.maybeLoadPreview()
+}
+
+// removeItem drops one conversation from the listing and its preview caches,
+// keeping the cursor where it was (clamped to the rows left) so the user's
+// place in a long list survives an archive or delete.
+func (p *pickerState) removeItem(contextID string) {
+	i := slices.IndexFunc(p.items, func(c assistantv1alpha1.Conversation) bool { return c.Name == contextID })
+	if i < 0 {
+		return
+	}
+	p.items = slices.Delete(p.items, i, i+1)
+	delete(p.preview, contextID)
+	delete(p.previewErr, contextID)
+	delete(p.previewPending, contextID)
+	cursor := p.cursor
+	p.refilter()
+	p.cursor = min(cursor, max(len(p.filtered)-1, 0))
+}
+
+// titleOf is the listed conversation's label for the notice line, falling back
+// to its id when it is not in the listing.
+func (p *pickerState) titleOf(contextID string) string {
+	for _, c := range p.items {
+		if c.Name == contextID {
+			return previewLine(conversationTitle(c), pickerNoticeTitleWidth)
+		}
+	}
+	return contextID
+}
+
+// reloadPickerList refetches the listing for the current Show option,
+// emptying the rows first so the previous listing is never shown under the
+// other option's label.
+func (m *chatModel) reloadPickerList() tea.Cmd {
+	m.picker.items, m.picker.filtered, m.picker.cursor = nil, nil, 0
+	m.picker.loading, m.picker.err = true, ""
+	return tea.Batch(m.loadPickerList(), m.sp.Tick)
+}
+
+// loadPickerList fetches the project's conversation listing in the background
+// (the same read path as `patch conversations list`), newest activity first —
+// the everyday listing, or the archive when the Show option says so.
+// It captures ctx/view/project/archived by value at call time rather than
+// reading m inside the closure — like stream(), this runs off the Update
+// goroutine, so it must never touch mutable model state directly; only the
+// returned Msg, handled in Update, may.
+func (m *chatModel) loadPickerList() tea.Cmd {
+	ctx, view, project, archived := m.ctx, m.view, m.project, m.picker.archived
+	return func() tea.Msg {
+		out, err := view.get(ctx, project, conversationsListPath(project, archived))
+		if err != nil {
+			return pickerListMsg{archived: archived, err: errors.New(readViewErrorText(view, err))}
 		}
 		var list assistantv1alpha1.ConversationList
 		if err := json.Unmarshal(out, &list); err != nil {
-			return pickerListMsg{err: err}
+			return pickerListMsg{archived: archived, err: err}
 		}
 		sort.SliceStable(list.Items, func(i, j int) bool {
 			return list.Items[i].Status.LastActiveAt.After(list.Items[j].Status.LastActiveAt.Time)
 		})
-		return pickerListMsg{items: list.Items}
+		return pickerListMsg{archived: archived, items: list.Items}
 	}
 }
 
@@ -319,7 +539,7 @@ const pickerFooterRows = 3
 func (m *chatModel) pickerRows() int {
 	// outer box padding (2) + header (1) + blank (1) + search line (1) +
 	// blank (1) + footer.
-	avail := m.termHeight - 6 - pickerFooterRows
+	avail := m.termHeight - 6 - pickerFooterRows - m.pickerNoticeRows()
 	if m.picker.transcript {
 		avail -= pickerPreviewMaxLines + 3 // pane header, blank, messages, ⋮
 	}
@@ -338,6 +558,9 @@ func (m *chatModel) pickerView() tea.View {
 	cw := m.contentWidth()
 	var b strings.Builder
 	b.WriteString(m.st.header.Render("Resume a previous conversation") + m.st.subtle.Render("  ·  project "+m.project))
+	if m.picker.archived {
+		b.WriteString(m.st.subtle.Render("  ·  archived"))
+	}
 	b.WriteString("\n\n")
 
 	if !m.picker.direct {
@@ -350,6 +573,8 @@ func (m *chatModel) pickerView() tea.View {
 		b.WriteString(m.sp.View() + " " + m.st.subtle.Render("loading…"))
 	case m.picker.err != "":
 		b.WriteString(m.st.err.Render("⚠ " + m.picker.err))
+	case len(m.picker.items) == 0 && m.picker.archived:
+		b.WriteString(m.st.subtle.Render("No archived conversations in this project."))
 	case len(m.picker.items) == 0:
 		b.WriteString(m.st.subtle.Render("No conversations found in this project."))
 	case len(m.picker.filtered) == 0:
@@ -364,7 +589,7 @@ func (m *chatModel) pickerView() tea.View {
 
 	// Pin the footer to the bottom: pad the top section to fill the rows the
 	// footer and the box padding leave.
-	fill := m.termHeight - 2 - pickerFooterRows - strings.Count(top, "\n") - 1
+	fill := m.termHeight - 2 - pickerFooterRows - m.pickerNoticeRows() - strings.Count(top, "\n") - 1
 	if fill < 1 {
 		fill = 1
 	}
@@ -372,7 +597,7 @@ func (m *chatModel) pickerView() tea.View {
 }
 
 // searchLine is the search box (borderless, placeholder "Type to search")
-// with the sort option group right-aligned on the same line.
+// with the Sort and Show option groups right-aligned on the same line.
 func (m *chatModel) searchLine(width int) string {
 	opt := func(name string, on bool) string {
 		if on {
@@ -380,16 +605,20 @@ func (m *chatModel) searchLine(width int) string {
 		}
 		return m.st.subtle.Render(name)
 	}
-	label := m.st.subtle.Render("Sort: ")
-	if m.picker.focusSort {
-		label = m.st.you.Render("Sort: ")
+	label := func(name string, f pickerFocus) string {
+		if m.picker.focus == f {
+			return m.st.you.Render(name + ": ")
+		}
+		return m.st.subtle.Render(name + ": ")
 	}
-	sortBar := label + opt("Updated", !m.picker.sortCreated) + " " + opt("Created", m.picker.sortCreated)
-	sortW := lipgloss.Width(sortBar)
-	searchW := max(width-sortW-2, 10)
+	sortBar := label("Sort", pickerFocusSort) + opt("Updated", !m.picker.sortCreated) + " " + opt("Created", m.picker.sortCreated)
+	showBar := label("Show", pickerFocusShow) + opt("Active", !m.picker.archived) + " " + opt("Archived", m.picker.archived)
+	bar := sortBar + "   " + showBar
+	barW := lipgloss.Width(bar)
+	searchW := max(width-barW-2, 10)
 	m.picker.search.SetWidth(searchW)
 	search := lipgloss.NewStyle().Width(searchW).MaxWidth(searchW).Render(m.picker.search.View())
-	return search + strings.Repeat(" ", max(width-searchW-sortW, 1)) + sortBar
+	return search + strings.Repeat(" ", max(width-searchW-barW, 1)) + bar
 }
 
 // pickerAgeWidth is the age column's width: the "❯ " gutter, the widest
@@ -437,8 +666,9 @@ func (m *chatModel) pickerRowsView(width int) string {
 }
 
 // pickerFooter is the rule line carrying "cursor / matches" at its right
-// end, over two lines of key hints — the direct-load variant has only the
-// way out.
+// end, over two lines of key hints — preceded, when there is one, by the
+// notice line (a pending delete's question, or an archive/delete outcome). The
+// direct-load variant has only the way out.
 func (m *chatModel) pickerFooter(width int) string {
 	if m.picker.direct {
 		return m.st.subtle.Render(strings.Repeat("─", width)) + "\n" +
@@ -451,14 +681,54 @@ func (m *chatModel) pickerFooter(width int) string {
 	rule := strings.Repeat("─", max(width-lipgloss.Width(pos)-1, 0)) + pos + "─"
 	hint := func(key, what string) string { return m.st.userText.Render(key) + " " + m.st.hint.Render(what) }
 	sep := "    "
+	archive := "archive"
+	if m.picker.archived {
+		archive = "unarchive"
+	}
 	line1 := strings.Join([]string{
-		hint("enter", "resume"), hint("esc", "exit"), hint("ctrl+c", "exit"),
-		hint("tab", "focus sort"), hint("←/→", "change option"),
+		hint("enter", "resume"), hint("ctrl+a", archive), hint("ctrl+d", "delete"), hint("esc", "exit"),
+		hint("tab", "focus options"), hint("←/→", "change option"),
 	}, sep)
 	line2 := strings.Join([]string{
 		hint("ctrl+o", "comfortable view"), hint("ctrl+t", "transcript"), hint("↑/↓", "browse"), hint("type", "to search"),
+		hint("ctrl+c", "exit"),
 	}, sep)
-	return m.st.subtle.Render(rule) + "\n" + line1 + "\n" + line2
+	footer := m.st.subtle.Render(rule) + "\n" + line1 + "\n" + line2
+	if notice := m.pickerNotice(width); notice != "" {
+		footer = notice + "\n" + footer
+	}
+	return footer
+}
+
+// pickerNoticeRows is the height the notice line takes: one row while there
+// is something to say, none otherwise, so the list keeps its space.
+func (m *chatModel) pickerNoticeRows() int {
+	if m.picker.direct || (m.picker.confirmDelete == "" && m.picker.notice == "") {
+		return 0
+	}
+	return 1
+}
+
+// pickerNotice renders the notice line. A pending delete's question is drawn
+// in the error style, because what it asks about is irreversible; progress
+// and success are subtle, and a failure carries the error style and the
+// reason.
+func (m *chatModel) pickerNotice(width int) string {
+	switch {
+	case m.picker.direct:
+		return ""
+	case m.picker.confirmDelete != "":
+		id := m.picker.confirmDelete
+		question := previewLine("delete "+m.picker.titleOf(id)+" ("+id+")? this cannot be undone", max(width-30, 20))
+		return m.st.err.Render(question) + "   " + m.st.userText.Render("y") + " " + m.st.hint.Render("delete") +
+			"  " + m.st.hint.Render("any other key cancels")
+	case m.picker.notice == "":
+		return ""
+	case m.picker.noticeErr:
+		return m.st.err.Render(previewLine("⚠ "+m.picker.notice, width))
+	default:
+		return m.st.subtle.Render(previewLine(m.picker.notice, width))
+	}
 }
 
 // conversationTitle is the row's headline: the name the user gave this

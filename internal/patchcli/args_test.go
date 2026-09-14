@@ -163,9 +163,56 @@ func TestParseArgs(t *testing.T) {
 			want: command{kind: kindError, errMsg: "conversations show: missing <context-id> argument"},
 		},
 		{
-			name: "conversations bad subcommand",
+			name: "conversations list --archived",
+			argv: []string{"conversations", "list", "--archived", "--project", "demo"},
+			want: command{kind: KindConvList, project: "demo", archived: true},
+		},
+		{
+			name: "conversations archive",
+			argv: []string{"conversations", "archive", "ctx-1", "--project", "demo", "--json"},
+			want: command{kind: KindConvArchive, project: "demo", contextID: "ctx-1", json: true},
+		},
+		{
+			name: "conversations unarchive with kubeconfig",
+			argv: []string{"conversations", "unarchive", "ctx-1", "--project", "demo", "--kubeconfig", "/kc"},
+			want: command{kind: KindConvUnarchive, project: "demo", contextID: "ctx-1", kubeconfig: "/kc"},
+		},
+		{
+			name: "conversations delete asks by default",
+			argv: []string{"conversations", "delete", "ctx-1", "--project", "demo"},
+			want: command{kind: KindConvDelete, project: "demo", contextID: "ctx-1"},
+		},
+		{
+			name: "conversations delete -y",
+			argv: []string{"conversations", "delete", "ctx-1", "-y", "--project", "demo"},
+			want: command{kind: KindConvDelete, project: "demo", contextID: "ctx-1", yes: true},
+		},
+		{
+			name: "conversations delete --yes",
+			argv: []string{"conversations", "delete", "--yes", "ctx-1", "--project=demo"},
+			want: command{kind: KindConvDelete, project: "demo", contextID: "ctx-1", yes: true},
+		},
+		{
+			// --yes means something only to delete; archive must not pick it
+			// up and pretend a confirmation happened.
+			name: "--yes on archive is ignored",
+			argv: []string{"conversations", "archive", "ctx-1", "--yes", "--project", "demo"},
+			want: command{kind: KindConvArchive, project: "demo", contextID: "ctx-1"},
+		},
+		{
+			name: "conversations delete missing id",
 			argv: []string{"conversations", "delete", "--project", "demo"},
-			want: command{kind: kindError, errMsg: `conversations: expected "list", "show" or "rename", got "delete"`},
+			want: command{kind: kindError, errMsg: "conversations delete: missing <context-id> argument"},
+		},
+		{
+			name: "conversations archive missing project",
+			argv: []string{"conversations", "archive", "ctx-1"},
+			want: command{kind: kindError, errMsg: "conversations archive: --project <name> is required"},
+		},
+		{
+			name: "conversations bad subcommand",
+			argv: []string{"conversations", "purge", "--project", "demo"},
+			want: command{kind: kindError, errMsg: `conversations: expected "list", "show", "rename", "archive", "unarchive" or "delete", got "purge"`},
 		},
 		{
 			name: "gaps list",

@@ -138,6 +138,9 @@ export PATCH_TOKEN=dev-token
 ./patch conversations show <c> --project demo-project # preview one transcript
 ./patch conversations rename <c> "dfw quota escalation" \
   --project demo-project                              # name a conversation
+./patch conversations archive <c> --project demo-project   # hide it from the list
+./patch conversations list --archived --project demo-project
+./patch conversations delete <c> --project demo-project    # permanent; asks first
 ./patch task get <taskId>
 ./patch task cancel <taskId>
 ```
@@ -178,6 +181,21 @@ Behaviour:
   goes to the **service** (`POST /v1alpha1/conversations/rename`, `PATCH_URL`/
   `PATCH_TOKEN`) rather than the read-only aggregated API; `/rename <name>`
   in the chat is the same thing.
+- **`patch conversations archive|unarchive <context-id> --project <p>`** —
+  archive hides a conversation from `conversations list`, the resume picker
+  and `-c`/`--continue` without deleting it; `conversations list --archived`
+  shows the archive, an archived conversation stays resumable by id, and
+  `unarchive` — or sending it another message — brings it back. These write to
+  the **aggregated apiserver**, through the same transport and identity as
+  `list` (a `PATCH` of `{"spec":{"archived":true}}`, or a GET + `kubectl
+  replace --raw` on the kubectl path). In the chat, `/archive` archives the
+  current conversation; in the picker, `ctrl+a` archives the highlighted one
+  and the Show option switches to the archive.
+- **`patch conversations delete <context-id> --project <p>`** — permanently
+  deletes a conversation and its whole transcript; there is no undo. It names
+  the conversation and asks `[y/N]` first; `--yes` skips that, and is required
+  when stdin is not a terminal. Same aggregated-API path as `archive`; the
+  picker's `ctrl+d` is the same thing behind an inline y/n.
 - **`patch task get|cancel <id>`** — the corresponding A2A methods.
 - Auth/transport failures print a clear `patch: …` message to stderr and
   exit non-zero (401 → "unauthorized", 403 → "forbidden").

@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1991,5 +1995,288 @@ func TestHelpOverlayDocumentsTheInterruptKeys(t *testing.T) {
 	out := plain(m.helpView().Content)
 	if !containsAll(out, "esc", "interrupt the running turn", "ctrl+c", "ctrl+d") {
 		t.Fatalf("/help should document interrupting and queuing, got:\n%s", out)
+	}
+}
+
+// ── archive / delete ──────────────────────────────────────────
+
+func ctrlKey(r rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: r, Mod: tea.ModCtrl} }
+
+// runCmd executes a command the way the Bubble Tea runtime would, flattening
+// batches, and returns every message it produced.
+func runCmd(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		var out []tea.Msg
+		for _, c := range batch {
+			out = append(out, runCmd(c)...)
+		}
+		return out
+	}
+	return []tea.Msg{msg}
+}
+
+// archiveServer is the aggregated API's PATCH endpoint over the direct
+// transport, recording the body it was sent.
+func archiveServer(t *testing.T, status int) (*httptest.Server, *string) {
+	t.Helper()
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = r.Method + " " + string(b)
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = w.Write([]byte(`{"kind":"Conversation","metadata":{"name":"conv-a"}}`))
+		} else {
+			_, _ = w.Write([]byte(`{"kind":"Status","message":"conversations is forbidden"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &body
+}
+
+// /archive is offered wherever commands are; /delete is deliberately not —
+// the conversation it would destroy is the one on screen.
+func TestArchiveIsASlashCommandAndDeleteIsNot(t *testing.T) {
+	if !slices.Contains(commandNames, "/archive") || commandDescriptions["/archive"] == "" {
+		t.Fatal("/archive is not a completable command")
+	}
+	if !slices.ContainsFunc(helpText, func(h struct{ cmd, desc string }) bool { return h.cmd == "/archive" }) {
+		t.Fatal("/archive is missing from /help")
+	}
+	if slices.Contains(commandNames, "/delete") {
+		t.Fatal("there must be no /delete slash command")
+	}
+}
+
+func TestArchiveCommandWithoutAConversation(t *testing.T) {
+	m := newTestModel()
+	if cmd := m.startArchive(); cmd != nil || m.working {
+		t.Fatal("nothing to archive should be answered locally, not by a request")
+	}
+	if !strings.Contains(plain(strings.Join(m.turns, "\n")), "nothing to archive") {
+		t.Fatalf("transcript = %q", m.turns)
+	}
+}
+
+// /archive patches the current conversation through the read view, then says
+// where it went — an archived conversation vanishes from every usual place.
+func TestArchiveCommandArchivesAndSaysHowToFindIt(t *testing.T) {
+	srv, body := archiveServer(t, http.StatusOK)
+	m := newTestModel()
+	m.ctx = context.Background()
+	m.contextID = "conv-a"
+	m.view = ReadView{apiHost: srv.URL, token: StaticToken("tok")}
+
+	typeText(t, m, "/archive")
+	_, cmd := m.onKey(key(tea.KeyEnter, ""))
+	if cmd == nil || !m.working {
+		t.Fatal("/archive should start a request")
+	}
+	var done *archiveDoneMsg
+	for _, msg := range runCmd(cmd) {
+		if d, ok := msg.(archiveDoneMsg); ok {
+			done = &d
+		}
+	}
+	if done == nil || done.err != nil || done.contextID != "conv-a" {
+		t.Fatalf("archive result = %+v", done)
+	}
+	if *body != `PATCH {"spec":{"archived":true}}` {
+		t.Errorf("request = %s", *body)
+	}
+	m.Update(*done)
+	out := plain(strings.Join(m.turns, "\n"))
+	if m.working || !containsAll(out, "archived", "/resume", "--archived", "unarchives") {
+		t.Fatalf("working=%v transcript=%q", m.working, out)
+	}
+	if m.contextID != "conv-a" {
+		t.Fatal("archiving must not leave the conversation — continuing it is how it comes back")
+	}
+}
+
+func TestArchiveCommandFailureSaysSo(t *testing.T) {
+	m := newTestModel()
+	m.working = true
+	m.Update(archiveDoneMsg{contextID: "conv-a", err: errors.New("conversations is forbidden")})
+	if m.working || !strings.Contains(plain(strings.Join(m.turns, "\n")), "archive failed: conversations is forbidden") {
+		t.Fatalf("working=%v transcript=%q", m.working, m.turns)
+	}
+}
+
+func TestPickerCtrlAArchivesTheHighlightedRow(t *testing.T) {
+	srv, body := archiveServer(t, http.StatusOK)
+	m := newTestModel()
+	m.ctx = context.Background()
+	m.view = ReadView{apiHost: srv.URL, token: StaticToken("tok")}
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{
+		titledConversation("conv-a", "hello"), titledConversation("conv-b", "other"),
+	}})
+
+	_, cmd := m.onPickerKey(ctrlKey('a'))
+	if cmd == nil || m.picker.acting != "conv-a" {
+		t.Fatalf("ctrl+a should archive the highlighted row (acting=%q)", m.picker.acting)
+	}
+	if out := plain(m.pickerView().Content); !containsAll(out, "archiving hello…") {
+		t.Fatalf("progress should show, got:\n%s", out)
+	}
+	// A second action waits for the first.
+	if _, again := m.onPickerKey(ctrlKey('a')); again != nil {
+		t.Fatal("a second ctrl+a started while the first was in flight")
+	}
+
+	msgs := runCmd(cmd)
+	if *body != `PATCH {"spec":{"archived":true}}` {
+		t.Errorf("request = %s", *body)
+	}
+	m.Update(msgs[0])
+	if len(m.picker.items) != 1 || m.picker.items[0].Name != "conv-b" || m.picker.acting != "" {
+		t.Fatalf("archived row should leave the list locally, items=%v acting=%q", m.picker.items, m.picker.acting)
+	}
+	if out := plain(m.pickerView().Content); !containsAll(out, "archived hello", "Show", " 1 / 1 ") {
+		t.Fatalf("picker after archive:\n%s", out)
+	}
+	// The outcome clears on the next key.
+	m.onPickerKey(key(tea.KeyDown, ""))
+	if m.picker.notice != "" {
+		t.Fatalf("notice %q should clear on the next key", m.picker.notice)
+	}
+}
+
+// A failed archive keeps every row and says why, on the notice line — never
+// the full-screen error that replaces the list.
+func TestPickerArchiveFailureKeepsTheRow(t *testing.T) {
+	srv, _ := archiveServer(t, http.StatusForbidden)
+	m := newTestModel()
+	m.ctx = context.Background()
+	m.view = ReadView{apiHost: srv.URL, token: StaticToken("tok")}
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{titledConversation("conv-a", "hello")}})
+
+	_, cmd := m.onPickerKey(ctrlKey('a'))
+	m.Update(runCmd(cmd)[0])
+	if len(m.picker.items) != 1 || m.picker.err != "" {
+		t.Fatalf("items=%v err=%q", m.picker.items, m.picker.err)
+	}
+	if out := plain(m.pickerView().Content); !containsAll(out, "⚠ could not archive hello: conversations is forbidden", "hello") {
+		t.Fatalf("picker after failed archive:\n%s", out)
+	}
+}
+
+func TestPickerCtrlDAsksBeforeDeleting(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{
+		titledConversation("conv-a", "hello"), titledConversation("conv-b", "other"),
+	}})
+
+	// Through onKey: in the picker ctrl+d is delete, not quit.
+	_, cmd := m.onKey(ctrlKey('d'))
+	if cmd != nil || m.picker.confirmDelete != "conv-a" {
+		t.Fatalf("ctrl+d should ask, not act (cmd=%v confirm=%q)", cmd != nil, m.picker.confirmDelete)
+	}
+	if out := plain(m.pickerView().Content); !containsAll(out, "delete hello (conv-a)? this cannot be undone", "y delete", "any other key cancels") {
+		t.Fatalf("confirmation line missing:\n%s", out)
+	}
+
+	// esc answers the question; it does not also close the picker.
+	if _, cmd := m.onKey(key(tea.KeyEscape, "")); cmd != nil || !m.picker.open || m.picker.confirmDelete != "" {
+		t.Fatalf("esc should cancel the delete only (open=%v confirm=%q)", m.picker.open, m.picker.confirmDelete)
+	}
+	if len(m.picker.items) != 2 || !containsAll(plain(m.pickerView().Content), "not deleted") {
+		t.Fatal("a cancelled delete must leave the list alone and say so")
+	}
+
+	m.onKey(ctrlKey('d'))
+	if _, cmd := m.onKey(key('n', "n")); cmd != nil {
+		t.Fatal("n must not delete")
+	}
+	m.onKey(ctrlKey('d'))
+	_, cmd = m.onKey(key('y', "y"))
+	if cmd == nil || m.picker.acting != "conv-a" {
+		t.Fatal("y should start the delete")
+	}
+	m.Update(pickerDeleteMsg{contextID: "conv-a", title: "hello"})
+	if len(m.picker.items) != 1 || !containsAll(plain(m.pickerView().Content), "deleted hello") {
+		t.Fatalf("items=%v", m.picker.items)
+	}
+}
+
+// Deleting the conversation the chat underneath is in must not leave the chat
+// pointing at it: its next turn would silently start over under the old id.
+func TestPickerDeletingTheOpenConversationStartsFresh(t *testing.T) {
+	m := newTestModel()
+	m.contextID, m.convName = "conv-a", "named"
+	m.turns = []string{"old turn"}
+	m.raw = []transcriptTurn{{role: "user", content: "old"}}
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{titledConversation("conv-a", "hello")}})
+	m.onKey(ctrlKey('d'))
+	m.onKey(key('y', "y"))
+	m.Update(pickerDeleteMsg{contextID: "conv-a", title: "hello"})
+	if m.contextID != "" || m.convName != "" || len(m.raw) != 0 {
+		t.Fatalf("chat still on the deleted conversation: ctx=%q name=%q raw=%v", m.contextID, m.convName, m.raw)
+	}
+	if !strings.Contains(plain(strings.Join(m.turns, "\n")), "this conversation was deleted") {
+		t.Fatalf("transcript = %q", m.turns)
+	}
+}
+
+func TestPickerShowOptionSwitchesToTheArchive(t *testing.T) {
+	m := newTestModel()
+	m.picker = newPickerState(false)
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{titledConversation("conv-a", "hello")}})
+
+	m.onPickerKey(key(tea.KeyTab, "")) // Sort
+	m.onPickerKey(key(tea.KeyTab, "")) // Show
+	_, cmd := m.onPickerKey(key(tea.KeyRight, ""))
+	if cmd == nil || !m.picker.archived || !m.picker.loading || len(m.picker.items) != 0 {
+		t.Fatalf("→ on Show should reload into the archive (cmd=%v archived=%v loading=%v items=%d)",
+			cmd != nil, m.picker.archived, m.picker.loading, len(m.picker.items))
+	}
+	if m.picker.sortCreated {
+		t.Fatal("→ on Show flipped Sort")
+	}
+
+	// The active listing landing late is stale now.
+	m.Update(pickerListMsg{items: []assistantv1alpha1.Conversation{titledConversation("stale", "x")}})
+	if len(m.picker.items) != 0 || !m.picker.loading {
+		t.Fatal("a listing for the other Show option was applied")
+	}
+	m.Update(pickerListMsg{archived: true})
+	if out := plain(m.pickerView().Content); !containsAll(out, "Show: Active [Archived]", "No archived conversations in this project.", "archived") {
+		t.Fatalf("empty archive view:\n%s", out)
+	}
+
+	m.onPickerKey(key(tea.KeyLeft, ""))
+	m.onPickerKey(key(tea.KeyRight, ""))
+	m.Update(pickerListMsg{archived: true, items: []assistantv1alpha1.Conversation{titledConversation("conv-z", "old")}})
+	if out := plain(m.pickerView().Content); !containsAll(out, "ctrl+a unarchive", "old") {
+		t.Fatalf("archive view:\n%s", out)
+	}
+	_, cmd = m.onPickerKey(ctrlKey('a'))
+	if cmd == nil || m.picker.acting != "conv-z" {
+		t.Fatal("ctrl+a in the archive should unarchive")
+	}
+	m.Update(pickerArchiveMsg{contextID: "conv-z", title: "old", archived: false})
+	if len(m.picker.items) != 0 || !containsAll(plain(m.pickerView().Content), "unarchived old") {
+		t.Fatalf("items=%v", m.picker.items)
+	}
+}
+
+// A direct `resume <id>` load has no list: ctrl+a/ctrl+d do nothing there, and
+// ctrl+d keeps its old job of leaving.
+func TestPickerDirectLoadHasNoLifecycleKeys(t *testing.T) {
+	m := newTestModel()
+	m.resumeDirect("ctx-42")
+	if _, cmd := m.onPickerKey(ctrlKey('a')); cmd != nil || m.picker.acting != "" {
+		t.Fatal("ctrl+a acted on a direct load")
+	}
+	if _, cmd := m.onKey(ctrlKey('d')); cmd == nil {
+		t.Fatal("ctrl+d on a direct load should still quit")
 	}
 }

@@ -10,14 +10,23 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // +genclient
 
 // Conversation is one durable chat conversation. name == the A2A context id;
-// namespace == the milo project. Read-only in v1 (populated by the chat flow,
-// surfaced here for list/get).
+// namespace == the milo project. Created by the chat flow, never through this
+// API; the only writable field is Spec.Archived, and delete removes it.
 type Conversation struct {
 	metav1.TypeMeta
 	// Name = context_id, Namespace = project, CreationTimestamp = created_at.
 	metav1.ObjectMeta
 
+	Spec   ConversationSpec
 	Status ConversationStatus
+}
+
+// ConversationSpec is the part of a conversation its owner controls.
+type ConversationSpec struct {
+	// Archived hides the conversation from default listings, the resume
+	// picker and "continue the last one", without deleting it. Sending
+	// another message in it unarchives it.
+	Archived bool
 }
 
 // ConversationStatus reports rollup information about a conversation.
@@ -32,6 +41,8 @@ type ConversationStatus struct {
 	// Name is what the user called this conversation, empty until they name
 	// one. Clients show it in place of Title where set.
 	Name string
+	// ArchivedAt is when the conversation was archived; nil when it is not.
+	ArchivedAt *metav1.Time
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
