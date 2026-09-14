@@ -9,16 +9,21 @@
 // discovery. Once you have a context id, resume it with
 // `patch resume <id>` (or non-interactively, `patch chat --context-id <id>`).
 //
-// `rename` is the one subcommand here that writes, and so the one that talks to
-// the assistant service instead: the aggregated API is read-only by design, and
-// the name belongs to the same conversation row the chat path owns.
+// `archive`, `unarchive` and `delete` write to that same aggregated API, through
+// the same [ReadView] and so as the same identity: they change the
+// conversation resource itself (spec.archived, or its existence), which is the
+// apiserver's to serve. `rename` is the one subcommand that talks to the
+// assistant service instead — it predates the API owning any writes, and the
+// name belongs to the same conversation row the chat path owns.
 package patchcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"sort"
 	"strings"
@@ -35,10 +40,10 @@ const listTitleWidth = 60
 
 // runConversationsList prints a table of the caller's conversations in a
 // project (id, created, last-active, message count, title), newest activity
-// first.
+// first — the ones not archived, or with --archived only the archive.
 func runConversationsList(ctx context.Context, inv Invocation, io Io) int {
 	view := ReadViewFor(inv)
-	out, err := view.get(ctx, inv.Project, conversationsPath(inv.Project))
+	out, err := view.get(ctx, inv.Project, conversationsListPath(inv.Project, inv.Archived))
 	if err != nil {
 		io.Err("patch: " + readViewErrorText(view, err) + "\n")
 		return 1
@@ -59,7 +64,11 @@ func runConversationsList(ctx context.Context, inv Invocation, io Io) int {
 	}
 
 	if len(list.Items) == 0 {
-		io.Err("no conversations in project " + inv.Project + "\n")
+		if inv.Archived {
+			io.Err("no archived conversations in project " + inv.Project + "\n")
+		} else {
+			io.Err("no conversations in project " + inv.Project + "\n")
+		}
 		return 0
 	}
 
@@ -118,6 +127,86 @@ func runConversationsShow(ctx context.Context, inv Invocation, io Io) int {
 	return 0
 }
 
+// runConversationsArchive archives (archived=true) or unarchives one
+// conversation through the aggregated API. Archiving says how to find the
+// conversation again, on stderr so -o json and piped stdout stay clean: a
+// conversation that vanishes from the list with no hint where it went reads
+// as lost.
+func runConversationsArchive(ctx context.Context, inv Invocation, io Io, archived bool) int {
+	view := ReadViewFor(inv)
+	_, err := view.setConversationArchived(ctx, inv.Project, inv.ContextID, archived)
+	if err != nil {
+		err = errors.New(readViewErrorText(view, err))
+	}
+	verb := "unarchived"
+	if archived {
+		verb = "archived"
+	}
+	code := renderConversationAction(verb, err, inv.ContextID, inv.JSON, io)
+	if code == 0 && archived && !inv.JSON {
+		io.Err("find it again with:  patch conversations list --archived --project " + inv.Project +
+			"  (sending it another message unarchives it)\n")
+	}
+	return code
+}
+
+// runConversationsDelete permanently deletes one conversation, asking first.
+//
+// The confirmation is the point of this command's shape. Delete cannot be
+// undone, so without --yes it names the conversation — fetched first, which
+// also turns a mistyped id into a not-found before anyone is asked anything —
+// and waits for an explicit y. With no terminal on stdin there is nobody to
+// ask, and reading "no answer" as consent would make a pipeline the one place
+// a delete never needs confirming; so that is an error that says to pass
+// --yes, never a silent delete.
+func runConversationsDelete(ctx context.Context, inv Invocation, io Io) int {
+	view := ReadViewFor(inv)
+	if !inv.Yes {
+		lines, canRead := io.(LineReader)
+		if !inv.StdinTerminal || !canRead {
+			io.Err("patch: conversations delete: stdin is not a terminal, so the deletion cannot be confirmed — " +
+				"pass --yes to delete " + inv.ContextID + " without asking\n")
+			return 2
+		}
+		conv, err := view.getConversation(ctx, inv.Project, inv.ContextID)
+		if err != nil {
+			return renderConversationAction("deleted", errors.New(readViewErrorText(view, err)), inv.ContextID, inv.JSON, io)
+		}
+		io.Err(deletePrompt(conv))
+		answer, ok := lines.ReadLine()
+		if !ok || !confirmed(answer) {
+			io.Err("not deleted\n")
+			return 1
+		}
+	}
+	err := view.deleteConversation(ctx, inv.Project, inv.ContextID)
+	if err != nil {
+		err = errors.New(readViewErrorText(view, err))
+	}
+	return renderConversationAction("deleted", err, inv.ContextID, inv.JSON, io)
+}
+
+// deletePrompt is the question `conversations delete` asks: the conversation's
+// label, so the user recognizes what they are about to lose, and its id, so
+// two conversations with the same opening message cannot be confused.
+func deletePrompt(c assistantv1alpha1.Conversation) string {
+	title := previewLine(conversationTitle(c), listTitleWidth)
+	if title == c.Name {
+		return fmt.Sprintf("delete conversation %s? this cannot be undone [y/N] ", c.Name)
+	}
+	return fmt.Sprintf("delete conversation %s (%s)? this cannot be undone [y/N] ", title, c.Name)
+}
+
+// confirmed reports whether a [y/N] answer is a yes. Only an explicit y/yes
+// counts; the default, and anything unrecognized, is no.
+func confirmed(answer string) bool {
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true
+	}
+	return false
+}
+
 // runConversationsRename names one conversation through the assistant service
 // (POST /v1alpha1/conversations/rename). Unlike its sibling subcommands this is a
 // write, so it needs PATCH_URL/PATCH_TOKEN rather than the apiserver read view.
@@ -130,7 +219,10 @@ func runConversationsRename(ctx context.Context, inv Invocation, io Io) int {
 // conversation, or "" when the project has none — what -c/--continue resumes.
 // The apiserver already serves the listing newest-activity first, but this
 // re-derives the maximum rather than trusting row order, the same way the list
-// view and the picker re-sort what they render.
+// view and the picker re-sort what they render. It asks for the default
+// listing, which the apiserver serves without archived conversations — so an
+// archived conversation is never what "continue my last one" picks up, however
+// recently it was active.
 func latestConversation(ctx context.Context, view ReadView, project string) (string, error) {
 	out, err := view.get(ctx, project, conversationsPath(project))
 	if err != nil {
@@ -167,11 +259,34 @@ func continueContextID(ctx context.Context, inv Invocation, io Io) string {
 	return id
 }
 
-// conversationsPath and messagesPath build the group-relative paths both
-// transports use. Kept together so the list view and the TUI picker cannot
-// drift apart.
+// conversationsPath, conversationsListPath, conversationPath and messagesPath
+// build the group-relative paths both transports use. Kept together so the
+// list view and the TUI picker cannot drift apart.
 func conversationsPath(project string) string {
 	return fmt.Sprintf("/apis/assistant.miloapis.com/v1alpha1/namespaces/%s/conversations", project)
+}
+
+// archivedFieldSelector is the query that lists the archive instead of the
+// everyday listing — the one field selector the conversations API serves.
+var archivedFieldSelector = "?fieldSelector=" + url.QueryEscape("spec.archived=true")
+
+// conversationsListPath is the listing: the default (not archived) view, or
+// with archived the archive. The default is sent with no selector at all
+// rather than spec.archived=false, so this client keeps working against an
+// apiserver that predates the field.
+func conversationsListPath(project string, archived bool) string {
+	if archived {
+		return conversationsPath(project) + archivedFieldSelector
+	}
+	return conversationsPath(project)
+}
+
+// conversationPath addresses one conversation. Unlike the read paths, the id
+// is escaped: this is the path delete is sent to, and an id that could climb
+// out of its segment must not be able to aim an irreversible verb anywhere
+// else.
+func conversationPath(project, contextID string) string {
+	return conversationsPath(project) + "/" + url.PathEscape(contextID)
 }
 
 func messagesPath(project, contextID string) string {
@@ -184,11 +299,22 @@ func messagesPath(project, contextID string) string {
 // kubeconfig is passed via --kubeconfig; otherwise kubectl uses its normal
 // resolution (KUBECONFIG env, then ~/.kube/config).
 func kubectlJSON(ctx context.Context, kubeconfig string, args ...string) ([]byte, error) {
+	return kubectlRun(ctx, kubeconfig, nil, args...)
+}
+
+// kubectlRun is kubectlJSON with an optional stdin (the object `replace --raw
+// -f -` reads). A variable so tests can see the exact kubectl invocation the
+// archive and delete fallbacks make without a kubectl or a cluster.
+var kubectlRun = func(ctx context.Context, kubeconfig string, stdin []byte, args ...string) ([]byte, error) {
 	full := args
 	if kubeconfig != "" {
 		full = append([]string{"--kubeconfig", kubeconfig}, args...)
 	}
-	return exec.CommandContext(ctx, "kubectl", full...).Output()
+	cmd := exec.CommandContext(ctx, "kubectl", full...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	return cmd.Output()
 }
 
 // kubectlErrorText renders a failed kubectl invocation as a one-line message,

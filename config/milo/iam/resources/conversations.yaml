@@ -7,10 +7,17 @@
 # Change one and the other must change with it, or the deployment fails closed.
 #
 # `get` and `list` are the read side served by the conversations aggregated
-# apiserver (internal/apiserver/registry/conversation implements rest.Getter and
-# rest.Lister, and nothing else — no create/update/delete/watch storage exists).
-# They are declared so an operator can grant read access to conversation history
-# without also granting the ability to start turns.
+# apiserver (internal/apiserver/registry/conversation). They are declared so an
+# operator can grant read access to conversation history without also granting
+# the ability to start turns.
+#
+# `update`, `patch` and `delete` are that apiserver's lifecycle writes: update
+# and patch change spec.archived (the only mutable field — archive hides a
+# conversation from lists without destroying it), and delete removes a
+# conversation and its transcript permanently. Patch is listed separately from
+# update because the apiserver authorizes the HTTP verb it received, and a
+# merge patch arrives as `patch`. There is still no create storage (the chat
+# flow creates conversations, gated on the `create` above) and no watch.
 apiVersion: iam.miloapis.com/v1alpha1
 kind: ProtectedResource
 metadata:
@@ -25,6 +32,9 @@ spec:
     - create
     - get
     - list
+    - update
+    - patch
+    - delete
   # Conversations are scoped to a project: the SAR carries the project name as
   # the request namespace (internal/tenant treats the namespace as
   # authoritative). Organization is listed so an org-level grant is inherited

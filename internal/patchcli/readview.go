@@ -1,4 +1,10 @@
-// How the read views (`conversations`, `gaps`) reach the aggregated apiserver.
+// How the read views (`conversations`, `gaps`) reach the aggregated apiserver —
+// and, despite the name, the conversation lifecycle writes too (archive,
+// unarchive, delete). Those are writes to the same aggregated API the listing
+// comes from, authorized against the same project, so they travel the same
+// way as the reads: routing them through the assistant service instead would
+// mean a second path, and potentially a second identity, for what the caller
+// sees as one resource.
 //
 // There are two transports, and which one is used decides WHOSE IDENTITY the
 // request carries:
@@ -23,7 +29,7 @@
 // exist. That reads as "this feature is not deployed" when the truth is "you
 // asked the wrong server".
 //
-// Both transports fetch a raw path rather than a named resource, so neither
+// Both transports address a raw path rather than a named resource, so neither
 // depends on client-side discovery. That matters beyond tidiness: kubectl
 // caches discovery per API host, so a freshly registered APIService keeps
 // reporting `the server doesn't have a resource type "conversations"` from a
@@ -31,6 +37,7 @@
 package patchcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,13 +45,16 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
+
+	assistantv1alpha1 "github.com/milo-os/assistant/pkg/apis/assistant/v1alpha1"
 )
 
-// readViewTimeout bounds one read-view request. These are interactive list/get
-// calls against a control plane, not model calls, so they should fail fast
-// rather than hang a terminal.
+// readViewTimeout bounds one read-view request. These are interactive
+// list/get/archive/delete calls against a control plane, not model calls, so
+// they should fail fast rather than hang a terminal.
 const readViewTimeout = 30 * time.Second
 
 // projectControlPlanePath is the prefix Milo routes a project's aggregated
@@ -53,7 +63,9 @@ const readViewTimeout = 30 * time.Second
 // adds it.
 const projectControlPlanePath = "/apis/resourcemanager.miloapis.com/v1alpha1/projects/%s/control-plane"
 
-// ReadView fetches raw aggregated-API paths on the caller's behalf.
+// ReadView reaches raw aggregated-API paths on the caller's behalf: it fetches
+// them, and — for the conversation lifecycle — patches, replaces and deletes
+// them.
 type ReadView struct {
 	// apiHost is Milo's host (DATUM_API_HOST), with or without a scheme.
 	// Empty selects the kubectl transport.
@@ -99,7 +111,14 @@ func (r ReadView) getAccept(ctx context.Context, project, path, accept string) (
 	if !r.direct() {
 		return kubectlJSON(ctx, r.kubeconfig, "get", "--raw", path)
 	}
+	return r.send(ctx, project, http.MethodGet, path, accept, "", nil, http.StatusOK)
+}
 
+// send is one request over the direct transport: method to path under the
+// project's control plane, with an optional body of contentType, succeeding
+// only on one of the expected statuses. Everything else — the apiserver's own
+// error message included — comes back as an error, via [apiStatusError].
+func (r ReadView) send(ctx context.Context, project, method, path, accept, contentType string, body []byte, expect ...int) ([]byte, error) {
 	token, err := r.token()
 	if err != nil {
 		return nil, err
@@ -117,7 +136,11 @@ func (r ReadView) getAccept(ctx context.Context, project, path, accept string) (
 	reqCtx, cancel := context.WithTimeout(ctx, readViewTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, method, endpoint, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("building request: %w", err)
 	}
@@ -126,6 +149,9 @@ func (r ReadView) getAccept(ctx context.Context, project, path, accept string) (
 		accept = "application/json"
 	}
 	req.Header.Set("Accept", accept)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 
 	client := r.client
 	if client == nil {
@@ -137,14 +163,104 @@ func (r ReadView) getAccept(ctx context.Context, project, path, accept string) (
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, apiStatusError(resp.StatusCode, body)
+	if !slices.Contains(expect, resp.StatusCode) {
+		return nil, apiStatusError(resp.StatusCode, respBody)
 	}
-	return body, nil
+	return respBody, nil
+}
+
+// mergePatchContentType is the one patch flavor the archive write sends: a
+// JSON merge patch touches exactly the fields it names, so {"spec":{"archived":
+// true}} cannot disturb anything else on the object.
+const mergePatchContentType = "application/merge-patch+json"
+
+// setConversationArchived archives (archived=true) or unarchives one
+// conversation and returns it as the apiserver reports it afterwards.
+//
+// The two transports cannot send the same request. The direct transport sends
+// the merge patch. kubectl has `get --raw`, `replace --raw` and `delete --raw`
+// but no `patch --raw`, so that transport reads the object, flips
+// spec.archived, and PUTs the whole thing back — which is safe only because
+// the apiserver's update ignores everything in the body but spec.archived; a
+// stale status or metadata in the round-tripped object cannot be written.
+func (r ReadView) setConversationArchived(ctx context.Context, project, contextID string, archived bool) (assistantv1alpha1.Conversation, error) {
+	path := conversationPath(project, contextID)
+	var (
+		out []byte
+		err error
+	)
+	if r.direct() {
+		patch := fmt.Appendf(nil, `{"spec":{"archived":%t}}`, archived)
+		out, err = r.send(ctx, project, http.MethodPatch, path, "", mergePatchContentType, patch, http.StatusOK)
+	} else {
+		out, err = r.replaceArchivedViaKubectl(ctx, path, archived)
+	}
+	if err != nil {
+		return assistantv1alpha1.Conversation{}, err
+	}
+	var conv assistantv1alpha1.Conversation
+	if err := json.Unmarshal(out, &conv); err != nil {
+		return assistantv1alpha1.Conversation{}, fmt.Errorf("could not parse conversation response: %w", err)
+	}
+	return conv, nil
+}
+
+// replaceArchivedViaKubectl is the kubectl transport's archive: GET, set
+// spec.archived, PUT. The object is carried as a generic map rather than the
+// typed struct so a field this client does not know about survives the round
+// trip instead of being silently dropped from the body.
+func (r ReadView) replaceArchivedViaKubectl(ctx context.Context, path string, archived bool) ([]byte, error) {
+	current, err := kubectlJSON(ctx, r.kubeconfig, "get", "--raw", path)
+	if err != nil {
+		return nil, err
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(current, &obj); err != nil {
+		return nil, fmt.Errorf("could not parse conversation response: %w", err)
+	}
+	spec, _ := obj["spec"].(map[string]any)
+	if spec == nil {
+		spec = map[string]any{}
+	}
+	spec["archived"] = archived
+	obj["spec"] = spec
+	body, err := json.Marshal(obj)
+	if err != nil {
+		return nil, err
+	}
+	return kubectlRun(ctx, r.kubeconfig, body, "replace", "--raw", path, "-f", "-")
+}
+
+// deleteConversation permanently deletes one conversation. 202 is accepted
+// alongside 200 because that is how an apiserver says "deletion is under way";
+// this one always deletes immediately, but a client that treated the
+// Kubernetes-standard answer as a failure would be wrong the day it did not.
+func (r ReadView) deleteConversation(ctx context.Context, project, contextID string) error {
+	path := conversationPath(project, contextID)
+	if !r.direct() {
+		_, err := kubectlJSON(ctx, r.kubeconfig, "delete", "--raw", path)
+		return err
+	}
+	_, err := r.send(ctx, project, http.MethodDelete, path, "", "", nil, http.StatusOK, http.StatusAccepted)
+	return err
+}
+
+// getConversation fetches one conversation object — how `conversations
+// delete` names what it is about to destroy before asking.
+func (r ReadView) getConversation(ctx context.Context, project, contextID string) (assistantv1alpha1.Conversation, error) {
+	out, err := r.get(ctx, project, conversationPath(project, contextID))
+	if err != nil {
+		return assistantv1alpha1.Conversation{}, err
+	}
+	var conv assistantv1alpha1.Conversation
+	if err := json.Unmarshal(out, &conv); err != nil {
+		return assistantv1alpha1.Conversation{}, fmt.Errorf("could not parse conversation response: %w", err)
+	}
+	return conv, nil
 }
 
 // apiStatusError renders a non-200 as the apiserver's own message where it sent

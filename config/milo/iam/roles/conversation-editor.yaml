@@ -1,0 +1,24 @@
+# Archive and delete conversations through the conversations aggregated
+# apiserver. Kept apart from conversation-viewer because these writes are of a
+# different weight: archive is reversible, but delete is not — it removes the
+# conversation and its transcript for good — so a deployment that wants
+# auditors who can read history but never destroy it grants the viewer role
+# alone.
+#
+# update and patch are both needed for archive: `kubectl replace` and PUT
+# arrive as `update`, a merge patch (what the CLI and the web UI send) as
+# `patch`. Neither can change anything but spec.archived.
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: assistant.miloapis.com-conversation-editor
+  namespace: milo-system
+  labels:
+    app.kubernetes.io/name: conversation-editor
+    app.kubernetes.io/part-of: assistant.miloapis.com
+spec:
+  launchStage: Beta
+  includedPermissions:
+    - assistant.miloapis.com/conversations.update
+    - assistant.miloapis.com/conversations.patch
+    - assistant.miloapis.com/conversations.delete

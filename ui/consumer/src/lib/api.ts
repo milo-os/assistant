@@ -41,11 +41,22 @@ export interface Conversation {
     namespace?: string;
     creationTimestamp?: string;
   };
+  spec?: {
+    /**
+     * Restorable hide: archived conversations drop out of the default list
+     * and come back via `?fieldSelector=spec.archived=true`. Sending a
+     * message to an archived conversation unarchives it server-side.
+     */
+    archived?: boolean;
+  };
   status?: {
     lastActiveAt?: string;
     messageCount?: number;
     title?: string;
+    /** User-given name; wins over the generated `title` when set. */
     name?: string;
+    /** When `spec.archived` last became true. */
+    archivedAt?: string;
   };
 }
 
@@ -104,17 +115,70 @@ async function assertOk(response: Response): Promise<Response> {
   return response;
 }
 
-/** `GET .../conversations` — this project's conversation list. */
+function conversationPath(projectName: string, conversationName: string): string {
+  return `${conversationsPath(projectName)}/${encodeURIComponent(conversationName)}`;
+}
+
+/**
+ * `GET .../conversations` — this project's conversation list. The server
+ * returns only non-archived conversations by default; `archived: true` asks
+ * for only the archived ones instead (the two sets are disjoint, so a caller
+ * wanting everything fetches both).
+ */
 export async function listConversations(
   pluginFetch: PluginFetch,
-  projectName: string
+  projectName: string,
+  opts?: { archived?: boolean }
 ): Promise<Conversation[]> {
-  const response = await pluginFetch(conversationsPath(projectName), {
+  const query = opts?.archived
+    ? `?fieldSelector=${encodeURIComponent('spec.archived=true')}`
+    : '';
+  const response = await pluginFetch(`${conversationsPath(projectName)}${query}`, {
     headers: { Accept: 'application/json' },
   });
   await assertOk(response);
   const data = (await response.json()) as ConversationList;
   return data.items ?? [];
+}
+
+/**
+ * `PATCH .../conversations/{name}` (JSON merge patch on `spec.archived`) —
+ * archives or restores a conversation. Returns the updated object.
+ */
+export async function setConversationArchived(
+  pluginFetch: PluginFetch,
+  projectName: string,
+  conversationName: string,
+  archived: boolean
+): Promise<Conversation> {
+  const response = await pluginFetch(conversationPath(projectName, conversationName), {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/merge-patch+json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({ spec: { archived } }),
+  });
+  await assertOk(response);
+  return (await response.json()) as Conversation;
+}
+
+/**
+ * `DELETE .../conversations/{name}` — a hard, irreversible delete of the
+ * conversation and its transcript. A 404 means it is already gone, which is
+ * the outcome the caller asked for, so it resolves rather than throwing.
+ */
+export async function deleteConversation(
+  pluginFetch: PluginFetch,
+  projectName: string,
+  conversationName: string
+): Promise<void> {
+  const response = await pluginFetch(conversationPath(projectName, conversationName), {
+    method: 'DELETE',
+    headers: { Accept: 'application/json' },
+  });
+  if (response.status === 404) return;
+  await assertOk(response);
 }
 
 /** `GET .../conversations/{name}/messages` — a conversation's transcript. */
@@ -124,7 +188,7 @@ export async function getConversationMessages(
   conversationName: string
 ): Promise<StoredMessage[]> {
   const response = await pluginFetch(
-    `${conversationsPath(projectName)}/${encodeURIComponent(conversationName)}/messages`,
+    `${conversationPath(projectName, conversationName)}/messages`,
     { headers: { Accept: 'application/json' } }
   );
   await assertOk(response);

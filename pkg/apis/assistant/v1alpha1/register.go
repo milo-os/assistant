@@ -31,5 +31,23 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&AssistantEndpoint{}, &AssistantEndpointList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
-	return nil
+	return scheme.AddFieldLabelConversionFunc(SchemeGroupVersion.WithKind("Conversation"), conversationFieldLabel)
+}
+
+// ConversationArchivedField is the one field selector conversations support:
+// spec.archived=true lists the archive, spec.archived=false (the default when
+// no selector is sent) everything else.
+const ConversationArchivedField = "spec.archived"
+
+// conversationFieldLabel admits spec.archived as a Conversation field
+// selector. Without a registered conversion the generic list handler rejects
+// every label except metadata.name/metadata.namespace before the storage ever
+// sees the request. Those two stay admitted here as well, so the handler's
+// own error text does not change for them — the conversation storage is what
+// decides which selectors it actually serves.
+func conversationFieldLabel(label, value string) (string, string, error) {
+	if label == ConversationArchivedField {
+		return label, value, nil
+	}
+	return runtime.DefaultMetaV1FieldSelectorConversion(label, value)
 }

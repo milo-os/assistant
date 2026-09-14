@@ -31,6 +31,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		v1alpha1.ConversationList{}.OpenAPIModelName():            schema_pkg_apis_assistant_v1alpha1_ConversationList(ref),
 		v1alpha1.ConversationMessage{}.OpenAPIModelName():         schema_pkg_apis_assistant_v1alpha1_ConversationMessage(ref),
 		v1alpha1.ConversationMessages{}.OpenAPIModelName():        schema_pkg_apis_assistant_v1alpha1_ConversationMessages(ref),
+		v1alpha1.ConversationSpec{}.OpenAPIModelName():            schema_pkg_apis_assistant_v1alpha1_ConversationSpec(ref),
 		v1alpha1.ConversationStatus{}.OpenAPIModelName():          schema_pkg_apis_assistant_v1alpha1_ConversationStatus(ref),
 		resource.Quantity{}.OpenAPIModelName():                    schema_apimachinery_pkg_api_resource_Quantity(ref),
 		v1.APIGroup{}.OpenAPIModelName():                          schema_pkg_apis_meta_v1_APIGroup(ref),
@@ -562,7 +563,7 @@ func schema_pkg_apis_assistant_v1alpha1_Conversation(ref common.ReferenceCallbac
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "Conversation is one durable chat conversation. name == the A2A context id; namespace == the milo project. Read-only in v1 (populated by the chat flow, surfaced here for list/get).",
+				Description: "Conversation is one durable chat conversation. name == the A2A context id; namespace == the milo project. Conversations are created by the chat flow, never through this API. Update (PUT/PATCH) changes only spec.archived — every other field in the submitted object is ignored — and delete removes the conversation and its transcript permanently.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"kind": {
@@ -586,6 +587,12 @@ func schema_pkg_apis_assistant_v1alpha1_Conversation(ref common.ReferenceCallbac
 							Ref:         ref(v1.ObjectMeta{}.OpenAPIModelName()),
 						},
 					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1alpha1.ConversationSpec{}.OpenAPIModelName()),
+						},
+					},
 					"status": {
 						SchemaProps: spec.SchemaProps{
 							Default: map[string]interface{}{},
@@ -596,7 +603,7 @@ func schema_pkg_apis_assistant_v1alpha1_Conversation(ref common.ReferenceCallbac
 			},
 		},
 		Dependencies: []string{
-			v1alpha1.ConversationStatus{}.OpenAPIModelName(), v1.ObjectMeta{}.OpenAPIModelName()},
+			v1alpha1.ConversationSpec{}.OpenAPIModelName(), v1alpha1.ConversationStatus{}.OpenAPIModelName(), v1.ObjectMeta{}.OpenAPIModelName()},
 	}
 }
 
@@ -739,6 +746,26 @@ func schema_pkg_apis_assistant_v1alpha1_ConversationMessages(ref common.Referenc
 	}
 }
 
+func schema_pkg_apis_assistant_v1alpha1_ConversationSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ConversationSpec is the part of a conversation its owner controls.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"archived": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Archived hides the conversation from the default list (select archived ones with fieldSelector=spec.archived=true) without deleting it; it stays readable and resumable by name. Sending another message in the conversation sets it back to false.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func schema_pkg_apis_assistant_v1alpha1_ConversationStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -771,6 +798,12 @@ func schema_pkg_apis_assistant_v1alpha1_ConversationStatus(ref common.ReferenceC
 							Description: "Name is what the user called this conversation, empty until they name one. Clients show it in place of Title where set.",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"archivedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ArchivedAt is when the conversation was archived; unset when it is not. Archiving an already-archived conversation keeps the original time.",
+							Ref:         ref(v1.Time{}.OpenAPIModelName()),
 						},
 					},
 				},

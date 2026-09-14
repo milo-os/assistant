@@ -45,6 +45,37 @@ subjects:
     name: patch-dev
     namespace: patch-playground
 ---
+# Read, archive and delete conversations through the aggregated apiserver —
+# the dev counterpart of milo's conversation-viewer + conversation-editor
+# roles, so a patch-dev token can exercise the whole conversation lifecycle
+# (`conversations list/archive/delete`, the picker's ctrl+a/ctrl+d) and not
+# only start turns. update and patch are both listed: a merge patch is
+# authorized as `patch`, `kubectl replace` as `update`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: patch-conversation-editor
+rules:
+  - apiGroups: ["assistant.miloapis.com"]
+    resources: ["conversations"]
+    verbs: ["get", "list", "update", "patch", "delete"]
+  - apiGroups: ["assistant.miloapis.com"]
+    resources: ["conversations/messages"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: patch-dev:conversation-editor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: patch-conversation-editor
+subjects:
+  - kind: ServiceAccount
+    name: patch-dev
+    namespace: patch-playground
+---
 # A second identity with NO binding, so a token that authenticates cleanly but
 # is authorized for nothing is available to exercise the 403 path. It replaces
 # the old "wrong project" dev token, and is a truer test: the denial now comes
