@@ -31,11 +31,14 @@ type fakeReader struct {
 	lastList     history.ListOptions
 	forceListErr error
 	// archiveCalls counts SetArchived calls, so a no-op update can be shown
-	// not to write.
+	// not to write; listCalls counts ListConversations calls, so a list that
+	// must answer without the store can be shown not to read.
 	archiveCalls int
+	listCalls    int
 }
 
 func (f *fakeReader) ListConversations(_ context.Context, project string, opts history.ListOptions) ([]history.Conversation, error) {
+	f.listCalls++
 	f.lastProject = project
 	f.lastList = opts
 	if f.forceListErr != nil {
@@ -211,17 +214,88 @@ func TestListMissingNamespaceIsBadRequest(t *testing.T) {
 	}
 }
 
-// A project-scoped milo identity may not read a different project's namespace.
-func TestProjectIdentityMismatchIsForbidden(t *testing.T) {
-	ctx := request.WithUser(nsCtx("demo"), &user.DefaultInfo{
+// projectCtx is a request in namespace ns from a milo identity whose parent
+// Project is project — the shape the milo apiserver front end stamps.
+func projectCtx(ns, project string) context.Context {
+	return request.WithUser(nsCtx(ns), &user.DefaultInfo{
 		Name: "alice",
 		Extra: map[string][]string{
 			tenant.ExtraParentType: {"Project"},
-			tenant.ExtraParentName: {"other"},
+			tenant.ExtraParentName: {project},
 		},
 	})
-	rest := NewConversationREST(&fakeReader{})
-	_, err := rest.List(ctx, &metainternalversion.ListOptions{})
+}
+
+// A list from a project identity in a namespace that is not its project is
+// empty, not Forbidden: the namespace controller sweeping a terminating
+// project control plane lists conversations in milo-system with the project's
+// identity, and a 403 there wedges the namespace (milo-os/assistant#90). The
+// store is never asked, so no other project's rows can leak.
+func TestConversationListMismatchedNamespaceIsEmptyWithoutStoreCall(t *testing.T) {
+	reader := &fakeReader{convs: map[string][]history.Conversation{
+		"project-a":   {{ProjectName: "project-a", ContextID: "a"}},
+		"milo-system": {{ProjectName: "milo-system", ContextID: "planted"}},
+	}}
+	rest := NewConversationREST(reader)
+
+	obj, err := rest.List(projectCtx("milo-system", "project-a"), &metainternalversion.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	list, ok := obj.(*assistant.ConversationList)
+	if !ok {
+		t.Fatalf("List returned %T, want *assistant.ConversationList", obj)
+	}
+	if list.Items == nil || len(list.Items) != 0 {
+		t.Fatalf("Items = %#v, want an empty (non-nil) slice", list.Items)
+	}
+	if reader.listCalls != 0 {
+		t.Fatalf("store ListConversations called %d times, want 0", reader.listCalls)
+	}
+}
+
+// The mismatch path only ever answers empty — an identity whose project is
+// the namespace still gets its rows, and only its rows.
+func TestConversationListMatchingIdentityReturnsRows(t *testing.T) {
+	reader := &fakeReader{convs: map[string][]history.Conversation{
+		"project-a": {{ProjectName: "project-a", ContextID: "a1"}, {ProjectName: "project-a", ContextID: "a2"}},
+		"project-b": {{ProjectName: "project-b", ContextID: "b1"}},
+	}}
+	rest := NewConversationREST(reader)
+
+	obj, err := rest.List(projectCtx("project-a", "project-a"), &metainternalversion.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	items := obj.(*assistant.ConversationList).Items
+	if len(items) != 2 || items[0].Name != "a1" || items[1].Name != "a2" {
+		t.Fatalf("items = %+v, want project-a's two", items)
+	}
+	if reader.listCalls != 1 || reader.lastProject != "project-a" {
+		t.Fatalf("store called %d times for %q, want once for project-a", reader.listCalls, reader.lastProject)
+	}
+}
+
+// Per-object verbs keep refusing a mismatch: a token for project A that names
+// an object in project B's namespace is Forbidden, never answered from B.
+func TestConversationGetMismatchedNamespaceIsForbidden(t *testing.T) {
+	rest := NewConversationREST(&fakeReader{convs: map[string][]history.Conversation{
+		"demo": {{ProjectName: "demo", ContextID: "ctx-1"}},
+	}})
+	_, err := rest.Get(projectCtx("demo", "other"), "ctx-1", &metav1.GetOptions{})
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("err = %v, want Forbidden", err)
+	}
+}
+
+// Update serves PATCH too, so one mismatch check covers both write verbs: a
+// caller pinned to another project is refused before the store is read, the
+// same way Get and Delete refuse, and unlike List, which answers empty.
+func TestConversationUpdateMismatchedNamespaceIsForbidden(t *testing.T) {
+	r := NewConversationREST(archiveFixture())
+	obj := &assistant.Conversation{Spec: assistant.ConversationSpec{Archived: true}}
+	_, _, err := r.Update(projectCtx("demo", "other"), "active", rest.DefaultUpdatedObjectInfo(obj),
+		rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc, false, &metav1.UpdateOptions{})
 	if !apierrors.IsForbidden(err) {
 		t.Fatalf("err = %v, want Forbidden", err)
 	}
