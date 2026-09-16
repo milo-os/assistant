@@ -8,7 +8,16 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
+
+// StdinIsTerminal reports whether stdin is a terminal — whether there is a
+// person there to answer a confirmation prompt, rather than a pipe that would
+// answer it with whatever happens to be in it (or with EOF).
+func StdinIsTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
 
 // stdio writes to the real process stdout/stderr and reads interactive input
 // line-by-line from stdin (the [LineReader] extension).

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -19,8 +20,7 @@ import (
 // that cannot be expressed here.
 func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 	Store
-	Lister
-	Reader
+	Editor
 }) {
 	ctx := context.Background()
 
@@ -76,7 +76,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 			t.Fatalf("cross-project read got %v, %v; want nil, nil", turns, err)
 		}
 		// And the other project's listing must not show it either.
-		convs, err := s.ListConversations(ctx, project+"-other", 10)
+		convs, err := s.ListConversations(ctx, project+"-other", ListOptions{Limit: 10})
 		if err != nil || len(convs) != 0 {
 			t.Fatalf("cross-project list got %v, %v; want empty", convs, err)
 		}
@@ -94,7 +94,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		if err := s.Append(ctx, project, "c1", Turn{UserText: "u2", AssistantText: "a2"}); err != nil {
 			t.Fatal(err)
 		}
-		convs, err := s.ListConversations(ctx, project, 10)
+		convs, err := s.ListConversations(ctx, project, ListOptions{Limit: 10})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -104,7 +104,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		if convs[0].CreatedAt.IsZero() || convs[0].LastActiveAt.Before(convs[0].CreatedAt) {
 			t.Fatalf("bad timestamps: %+v", convs[0])
 		}
-		limited, err := s.ListConversations(ctx, project, 1)
+		limited, err := s.ListConversations(ctx, project, ListOptions{Limit: 1})
 		if err != nil || len(limited) != 1 {
 			t.Fatalf("limit not honored: %v, %v", limited, err)
 		}
@@ -120,7 +120,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 			}
 		}
 		want := "Why is the api-backend workload not available?"
-		convs, err := s.ListConversations(ctx, project, 10)
+		convs, err := s.ListConversations(ctx, project, ListOptions{Limit: 10})
 		if err != nil || len(convs) != 1 || convs[0].Title != want {
 			t.Fatalf("list title = %+v, %v; want %q", convs, err, want)
 		}
@@ -170,7 +170,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		if got.Title != "why is p-1 down?" {
 			t.Fatalf("title = %q, want it untouched by the rename", got.Title)
 		}
-		convs, err := s.ListConversations(ctx, project, 10)
+		convs, err := s.ListConversations(ctx, project, ListOptions{Limit: 10})
 		if err != nil || len(convs) != 1 || convs[0].Name != "dfw quota escalation" {
 			t.Fatalf("list = %+v, %v; want the name on the listed row", convs, err)
 		}
@@ -219,8 +219,156 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 			t.Fatalf("err = %v, want ErrConversationNotFound", err)
 		}
 		// And it must not have created one on the way to failing.
-		if convs, lErr := s.ListConversations(ctx, project, 10); lErr != nil || len(convs) != 0 {
+		if convs, lErr := s.ListConversations(ctx, project, ListOptions{Limit: 10}); lErr != nil || len(convs) != 0 {
 			t.Fatalf("list = %+v, %v; want empty", convs, lErr)
+		}
+	})
+
+	t.Run("archive hides from the default listing and shows in the archived one", func(t *testing.T) {
+		s := newStore(t)
+		project, _ := fresh("archive")
+		for _, id := range []string{"keep", "file-away"} {
+			if err := s.Append(ctx, project, id, Turn{UserText: "u", AssistantText: "a"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, err := s.GetConversation(ctx, project, "file-away")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !before.ArchivedAt.IsZero() {
+			t.Fatalf("a fresh conversation is archived: %+v", before)
+		}
+		if err := s.SetArchived(ctx, project, "file-away", true); err != nil {
+			t.Fatal(err)
+		}
+
+		active, err := s.ListConversations(ctx, project, ListOptions{Limit: 10})
+		if err != nil || len(active) != 1 || active[0].ContextID != "keep" {
+			t.Fatalf("default list = %+v, %v; want only the unarchived conversation", active, err)
+		}
+		archived, err := s.ListConversations(ctx, project, ListOptions{Limit: 10, Archived: true})
+		if err != nil || len(archived) != 1 || archived[0].ContextID != "file-away" || archived[0].ArchivedAt.IsZero() {
+			t.Fatalf("archived list = %+v, %v; want only the archived conversation, with its time", archived, err)
+		}
+
+		// Still gettable by id — archive hides, it does not remove — and
+		// filing it away is not activity in it.
+		got, err := s.GetConversation(ctx, project, "file-away")
+		if err != nil || got.ArchivedAt.IsZero() {
+			t.Fatalf("get archived = %+v, %v; want it found with ArchivedAt set", got, err)
+		}
+		if !got.LastActiveAt.Equal(before.LastActiveAt) {
+			t.Fatalf("archive moved last-active from %v to %v", before.LastActiveAt, got.LastActiveAt)
+		}
+
+		// Archiving again keeps the original time.
+		time.Sleep(5 * time.Millisecond)
+		if err := s.SetArchived(ctx, project, "file-away", true); err != nil {
+			t.Fatal(err)
+		}
+		again, err := s.GetConversation(ctx, project, "file-away")
+		if err != nil || !again.ArchivedAt.Equal(got.ArchivedAt) {
+			t.Fatalf("re-archive ArchivedAt = %v, %v; want the original %v", again.ArchivedAt, err, got.ArchivedAt)
+		}
+
+		// Unarchive brings it back into the default listing.
+		if err := s.SetArchived(ctx, project, "file-away", false); err != nil {
+			t.Fatal(err)
+		}
+		back, err := s.ListConversations(ctx, project, ListOptions{Limit: 10})
+		if err != nil || len(back) != 2 {
+			t.Fatalf("list after unarchive = %+v, %v; want both", back, err)
+		}
+		for _, c := range back {
+			if !c.ArchivedAt.IsZero() {
+				t.Fatalf("unarchived conversation still carries ArchivedAt: %+v", c)
+			}
+		}
+		if none, err := s.ListConversations(ctx, project, ListOptions{Limit: 10, Archived: true}); err != nil || len(none) != 0 {
+			t.Fatalf("archived list after unarchive = %+v, %v; want empty", none, err)
+		}
+	})
+
+	t.Run("a new turn unarchives; rename and compact do not", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("unarchive-on-append")
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "u1", AssistantText: "a1"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetArchived(ctx, project, contextID, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Rename(ctx, project, contextID, "named while archived"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.GetConversation(ctx, project, contextID); err != nil || got.ArchivedAt.IsZero() {
+			t.Fatalf("after rename+compact = %+v, %v; want still archived", got, err)
+		}
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "u2", AssistantText: "a2"}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetConversation(ctx, project, contextID)
+		if err != nil || !got.ArchivedAt.IsZero() {
+			t.Fatalf("after append = %+v, %v; want unarchived", got, err)
+		}
+		if convs, err := s.ListConversations(ctx, project, ListOptions{Limit: 10}); err != nil || len(convs) != 1 {
+			t.Fatalf("default list after append = %+v, %v; want the conversation back", convs, err)
+		}
+	})
+
+	t.Run("delete removes the conversation and its messages", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("delete")
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "u", AssistantText: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Append(ctx, project, "survivor", Turn{UserText: "u", AssistantText: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		// Same context id in another project: the delete must not reach it.
+		if err := s.Append(ctx, project+"-other", contextID, Turn{UserText: "u", AssistantText: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Delete(ctx, project, contextID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.GetConversation(ctx, project, contextID); !errors.Is(err, ErrConversationNotFound) {
+			t.Fatalf("get after delete err = %v, want ErrConversationNotFound", err)
+		}
+		if turns, err := s.Turns(ctx, project, contextID); err != nil || turns != nil {
+			t.Fatalf("turns after delete = %+v, %v; want nil", turns, err)
+		}
+		if msgs, err := s.Messages(ctx, project, contextID); err != nil || len(msgs) != 0 {
+			t.Fatalf("messages after delete = %+v, %v; want none", msgs, err)
+		}
+		if convs, err := s.ListConversations(ctx, project, ListOptions{Limit: 10}); err != nil || len(convs) != 1 || convs[0].ContextID != "survivor" {
+			t.Fatalf("list after delete = %+v, %v; want only the survivor", convs, err)
+		}
+		if _, err := s.GetConversation(ctx, project+"-other", contextID); err != nil {
+			t.Fatalf("delete reached across projects: %v", err)
+		}
+		// Irreversible, and a second delete says so rather than succeeding.
+		if err := s.Delete(ctx, project, contextID); !errors.Is(err, ErrConversationNotFound) {
+			t.Fatalf("second delete err = %v, want ErrConversationNotFound", err)
+		}
+	})
+
+	t.Run("archive and delete of an unknown conversation are not found", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("lifecycle-missing")
+		if err := s.SetArchived(ctx, project, contextID, true); !errors.Is(err, ErrConversationNotFound) {
+			t.Fatalf("archive err = %v, want ErrConversationNotFound", err)
+		}
+		if err := s.Delete(ctx, project, contextID); !errors.Is(err, ErrConversationNotFound) {
+			t.Fatalf("delete err = %v, want ErrConversationNotFound", err)
+		}
+		// Neither conjured the conversation on the way to failing.
+		if convs, err := s.ListConversations(ctx, project, ListOptions{Limit: 10, Archived: true}); err != nil || len(convs) != 0 {
+			t.Fatalf("archived list = %+v, %v; want empty", convs, err)
 		}
 	})
 
@@ -444,8 +592,7 @@ func uniqueSuffix(t *testing.T) string {
 func TestMemoryStoreConformance(t *testing.T) {
 	storeConformance(t, func(t *testing.T) interface {
 		Store
-		Lister
-		Reader
+		Editor
 	} {
 		return NewMemoryStore()
 	})
@@ -458,8 +605,7 @@ func TestPostgresStoreConformance(t *testing.T) {
 	}
 	storeConformance(t, func(t *testing.T) interface {
 		Store
-		Lister
-		Reader
+		Editor
 	} {
 		s, err := NewPostgresStore(context.Background(), url, slog.New(slog.DiscardHandler))
 		if err != nil {

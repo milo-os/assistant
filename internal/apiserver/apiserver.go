@@ -1,10 +1,10 @@
 // Package apiserver assembles the conversations aggregated API server: the
 // runtime scheme/codecs for the assistant group and the generic apiserver
-// wiring that installs the bespoke Conversation REST (a read view over the
-// shared history store) — no etcd, no generic registry. It also installs the
-// conversations/sendmessage subresource, the one write/execution path in this
-// otherwise read-only apiserver: it drives a live agent turn and streams the
-// result back as Server-Sent Events (see registry/conversation).
+// wiring that installs the bespoke Conversation REST (a view over the shared
+// history store that also archives and deletes) — no etcd, no generic
+// registry. It also installs the conversations/sendmessage subresource, the
+// execution path: it drives a live agent turn and streams the result back as
+// Server-Sent Events (see registry/conversation).
 package apiserver
 
 import (
@@ -47,11 +47,14 @@ func init() {
 	)
 }
 
-// ExtraConfig carries the assistant-group backends into New(): the read-only
-// views over the shared conversation store and the shared gap-report store.
+// ExtraConfig carries the assistant-group backends into New(): the shared
+// conversation store and the read-only view over the shared gap-report store.
 type ExtraConfig struct {
-	Reader     history.Reader
-	GapReports gapreport.Store
+	// Conversations backs the conversations resource and its messages
+	// subresource. An [history.Editor] rather than a bare Reader because the
+	// resource archives (update) and deletes as well as listing.
+	Conversations history.Editor
+	GapReports    gapreport.Store
 	// PublicBaseURL is the address the service advertises to clients
 	// (PUBLIC_BASE_URL), served through the assistantendpoints resource so a
 	// client can discover where to send A2A traffic. Empty is reported as
@@ -98,7 +101,8 @@ func (cfg *Config) Complete() CompletedConfig {
 }
 
 // New builds the generic server and installs the assistant API group with the
-// bespoke Conversation storage (list/get) and the messages subresource.
+// bespoke Conversation storage (get/list/update/delete) and the messages
+// subresource.
 func (c completedConfig) New() (*ConversationServer, error) {
 	genericServer, err := c.GenericConfig.New("assistant-apiserver", genericapiserver.NewEmptyDelegate())
 	if err != nil {
@@ -110,8 +114,8 @@ func (c completedConfig) New() (*ConversationServer, error) {
 	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(v1alpha1.GroupName, Scheme, metav1.ParameterCodec, Codecs)
 
 	v1alpha1Storage := map[string]rest.Storage{
-		"conversations":             conversation.NewConversationREST(c.ExtraConfig.Reader),
-		"conversations/messages":    conversation.NewMessagesREST(c.ExtraConfig.Reader),
+		"conversations":             conversation.NewConversationREST(c.ExtraConfig.Conversations),
+		"conversations/messages":    conversation.NewMessagesREST(c.ExtraConfig.Conversations),
 		"conversations/sendmessage": conversation.NewSendMessageREST(c.ExtraConfig.Runner),
 		"capabilitygapreports":      capabilitygapreport.NewCapabilityGapReportREST(c.ExtraConfig.GapReports),
 		"capabilitygaps":            capabilitygapreport.NewCapabilityGapREST(c.ExtraConfig.GapReports),

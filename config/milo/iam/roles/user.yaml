@@ -1,6 +1,7 @@
-# The role a project member is normally bound to: start conversations and read
-# them back. Composed from the two narrower roles so the create/read split stays
-# available for deployments that want it.
+# The role a project member is normally bound to: start conversations, read
+# them back, and archive or delete their own history. Composed from the
+# narrower roles so the create/read/edit split stays available for deployments
+# that want it.
 apiVersion: iam.miloapis.com/v1alpha1
 kind: Role
 metadata:
@@ -15,4 +16,6 @@ spec:
     - name: assistant.miloapis.com-conversation-creator
       namespace: milo-system
     - name: assistant.miloapis.com-conversation-viewer
+      namespace: milo-system
+    - name: assistant.miloapis.com-conversation-editor
       namespace: milo-system

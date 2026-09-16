@@ -173,7 +173,9 @@ spec:
 `conversations.assistant.miloapis.com` (plural/singular + permissions `get`,
 `list`; `parentResources: Project`) and namespaced `Role`s (viewer/consumer)
 granting `assistant.miloapis.com/conversations.{list,get}`. This is the resource
-`internal/auth/sar.go` already models.
+`internal/auth/sar.go` already models. (Since extended: `update`, `patch` and
+`delete` back archive and hard delete, granted by the `conversation-editor`
+role that `assistant.miloapis.com-user` inherits.)
 
 `config/overlays/dev`: wire the apiserver + APIService into `task dev:setup`;
 set `insecureSkipTLSVerify: true` and rely on in-cluster authn/authz (kind).

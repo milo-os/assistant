@@ -77,7 +77,11 @@ export default function ChatDock() {
         onRetry={workspace.onRetry}
         onNewChat={workspace.onNewChat}
         onLoadChat={workspace.onLoadChat}
+        onArchiveChat={workspace.onArchiveChat}
+        onUnarchiveChat={workspace.onUnarchiveChat}
         onDeleteChat={workspace.onDeleteChat}
+        // Delete is a hard, irreversible server delete — always confirm.
+        confirmDelete
         onSuggestion={workspace.onSuggestion}
         modelId={workspace.modelId}
         effortId={workspace.effortId}
@@ -90,6 +94,17 @@ export default function ChatDock() {
         historyOpen={workspace.historyOpen}
         onToggleHistory={workspace.onToggleHistory}
       />
+      {/* datum-ui only renders `error` inside the conversation view; its empty
+          state has no error slot. A failed transcript load or a failed
+          archive/delete made from a blank chat would otherwise be silent. */}
+      {workspace.error && workspace.messages.length === 0 && (
+        <p
+          role="alert"
+          style={{ position: 'absolute', top: 0, left: 0, right: 0, padding: '0.5rem', textAlign: 'center', fontSize: '0.75rem', color: 'var(--destructive, #dc2626)' }}
+        >
+          {workspace.error.message}
+        </p>
+      )}
       {!project && (
         <p role="status" style={{ position: 'absolute', bottom: 0, left: 0, right: 0, opacity: 0.7 }}>
           No project context supplied — running with an empty project scope.

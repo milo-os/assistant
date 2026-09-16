@@ -63,27 +63,64 @@ func FromContext(ctx context.Context) Identity {
 	}
 }
 
-// ProjectFromContext resolves the single project a request may read. The
-// namespace is authoritative (conversations are namespaced by project); if the
-// caller's milo identity carries a parent Project it must equal the namespace,
-// otherwise the request is refused so a project-scoped token cannot reach
-// another project's rows. gr scopes the returned Forbidden/BadRequest error.
-func ProjectFromContext(ctx context.Context, gr schema.GroupResource) (string, error) {
+// Scope is where a request lands before any verb rules on it: the namespace
+// the URL addresses, the project the caller's milo identity is pinned to, and
+// whether the two disagree. Resolving is separated from ruling because the
+// right answer to a mismatch is not the same for every verb — a read or write
+// of one object is refused, while a list may answer empty — and each verb
+// should reach its answer from the same namespace checks and the same
+// identity rather than re-deriving them.
+type Scope struct {
+	// Namespace is the validated request namespace, i.e. the project the URL
+	// addresses.
+	Namespace string
+	// IdentityProject is the parent Project stamped on the caller's milo
+	// identity, or "" when the caller carries no project constraint (a dev
+	// in-cluster identity, or an Organization parent).
+	IdentityProject string
+	// Mismatch reports that IdentityProject is set and is not Namespace: a
+	// token minted for one project addressing another project's namespace.
+	Mismatch bool
+}
+
+// ScopeFromContext resolves a request's Scope. The namespace is required and
+// must be a name Postgres can take; either failing is a BadRequest. A mismatch
+// between the identity's project and the namespace is not an error here — it
+// is reported in the Scope for the caller to rule on.
+func ScopeFromContext(ctx context.Context) (Scope, error) {
 	ns, ok := request.NamespaceFrom(ctx)
 	if !ok || ns == "" {
-		return "", apierrors.NewBadRequest("conversations are namespaced by project; a namespace is required")
+		return Scope{}, apierrors.NewBadRequest("conversations are namespaced by project; a namespace is required")
 	}
 	// Postgres' text type (unlike UTF-8 itself) disallows NUL — an unfiltered
 	// namespace reaches the driver as a raw "invalid byte sequence" error (a
 	// 500 that leaks backend/SQLSTATE detail) instead of a clean 400. A real
 	// milo project name can never contain one.
 	if strings.ContainsRune(ns, 0) {
-		return "", apierrors.NewBadRequest("invalid namespace")
+		return Scope{}, apierrors.NewBadRequest("invalid namespace")
 	}
-	if p := FromContext(ctx).Project(); p != "" && p != ns {
-		return "", apierrors.NewForbidden(gr, "", errProjectMismatch(p, ns))
+	p := FromContext(ctx).Project()
+	return Scope{
+		Namespace:       ns,
+		IdentityProject: p,
+		Mismatch:        p != "" && p != ns,
+	}, nil
+}
+
+// ProjectFromContext resolves the single project a request may read. The
+// namespace is authoritative (conversations are namespaced by project); if the
+// caller's milo identity carries a parent Project it must equal the namespace,
+// otherwise the request is refused so a project-scoped token cannot reach
+// another project's rows. gr scopes the returned Forbidden error.
+func ProjectFromContext(ctx context.Context, gr schema.GroupResource) (string, error) {
+	scope, err := ScopeFromContext(ctx)
+	if err != nil {
+		return "", err
 	}
-	return ns, nil
+	if scope.Mismatch {
+		return "", apierrors.NewForbidden(gr, "", errProjectMismatch(scope.IdentityProject, scope.Namespace))
+	}
+	return scope.Namespace, nil
 }
 
 func first(vals []string) string {

@@ -205,9 +205,9 @@ func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config,
 	return &assistantapiserver.Config{
 			GenericConfig: genericConfig,
 			ExtraConfig: assistantapiserver.ExtraConfig{
-				Reader:     store,
-				GapReports: gapStore,
-				Runner:     runner,
+				Conversations: store,
+				GapReports:    gapStore,
+				Runner:        runner,
 				// The address clients should send A2A traffic to. Read from the
 				// same env the service uses for its agent card, so discovery and
 				// the card cannot disagree.

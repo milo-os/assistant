@@ -11,6 +11,8 @@ datumctl assistant resume                                           # pick up a 
 datumctl assistant chat "Why is the api-backend workload not available?"   # one-shot, for pipes
 datumctl assistant conversations list
 datumctl assistant conversations rename <context-id> "dfw quota escalation"
+datumctl assistant conversations archive <context-id>              # hide it; list --archived finds it
+datumctl assistant conversations delete <context-id>               # permanent; asks first (--yes to skip)
 ```
 
 The bare verb is the chat, the way `claude` or `codex` on their own are: the
@@ -44,6 +46,17 @@ Conversations can be given a name of your own — `conversations rename`, or
 `/rename <name>` in the chat. The name is shown in place of the derived title
 wherever conversations are listed, and the title stays underneath as the
 fallback for the ones never named.
+
+A conversation you are done with can be archived — `conversations archive`,
+`/archive` in the chat, or `ctrl+a` in the resume picker. It drops out of
+`conversations list`, the picker and `-c`, but nothing is lost:
+`conversations list --archived` (or the picker's Show option) lists the
+archive, `resume <context-id>` still opens it, and `unarchive` — or simply
+sending it another message — brings it back. `conversations delete` (`ctrl+d`
+in the picker) is the permanent version: the conversation and its transcript
+are gone, so it asks first, and wants `--yes` when there is no terminal to ask
+on. Both write through the aggregated API with the same credentials as
+`conversations list`.
 
 The binary is named `milo-assistant`, not `datumctl-assistant`. datumctl recognises
 both prefixes on `$PATH` and treats `milo-` as marking *"portable milo-os

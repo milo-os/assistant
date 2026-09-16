@@ -1,27 +1,41 @@
-import { sanitizeUserHtml, type ChatSummary, type EffortId } from '@datum-cloud/datum-ui/assistant';
+import type { ChatSummary, EffortId } from '@datum-cloud/datum-ui/assistant';
 import { cn } from '@datum-cloud/datum-ui/utils';
+import type { PluginFetch } from '@datum-cloud/portal-plugin-sdk';
 import Placeholder from '@tiptap/extension-placeholder';
 import { useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DynamicToolUIPart, TextUIPart, UIMessage, UIMessagePart, UIDataTypes, UITools } from 'ai';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { sendMessage } from '../lib/api';
-import { deleteChat, deriveTitle, listChats, saveChat, type StoredChat } from '../lib/chat-storage';
-import type { PluginFetch } from '@datum-cloud/portal-plugin-sdk';
+import {
+  deleteConversation,
+  getConversationMessages,
+  listConversations,
+  sendMessage,
+  setConversationArchived,
+  type Conversation,
+  type StoredMessage,
+} from '../lib/api';
 import { useSpeechInput } from './use-speech-input';
 
 type Parts = UIMessagePart<UIDataTypes, UITools>[];
 
-/** `AssistantWorkspaceProps.status` values this hook produces. */
-export type AssistantStatus = 'ready' | 'streaming' | 'error';
+/**
+ * `AssistantWorkspaceProps.status` values this hook produces. `submitted` is
+ * used while a past conversation's transcript loads — datum-ui renders it as
+ * the typing indicator and treats the workspace as not ready (no sending).
+ */
+export type AssistantStatus = 'ready' | 'submitted' | 'streaming' | 'error';
 
 // The model/effort picker is hidden (`modelSelector: false` in
 // `assistant-config.ts`), so these are inert placeholders required only to
 // satisfy `AssistantWorkspaceProps` — never sent to the apiserver.
 const INERT_MODEL_ID = '';
 const INERT_EFFORT_ID: EffortId = 'high';
+
+const NEW_CHAT_TITLE = 'New chat';
 
 function newId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -36,8 +50,76 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;');
 }
 
+/** Plain text → the paragraph HTML the Tiptap composer would have produced. */
+function plainTextToHtml(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => `<p>${escapeHtml(line)}</p>`)
+    .join('');
+}
+
 function textOf(msg: UIMessage): string {
   return msg.parts.find((p): p is TextUIPart => p.type === 'text')?.text ?? '';
+}
+
+function toError(err: unknown, fallback: string): Error {
+  return err instanceof Error ? err : new Error(fallback);
+}
+
+function deriveTitle(messages: UIMessage[]): string {
+  const text = textOf(messages.find((m) => m.role === 'user') ?? { id: '', role: 'user', parts: [] });
+  return text.length > 42 ? text.slice(0, 42) + '…' : text || NEW_CHAT_TITLE;
+}
+
+function toChatSummary(conversation: Conversation): ChatSummary {
+  const { metadata, spec, status } = conversation;
+  return {
+    id: metadata.name,
+    title: status?.name || status?.title || NEW_CHAT_TITLE,
+    updatedAt: Date.parse(status?.lastActiveAt ?? metadata.creationTimestamp ?? '') || 0,
+    archived: spec?.archived ?? false,
+    // The list endpoint carries no transcripts; they're fetched on open.
+    messages: [],
+  };
+}
+
+/**
+ * Stored transcript → `UIMessage[]`.
+ *
+ * `summary` rows are the server's compaction of older turns that were folded
+ * out of the transcript. They are rendered as an assistant message prefixed
+ * with an "Earlier conversation (summarized)" heading rather than dropped or
+ * shown as a user turn: they are model-written context, so the assistant
+ * bubble (markdown-rendered) is the honest attribution, the heading makes it
+ * clear this isn't a reply to the preceding message, and keeping them out of
+ * the `user` role keeps `htmlByUserMsgIndex` aligned with real user turns.
+ * `system` rows are internal and never shown.
+ */
+function toUIMessages(stored: StoredMessage[]): UIMessage[] {
+  const out: UIMessage[] = [];
+  for (const m of stored) {
+    const id = `seq-${m.seq}`;
+    switch (m.role) {
+      case 'user':
+      case 'assistant':
+        out.push({ id, role: m.role, parts: [{ type: 'text', text: m.content, state: 'done' }] });
+        break;
+      case 'summary':
+        out.push({
+          id,
+          role: 'assistant',
+          parts: [
+            {
+              type: 'text',
+              text: `**Earlier conversation (summarized)**\n\n${m.content}`,
+              state: 'done',
+            },
+          ],
+        });
+        break;
+    }
+  }
+  return out;
 }
 
 /**
@@ -46,10 +128,14 @@ function textOf(msg: UIMessage): string {
  * generator over the apiserver's `sendmessage` subresource — see
  * `src/lib/sse.ts` for the wire event vocabulary), rather than the Vercel AI
  * SDK's `useChat`/`DefaultChatTransport` that cloud-portal's old
- * `use-chat-logic.ts` used. Structurally this is the same hook — chat
- * history (localStorage, scoped per project), a Tiptap editor, speech input
- * — just re-plumbed onto our own SSE envelope instead of the AI SDK's
- * data-stream protocol.
+ * `use-chat-logic.ts` used.
+ *
+ * Chat history is server-backed: the apiserver's Conversation list is the
+ * single source of truth (fetched through the host's shared react-query
+ * client), transcripts are fetched when a chat is opened, and archive/delete
+ * go straight to the server with optimistic list updates. The chat id is the
+ * Conversation's resource name — a fresh client-generated one for a new chat,
+ * which the server creates on the first `sendmessage`.
  *
  * Tool-activity modeling: `tool_start`/`tool_finish` events become
  * `DynamicToolUIPart`s (`type: 'dynamic-tool'`) rather than the strongly-typed
@@ -69,26 +155,8 @@ export interface AssistantWorkspaceHostContext {
 }
 
 export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
+  const { pluginFetch, projectName } = ctx;
   const bottomRef = useRef<HTMLDivElement>(null);
-
-  // ── Chat history (localStorage, scoped per project) ─────────────────────
-  const [currentChatId, setCurrentChatId] = useState<string>(() => newId());
-  const currentChatIdRef = useRef(currentChatId);
-  currentChatIdRef.current = currentChatId;
-
-  const chatCreatedAtRef = useRef(Date.now());
-  const [chatList, setChatList] = useState<StoredChat[]>([]);
-
-  const projectNameRef = useRef(ctx.projectName);
-  projectNameRef.current = ctx.projectName;
-
-  useEffect(() => {
-    setChatList(ctx.projectName ? listChats(ctx.projectName) : []);
-  }, [ctx.projectName]);
-
-  const refreshChatList = useCallback(() => {
-    if (projectNameRef.current) setChatList(listChats(projectNameRef.current));
-  }, []);
 
   // ── Messages / status ─────────────────────────────────────────────────────
   const [messages, setMessages] = useState<UIMessage[]>([]);
@@ -109,21 +177,82 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
   // Tiptap HTML per user message, by position in the user-message array.
   const htmlByUserMsgIndex = useRef<string[]>([]);
 
-  const persist = useCallback((finalMessages: UIMessage[]) => {
-    const projectName = projectNameRef.current;
-    if (!projectName) return;
-    const toSave = finalMessages.filter((m) => m.role !== 'system');
-    if (toSave.length === 0) return;
-    saveChat(projectName, {
-      id: currentChatIdRef.current,
-      title: deriveTitle(toSave),
-      messages: toSave,
-      userHtml: [...htmlByUserMsgIndex.current],
-      createdAt: chatCreatedAtRef.current,
-      updatedAt: Date.now(),
-    });
-    refreshChatList();
-  }, [refreshChatList]);
+  const [currentChatId, setCurrentChatId] = useState<string>(() => newId());
+  const currentChatIdRef = useRef(currentChatId);
+
+  /**
+   * Bumped on every chat switch (new chat / open chat). An in-flight turn or
+   * transcript load captures it and drops its state updates once it no
+   * longer matches, so a stale stream or slow fetch can't write into the
+   * chat the user has since moved to.
+   */
+  const sessionRef = useRef(0);
+
+  /** Set when opening a chat's transcript failed, so Retry reloads it. */
+  const failedLoadChatIdRef = useRef<string | null>(null);
+
+  // ── Chat history (server-backed) ──────────────────────────────────────────
+  const queryClient = useQueryClient();
+  const conversationsKey = useMemo(
+    () => ['assistant.miloapis.com', 'conversations', projectName] as const,
+    [projectName]
+  );
+
+  const conversationsQuery = useQuery({
+    queryKey: conversationsKey,
+    enabled: !!projectName,
+    queryFn: async (): Promise<ChatSummary[]> => {
+      // The server lists active and archived conversations as disjoint sets;
+      // the history panel wants both and filters on `archived` itself.
+      const [active, archived] = await Promise.all([
+        listConversations(pluginFetch, projectName),
+        listConversations(pluginFetch, projectName, { archived: true }),
+      ]);
+      const byId = new Map<string, ChatSummary>();
+      for (const c of [...active, ...archived]) {
+        const summary = toChatSummary(c);
+        if (!byId.has(summary.id)) byId.set(summary.id, summary);
+      }
+      return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    },
+  });
+  const chatList = useMemo(() => conversationsQuery.data ?? [], [conversationsQuery.data]);
+
+  useEffect(() => {
+    if (conversationsQuery.error) {
+      setError(toError(conversationsQuery.error, 'Could not load chat history.'));
+    }
+  }, [conversationsQuery.error]);
+
+  const refreshChatList = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: conversationsKey });
+  }, [queryClient, conversationsKey]);
+
+  /**
+   * Applies `update` to the cached list immediately, runs `action` against
+   * the server, and restores the pre-update list (surfacing the error) if it
+   * fails. Either way the list is refetched afterwards to reconcile.
+   */
+  const mutateChatList = useCallback(
+    async (
+      update: (list: ChatSummary[]) => ChatSummary[],
+      action: () => Promise<unknown>,
+      failureMessage: string
+    ) => {
+      await queryClient.cancelQueries({ queryKey: conversationsKey });
+      const previous = queryClient.getQueryData<ChatSummary[]>(conversationsKey);
+      queryClient.setQueryData<ChatSummary[]>(conversationsKey, (list) => update(list ?? []));
+      try {
+        await action();
+      } catch (err) {
+        queryClient.setQueryData(conversationsKey, previous);
+        setError(toError(err, failureMessage));
+      } finally {
+        refreshChatList();
+      }
+    },
+    [queryClient, conversationsKey, refreshChatList]
+  );
 
   /**
    * Runs one turn: appends a user + in-flight assistant message, then drives
@@ -135,12 +264,15 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
    */
   const runTurn = useCallback(
     async (text: string, opts?: { html?: string; baseMessages?: UIMessage[] }) => {
-      if (statusRef.current === 'streaming') return;
+      if (statusRef.current === 'streaming' || statusRef.current === 'submitted') return;
       const trimmed = text.trim();
       if (!trimmed) return;
 
+      const session = sessionRef.current;
+      const isCurrent = () => session === sessionRef.current;
+
       setError(undefined);
-      htmlByUserMsgIndex.current.push(opts?.html ?? `<p>${escapeHtml(trimmed)}</p>`);
+      htmlByUserMsgIndex.current.push(opts?.html ?? plainTextToHtml(trimmed));
 
       const priorMessages = opts?.baseMessages ?? messagesRef.current;
       const userMsg: UIMessage = {
@@ -156,21 +288,18 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
       const controller = new AbortController();
       abortRef.current = controller;
 
-      // Mirrors the assistant message's `parts` locally so persistence at
-      // the end of the turn doesn't have to read it back out of React state.
-      let currentParts: Parts = [];
       let lastToolCallId: string | undefined;
 
       const applyParts = (mutate: (parts: Parts) => Parts) => {
-        currentParts = mutate(currentParts);
-        const parts = currentParts;
-        setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, parts } : m)));
+        if (!isCurrent()) return;
+        setMessages((prev) =>
+          prev.map((m) => (m.id === assistantId ? { ...m, parts: mutate(m.parts) } : m))
+        );
       };
 
       try {
         for await (const event of sendMessage(
-          ctx.pluginFetch,
-          ctx.projectName,
+          projectName,
           currentChatIdRef.current,
           { text: trimmed },
           controller.signal
@@ -257,6 +386,7 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
                 }
                 return next;
               });
+              if (!isCurrent()) break;
               if (event.state === 'failed') {
                 setError(new Error(event.error || 'The request failed.'));
                 setStatus('error');
@@ -268,18 +398,22 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
           }
         }
       } catch (err) {
-        if (controller.signal.aborted) {
-          setStatus('ready');
-        } else {
-          setError(err instanceof Error ? err : new Error('The request failed.'));
-          setStatus('error');
+        if (isCurrent()) {
+          if (controller.signal.aborted) {
+            setStatus('ready');
+          } else {
+            setError(toError(err, 'The request failed.'));
+            setStatus('error');
+          }
         }
       } finally {
-        abortRef.current = null;
-        persist([...priorMessages, userMsg, { id: assistantId, role: 'assistant', parts: currentParts }]);
+        if (abortRef.current === controller) abortRef.current = null;
+        // Even if the user has moved on, the turn may have created the
+        // conversation, renamed it, or unarchived it — pick that up.
+        refreshChatList();
       }
     },
-    [ctx, persist]
+    [pluginFetch, projectName, refreshChatList]
   );
 
   const stop = useCallback(() => {
@@ -287,46 +421,104 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
   }, []);
 
   // ── Chat switching ────────────────────────────────────────────────────────
-  const startNewChat = useCallback(() => {
-    setCurrentChatId(newId());
-    chatCreatedAtRef.current = Date.now();
+  /** Cancels whatever the current chat is doing and points the hook at `chatId`. */
+  const switchTo = useCallback((chatId: string) => {
+    sessionRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    failedLoadChatIdRef.current = null;
+    currentChatIdRef.current = chatId;
+    setCurrentChatId(chatId);
     htmlByUserMsgIndex.current = [];
     setMessages([]);
     setError(undefined);
-    setStatus('ready');
   }, []);
 
-  const loadChat = useCallback((chat: StoredChat) => {
-    setCurrentChatId(chat.id);
-    chatCreatedAtRef.current = chat.createdAt;
-    htmlByUserMsgIndex.current = chat.userHtml
-      ? chat.userHtml.map(sanitizeUserHtml)
-      : chat.messages.filter((m) => m.role === 'user').map((m) => sanitizeUserHtml(textOf(m)));
-    setMessages(chat.messages);
-    setError(undefined);
+  const startNewChat = useCallback(() => {
+    switchTo(newId());
     setStatus('ready');
-    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'instant' }), 50);
-  }, []);
+  }, [switchTo]);
+
+  const loadChat = useCallback(
+    async (chatId: string) => {
+      switchTo(chatId);
+      const session = sessionRef.current;
+      setStatus('submitted');
+      try {
+        const loaded = toUIMessages(await getConversationMessages(pluginFetch, projectName, chatId));
+        if (session !== sessionRef.current) return;
+        htmlByUserMsgIndex.current = loaded
+          .filter((m) => m.role === 'user')
+          .map((m) => plainTextToHtml(textOf(m)));
+        setMessages(loaded);
+        setStatus('ready');
+        setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'instant' }), 50);
+      } catch (err) {
+        if (session !== sessionRef.current) return;
+        failedLoadChatIdRef.current = chatId;
+        setError(toError(err, 'Could not load this conversation.'));
+        setStatus('error');
+      }
+    },
+    [pluginFetch, projectName, switchTo]
+  );
 
   const onLoadChat = useCallback(
     (chat: ChatSummary) => {
-      const full = chatList.find((c) => c.id === chat.id);
-      if (full) loadChat(full);
+      // Re-opening the chat that's mid-reply would abort the reply; ignore it.
+      if (chat.id === currentChatIdRef.current && statusRef.current === 'streaming') return;
+      void loadChat(chat.id);
     },
-    [chatList, loadChat]
+    [loadChat]
+  );
+
+  const setArchived = useCallback(
+    (e: ReactMouseEvent, chatId: string, archived: boolean) => {
+      e.stopPropagation();
+      if (!projectName) return;
+      if (archived && chatId === currentChatIdRef.current) startNewChat();
+      void mutateChatList(
+        (list) => list.map((c) => (c.id === chatId ? { ...c, archived } : c)),
+        () => setConversationArchived(pluginFetch, projectName, chatId, archived),
+        archived ? 'Could not archive this chat.' : 'Could not restore this chat.'
+      );
+    },
+    [pluginFetch, projectName, startNewChat, mutateChatList]
+  );
+
+  const onArchiveChat = useCallback(
+    (e: ReactMouseEvent, chatId: string) => setArchived(e, chatId, true),
+    [setArchived]
+  );
+
+  const onUnarchiveChat = useCallback(
+    (e: ReactMouseEvent, chatId: string) => setArchived(e, chatId, false),
+    [setArchived]
   );
 
   const onDeleteChat = useCallback(
     (e: ReactMouseEvent, chatId: string) => {
       e.stopPropagation();
-      const projectName = projectNameRef.current;
       if (!projectName) return;
-      deleteChat(projectName, chatId);
-      setChatList(listChats(projectName));
       if (chatId === currentChatIdRef.current) startNewChat();
+      void mutateChatList(
+        (list) => list.filter((c) => c.id !== chatId),
+        () => deleteConversation(pluginFetch, projectName, chatId),
+        'Could not delete this chat.'
+      );
     },
-    [startNewChat]
+    [pluginFetch, projectName, startNewChat, mutateChatList]
   );
+
+  // Chat ids are project-scoped conversation names; a project switch starts over.
+  const isFirstProjectRef = useRef(true);
+  useEffect(() => {
+    if (isFirstProjectRef.current) {
+      isFirstProjectRef.current = false;
+      return;
+    }
+    startNewChat();
+  }, [projectName, startNewChat]);
 
   // ── Editor ────────────────────────────────────────────────────────────────
   // `runTurn`/`isReady` are read through refs inside `handleKeyDown` so the
@@ -366,7 +558,7 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
           event.preventDefault();
           const text = view.state.doc.textContent.trim();
           if (text && isReadyRef.current) {
-            const html = editor?.getHTML() ?? `<p>${escapeHtml(text)}</p>`;
+            const html = editor?.getHTML() ?? plainTextToHtml(text);
             void runTurnRef.current(text, { html });
             const { state } = view;
             view.dispatch(
@@ -396,12 +588,19 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
   const onSuggestion = useCallback(
     (suggestion: string) => {
       if (!isReadyRef.current) return;
-      void runTurn(suggestion, { html: `<p>${escapeHtml(suggestion)}</p>` });
+      void runTurn(suggestion, { html: plainTextToHtml(suggestion) });
     },
     [runTurn]
   );
 
   const onRetry = useCallback(() => {
+    // A failed transcript load retries the load, not a turn.
+    const failedLoad = failedLoadChatIdRef.current;
+    if (failedLoad && failedLoad === currentChatIdRef.current) {
+      void loadChat(failedLoad);
+      return;
+    }
+
     const msgs = messagesRef.current;
     const lastUserIdx = msgs.map((m) => m.role).lastIndexOf('user');
     if (lastUserIdx === -1) return;
@@ -414,7 +613,7 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
     htmlByUserMsgIndex.current = retainedHtml;
     setError(undefined);
     void runTurn(text, { baseMessages: truncated });
-  }, [runTurn]);
+  }, [loadChat, runTurn]);
 
   // ── Auto-scroll (mirrors old assistant-workspace's MutationObserver) ─────
   const userScrolledUpRef = useRef(false);
@@ -438,9 +637,11 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const title = useMemo(() => {
-    const currentChat = chatList.find((c) => c.id === currentChatId);
-    if (currentChat) return currentChat.title;
-    return messages.length > 0 ? deriveTitle(messages) : 'New chat';
+    const serverTitle = chatList.find((c) => c.id === currentChatId)?.title;
+    // A brand-new conversation isn't listed (or titled) until the server has
+    // it, so fall back to the first user message meanwhile.
+    if (serverTitle && serverTitle !== NEW_CHAT_TITLE) return serverTitle;
+    return messages.length > 0 ? deriveTitle(messages) : NEW_CHAT_TITLE;
   }, [chatList, currentChatId, messages]);
 
   return {
@@ -461,6 +662,8 @@ export function useAssistantWorkspace(ctx: AssistantWorkspaceHostContext) {
     onRetry,
     onNewChat: startNewChat,
     onLoadChat,
+    onArchiveChat,
+    onUnarchiveChat,
     onDeleteChat,
     onSuggestion,
     modelId: INERT_MODEL_ID,

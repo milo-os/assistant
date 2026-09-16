@@ -24,9 +24,12 @@
 //	patch chat -c --project <p>
 //	patch resume [<context-id>] --project <p> [--last] [--kubeconfig <k>]
 //	patch compact --project <p> --context-id <c> [--json]
-//	patch conversations list --project <p> [--json]
+//	patch conversations list --project <p> [--archived] [--json]
 //	patch conversations show <context-id> --project <p> [--json]
 //	patch conversations rename <context-id> <name> --project <p> [--json]
+//	patch conversations archive <context-id> --project <p> [--json]
+//	patch conversations unarchive <context-id> --project <p> [--json]
+//	patch conversations delete <context-id> --project <p> [--yes] [--json]
 //	patch gaps list --project <p> [--json]
 //	patch gaps reports --project <p> [--json]
 //	patch task get <id> [--json]
@@ -67,6 +70,9 @@ type command struct {
 
 	// conversations rename
 	name string
+	// conversations list --archived, and delete --yes
+	archived bool
+	yes      bool
 
 	// conversations (kubectl against the aggregated apiserver)
 	kubeconfig string
@@ -163,8 +169,10 @@ func parseArgs(argv []string) command {
 		if len(rest) > 1 {
 			id = rest[1]
 		}
-		if sub != "list" && sub != "show" && sub != "rename" {
-			return command{kind: kindError, errMsg: `conversations: expected "list", "show" or "rename", got "` + sub + `"`}
+		switch sub {
+		case "list", "show", "rename", "archive", "unarchive", "delete":
+		default:
+			return command{kind: kindError, errMsg: `conversations: expected "list", "show", "rename", "archive", "unarchive" or "delete", got "` + sub + `"`}
 		}
 		if flags.project == "" {
 			return command{kind: kindError, errMsg: "conversations " + sub + ": --project <name> is required"}
@@ -173,6 +181,7 @@ func parseArgs(argv []string) command {
 		common.kubeconfig = flags.kubeconfig
 		if sub == "list" {
 			common.kind = KindConvList
+			common.archived = flags.archived
 			return common
 		}
 		if id == "" {
@@ -188,6 +197,19 @@ func parseArgs(argv []string) command {
 			common.kind = KindConvRename
 			common.contextID = id
 			common.name = name
+			return common
+		}
+		common.contextID = id
+		switch sub {
+		case "archive":
+			common.kind = KindConvArchive
+			return common
+		case "unarchive":
+			common.kind = KindConvUnarchive
+			return common
+		case "delete":
+			common.kind = KindConvDelete
+			common.yes = flags.yes
 			return common
 		}
 		common.kind = KindConvShow
@@ -255,6 +277,8 @@ type flags struct {
 	tui          bool
 	continueLast bool
 	last         bool
+	archived     bool
+	yes          bool
 	url          string
 	token        string
 	project      string
@@ -283,6 +307,10 @@ func extractFlags(argv []string) (flags, string) {
 			f.continueLast = true
 		case arg == "--last":
 			f.last = true
+		case arg == "--archived":
+			f.archived = true
+		case arg == "--yes" || arg == "-y":
+			f.yes = true
 		case arg == "--url" || strings.HasPrefix(arg, "--url="):
 			val, consumed, ok := valueFor(arg, argv, i)
 			if !ok {
@@ -364,9 +392,12 @@ Usage:
   patch chat -c --project <name>
   patch resume [<context-id>] --project <name> [--last]
   patch compact --project <name> --context-id <c> [--json]
-  patch conversations list --project <name> [--json]
+  patch conversations list --project <name> [--archived] [--json]
   patch conversations show <context-id> --project <name> [--json]
   patch conversations rename <context-id> "<name>" --project <name> [--json]
+  patch conversations archive <context-id> --project <name> [--json]
+  patch conversations unarchive <context-id> --project <name> [--json]
+  patch conversations delete <context-id> --project <name> [--yes] [--json]
   patch gaps list --project <name> [--json]
   patch gaps reports --project <name> [--json]
   patch task get <id> [--json]
@@ -384,6 +415,9 @@ Options:
                       without the picker (chat; 'resume --last' is the same
                       thing)
       --last          Same as --continue, for 'resume'
+      --archived      List archived conversations instead ('conversations list')
+  -y, --yes           Delete without asking first ('conversations delete');
+                      required when stdin is not a terminal
   -i, --interactive   Multi-turn chat session; the conversation id is kept
                       across turns (Ctrl-D or /quit to leave)
       --tui           Full-screen Bubble Tea chat UI: scrollable transcript
@@ -413,6 +447,8 @@ Options:
                       fresh one), /compact (force history compaction now,
                       instead of waiting for the automatic threshold),
                       /rename <name> (name this conversation),
+                      /archive (archive this conversation — find it again
+                      with /resume, Show: Archived),
                       /export (save the transcript to a file),
                       /status (show project/conversation/turn count), /help
                       (list commands), /quit or /exit (leave; Ctrl-D on an
@@ -449,7 +485,10 @@ Resume:
   skips the picker straight into the most recently active conversation, and
   says so instead when the project has none. Needs PATCH_URL/
   PATCH_TOKEN (to chat) and KUBECONFIG (to list and load, like
-  'conversations'); the chat --tui has the same picker as /resume.
+  'conversations'); the chat --tui has the same picker as /resume. In the
+  picker ctrl+a archives the highlighted conversation (unarchives it, when
+  showing archived ones) and ctrl+d deletes it after a y/n confirmation; tab
+  to the Show option and ←/→ to switch between active and archived.
 
 Compact:
   'compact' forces the assistant to summarize an existing conversation's older
@@ -473,10 +512,16 @@ Conversations:
   conversations aggregated apiserver (assistant.miloapis.com) via kubectl —
   a read view under platform authz, separate from the chat transport. Pick a
   context id here, then resume it with 'patch chat --context-id <id>'.
-  'rename' is the exception: naming a conversation is a write, so it calls the
-  assistant service (PATCH_URL/PATCH_TOKEN) rather than the read view. A name
-  is at most 80 characters and shows in place of the derived title wherever
-  conversations are listed.
+  'archive' hides a conversation from 'list', the resume picker and
+  --continue without deleting it: 'list --archived' shows it, it stays
+  resumable by id, 'unarchive' brings it back, and sending it another message
+  unarchives it too. 'delete' removes a conversation and its transcript for
+  good; it asks first, and needs --yes when stdin is not a terminal. All three
+  write through the same apiserver view (and identity) as 'list'.
+  'rename' is the exception: it calls the assistant service
+  (PATCH_URL/PATCH_TOKEN) rather than the apiserver. A name is at most 80
+  characters and shows in place of the derived title wherever conversations
+  are listed.
 
 Gaps:
   'gaps' lists capability-gap reports: records a provider service's own team
@@ -497,6 +542,9 @@ Examples:
   patch card --project demo-project
   patch conversations list --project demo-project
   patch conversations show 019f7293-3579-7d8e-8233-4da8bc900405 --project demo-project
+  patch conversations archive 019f7293-3579-7d8e-8233-4da8bc900405 --project demo-project
+  patch conversations list --archived --project demo-project
+  patch conversations delete 019f7293-3579-7d8e-8233-4da8bc900405 --project demo-project
   patch gaps list --project streamco-platform
   patch gaps reports --project streamco-platform
 `

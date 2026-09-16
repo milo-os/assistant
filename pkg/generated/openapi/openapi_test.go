@@ -35,6 +35,7 @@ func TestGeneratedDefinitionsCoverEveryServedType(t *testing.T) {
 	served := []any{
 		v1alpha1.Conversation{},
 		v1alpha1.ConversationList{},
+		v1alpha1.ConversationSpec{},
 		v1alpha1.ConversationStatus{},
 		v1alpha1.ConversationMessage{},
 		v1alpha1.ConversationMessages{},

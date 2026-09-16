@@ -80,6 +80,20 @@ var schema = []string{
 	// migrate-on-open, idempotent posture as the rest of this list. Nullable:
 	// NULL is "never named", which is not the same as named the empty string.
 	`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS name text`,
+	// When the conversation was archived (see [Archiver]); NULL is "not
+	// archived". A timestamp rather than a boolean because the API reports
+	// when, and a nullable column needs no backfill for rows that predate it.
+	`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS archived_at timestamptz`,
+	// The default listing (archived_at IS NULL) is served by
+	// conversations_by_project_activity above: it walks the project's rows
+	// newest first and skips archived ones, which stay a small minority, so
+	// the LIMIT is reached after touching barely more rows than it returns.
+	// The archived listing is the opposite shape — a few rows buried among
+	// many active ones — and would otherwise walk the whole project to find
+	// them. This partial index holds only archived rows, so it costs nothing
+	// for the conversations that are never archived.
+	`CREATE INDEX IF NOT EXISTS conversations_archived_by_project_activity
+		ON conversations (project_name, last_active_at DESC) WHERE archived_at IS NOT NULL`,
 }
 
 // Conversation is the stored metadata of one conversation, for per-project
@@ -99,13 +113,28 @@ type Conversation struct {
 	// it so a rename never destroys the derived label underneath — clients
 	// show the name when set and fall back to the title.
 	Name string
+	// ArchivedAt is when the conversation was archived (see [Archiver]); the
+	// zero time means it is not archived.
+	ArchivedAt time.Time
+}
+
+// ListOptions narrows a [Lister.ListConversations] call.
+type ListOptions struct {
+	// Limit caps the rows returned; <= 0 uses the store's default (100).
+	Limit int
+	// Archived selects which side of the archive to list: false (the zero
+	// value, and so the default) lists only conversations that are not
+	// archived, true only those that are. There is deliberately no "both":
+	// every consumer is a list a person scans, and an archive that still
+	// shows up in the everyday list has not hidden anything.
+	Archived bool
 }
 
 // Lister lists a project's conversations. It is a separate interface from
 // [Store] because the agent loop never needs it — it exists for consumers
 // (a conversation-list API) and for operational inspection.
 type Lister interface {
-	ListConversations(ctx context.Context, projectName string, limit int) ([]Conversation, error)
+	ListConversations(ctx context.Context, projectName string, opts ListOptions) ([]Conversation, error)
 }
 
 // firstUserMessageSQL is the correlated subquery both conversation reads use
@@ -135,6 +164,7 @@ var (
 	_ Lister  = (*PostgresStore)(nil)
 	_ Reader  = (*PostgresStore)(nil)
 	_ Renamer = (*PostgresStore)(nil)
+	_ Editor  = (*PostgresStore)(nil)
 )
 
 // NewPostgresStore connects to databaseURL (a postgres:// URL), verifies the
@@ -259,11 +289,12 @@ func (s *PostgresStore) GetConversation(ctx context.Context, projectName, contex
 	defer cancel()
 	var c Conversation
 	var opening string
+	var archivedAt *time.Time
 	err := s.pool.QueryRow(ctx,
 		`SELECT c.project_name, c.context_id, c.created_at, c.last_active_at, c.turn_count,
-		        `+firstUserMessageSQL+`, COALESCE(c.name, '')
+		        `+firstUserMessageSQL+`, COALESCE(c.name, ''), c.archived_at
 		 FROM conversations c WHERE c.project_name = $1 AND c.context_id = $2`,
-		projectName, contextID).Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening, &c.Name)
+		projectName, contextID).Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening, &c.Name, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Conversation{}, ErrConversationNotFound
 	}
@@ -271,6 +302,9 @@ func (s *PostgresStore) GetConversation(ctx context.Context, projectName, contex
 		return Conversation{}, fmt.Errorf("conversation store: get conversation: %w", err)
 	}
 	c.Title = TitleOf(opening)
+	if archivedAt != nil {
+		c.ArchivedAt = *archivedAt
+	}
 	return c, nil
 }
 
@@ -359,6 +393,8 @@ func (s *PostgresStore) Messages(ctx context.Context, projectName, contextID str
 // on the conversation row and never collide. Over-long turn text is truncated
 // to MaxStoredContentLen and the conversation is pruned to maxTurns, both in
 // the same transaction, so a single conversation cannot grow without bound.
+// The upsert also clears archived_at: a new turn in an archived conversation
+// is the user taking it back out of the archive (see [Archiver]).
 func (s *PostgresStore) Append(ctx context.Context, projectName, contextID string, turn Turn) error {
 	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
 	defer cancel()
@@ -374,7 +410,7 @@ func (s *PostgresStore) Append(ctx context.Context, projectName, contextID strin
 		`INSERT INTO conversations (project_name, context_id, turn_count)
 		 VALUES ($1, $2, 1)
 		 ON CONFLICT (project_name, context_id) DO UPDATE
-		   SET turn_count = conversations.turn_count + 1, last_active_at = now()
+		   SET turn_count = conversations.turn_count + 1, last_active_at = now(), archived_at = NULL
 		 RETURNING turn_count`,
 		projectName, contextID).Scan(&turnNo)
 	if err != nil {
@@ -416,7 +452,8 @@ func (s *PostgresStore) Append(ctx context.Context, projectName, contextID strin
 // them are gone, so this renumbers from scratch rather than trying to splice
 // into the existing sequence — the conversation's turn_count is reset to
 // match (1 + len(keep)) in the same transaction so later Appends continue the
-// new, shorter sequence correctly.
+// new, shorter sequence correctly. archived_at is untouched: unlike a turn,
+// compaction is not the user asking for the conversation back.
 func (s *PostgresStore) Compact(ctx context.Context, projectName, contextID string, summary Turn, keep []Turn) error {
 	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
 	defer cancel()
@@ -501,18 +538,66 @@ func (s *PostgresStore) Rename(ctx context.Context, projectName, contextID, name
 	return nil
 }
 
-// ListConversations implements [Lister]: the project's conversations, newest
-// activity first. limit <= 0 uses 100.
-func (s *PostgresStore) ListConversations(ctx context.Context, projectName string, limit int) ([]Conversation, error) {
+// SetArchived implements [Archiver]: a single UPDATE of the conversation row,
+// with the same must-already-exist and leave-last_active_at-alone rules as
+// [PostgresStore.Rename]. COALESCE keeps an existing archive time, so
+// archiving twice reports the first time rather than the latest.
+func (s *PostgresStore) SetArchived(ctx context.Context, projectName, contextID string, archived bool) error {
 	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
 	defer cancel()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE conversations
+		 SET archived_at = CASE WHEN $3 THEN COALESCE(archived_at, now()) ELSE NULL END
+		 WHERE project_name = $1 AND context_id = $2`,
+		projectName, contextID, archived)
+	if err != nil {
+		return fmt.Errorf("conversation store: archive conversation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConversationNotFound
+	}
+	return nil
+}
+
+// Delete implements [Deleter]: one DELETE of the conversation row. The
+// messages go with it through the messages table's ON DELETE CASCADE foreign
+// key, in the same statement, so there is no window in which a transcript
+// survives its conversation.
+func (s *PostgresStore) Delete(ctx context.Context, projectName, contextID string) error {
+	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
+	defer cancel()
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM conversations WHERE project_name = $1 AND context_id = $2`,
+		projectName, contextID)
+	if err != nil {
+		return fmt.Errorf("conversation store: delete conversation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConversationNotFound
+	}
+	return nil
+}
+
+// ListConversations implements [Lister]: the project's conversations on the
+// archived side opts selects, newest activity first. A limit <= 0 uses 100.
+func (s *PostgresStore) ListConversations(ctx context.Context, projectName string, opts ListOptions) ([]Conversation, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
+	defer cancel()
+	limit := opts.Limit
 	if limit <= 0 {
 		limit = 100
 	}
+	// The two filters are spelled as literal predicates rather than one
+	// parameterized "($2 AND archived_at IS NOT NULL) OR ..." so the planner
+	// can match each against the index built for it (see schema).
+	archivedFilter := `c.archived_at IS NULL`
+	if opts.Archived {
+		archivedFilter = `c.archived_at IS NOT NULL`
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.project_name, c.context_id, c.created_at, c.last_active_at, c.turn_count,
-		        `+firstUserMessageSQL+`, COALESCE(c.name, '')
-		 FROM conversations c WHERE c.project_name = $1
+		        `+firstUserMessageSQL+`, COALESCE(c.name, ''), c.archived_at
+		 FROM conversations c WHERE c.project_name = $1 AND `+archivedFilter+`
 		 ORDER BY c.last_active_at DESC LIMIT $2`,
 		projectName, limit)
 	if err != nil {
@@ -524,10 +609,14 @@ func (s *PostgresStore) ListConversations(ctx context.Context, projectName strin
 	for rows.Next() {
 		var c Conversation
 		var opening string
-		if err := rows.Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening, &c.Name); err != nil {
+		var archivedAt *time.Time
+		if err := rows.Scan(&c.ProjectName, &c.ContextID, &c.CreatedAt, &c.LastActiveAt, &c.TurnCount, &opening, &c.Name, &archivedAt); err != nil {
 			return nil, fmt.Errorf("conversation store: scan conversation: %w", err)
 		}
 		c.Title = TitleOf(opening)
+		if archivedAt != nil {
+			c.ArchivedAt = *archivedAt
+		}
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {

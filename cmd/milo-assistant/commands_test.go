@@ -124,3 +124,79 @@ func TestServiceURLOfflineDoesNotBlameDiscovery(t *testing.T) {
 		}
 	}
 }
+
+// newConversationsTestCmd is newTestCmd for the conversations subcommands:
+// the read-view flags, plus whatever flags the subcommand itself defines.
+func newConversationsTestCmd(t *testing.T, define func(*cobra.Command), args ...string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "conversations"}
+	cmd.Flags().String("project", "", "")
+	cmd.Flags().String("kubeconfig", "", "")
+	cmd.Flags().String("output", "table", "")
+	if define != nil {
+		define(cmd)
+	}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	return cmd
+}
+
+// --archived must reach the invocation, or `list --archived` silently lists
+// the everyday conversations instead of the archive.
+func TestConversationsListCarriesArchived(t *testing.T) {
+	cmd := newConversationsTestCmd(t, func(c *cobra.Command) { c.Flags().Bool("archived", false, "") },
+		"--project", "demo-project", "--archived")
+	inv, err := listInvocation(cmd)
+	if err != nil {
+		t.Fatalf("listInvocation: %v", err)
+	}
+	if inv.Kind != patchcli.KindConvList || !inv.Archived || inv.Project != "demo-project" {
+		t.Errorf("inv = %+v, want an archived list in demo-project", inv)
+	}
+}
+
+func TestConversationsDeleteCarriesYes(t *testing.T) {
+	cmd := newConversationsTestCmd(t, func(c *cobra.Command) { c.Flags().BoolP("yes", "y", false, "") },
+		"--project", "demo-project", "-y", "--output", "json")
+	inv, err := deleteInvocation(cmd, []string{"ctx-1"})
+	if err != nil {
+		t.Fatalf("deleteInvocation: %v", err)
+	}
+	if inv.Kind != patchcli.KindConvDelete || !inv.Yes || inv.ContextID != "ctx-1" || !inv.JSON {
+		t.Errorf("inv = %+v, want a confirmed JSON delete of ctx-1", inv)
+	}
+}
+
+// Without a project there is nothing to archive in, and the error should say
+// how to set one rather than reaching the API with an empty namespace.
+func TestConversationsArchiveNeedsAProject(t *testing.T) {
+	cmd := newConversationsTestCmd(t, nil)
+	if _, err := conversationInvocation(cmd, patchcli.KindConvArchive, []string{"ctx-1"}); err == nil ||
+		!strings.Contains(err.Error(), "no project set") {
+		t.Fatalf("err = %v, want the missing-project guidance", err)
+	}
+}
+
+// The cobra tree is the plugin's whole surface: pin that the lifecycle
+// subcommands and their flags exist where the README says they do.
+func TestConversationsLifecycleCommandsAreWired(t *testing.T) {
+	conv := newConversationsCmd()
+	find := func(name string) *cobra.Command {
+		for _, c := range conv.Commands() {
+			if c.Name() == name {
+				return c
+			}
+		}
+		t.Fatalf("conversations has no %q subcommand", name)
+		return nil
+	}
+	find("archive")
+	find("unarchive")
+	if f := find("delete").Flags().Lookup("yes"); f == nil || f.Shorthand != "y" {
+		t.Errorf("delete --yes/-y flag = %+v", f)
+	}
+	if find("list").Flags().Lookup("archived") == nil {
+		t.Error("list has no --archived flag")
+	}
+}
