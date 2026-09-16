@@ -157,3 +157,65 @@ func TestIdentityProject(t *testing.T) {
 		})
 	}
 }
+
+// ScopeFromContext resolves the same namespace and identity as
+// ProjectFromContext but reports a mismatch instead of refusing it, so a verb
+// can decide for itself what a mismatch means (a list answers empty, every
+// per-object verb forbids).
+func TestScopeFromContext(t *testing.T) {
+	cases := []struct {
+		name string
+		ctx  context.Context
+		want Scope
+	}{
+		{
+			name: "namespace only (dev path)",
+			ctx:  request.WithNamespace(context.Background(), "demo"),
+			want: Scope{Namespace: "demo"},
+		},
+		{
+			name: "identity project matches namespace",
+			ctx:  withUser(request.WithNamespace(context.Background(), "demo"), "Project", "demo"),
+			want: Scope{Namespace: "demo", IdentityProject: "demo"},
+		},
+		{
+			name: "identity project differs from namespace",
+			ctx:  withUser(request.WithNamespace(context.Background(), "milo-system"), "Project", "project-a"),
+			want: Scope{Namespace: "milo-system", IdentityProject: "project-a", Mismatch: true},
+		},
+		{
+			name: "non-project parent imposes no constraint",
+			ctx:  withUser(request.WithNamespace(context.Background(), "demo"), "Organization", "acme"),
+			want: Scope{Namespace: "demo"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ScopeFromContext(tc.ctx)
+			if err != nil {
+				t.Fatalf("ScopeFromContext: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("Scope = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The namespace checks are shared with ProjectFromContext: a request without a
+// usable namespace is a 400 before any identity or mismatch question arises.
+func TestScopeFromContextBadNamespaceIsBadRequest(t *testing.T) {
+	cases := map[string]context.Context{
+		"missing":  context.Background(),
+		"empty":    request.WithNamespace(context.Background(), ""),
+		"NUL byte": request.WithNamespace(context.Background(), "demo-project\x00evil"),
+	}
+	for name, ctx := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ScopeFromContext(ctx)
+			if !apierrors.IsBadRequest(err) {
+				t.Fatalf("err = %v, want BadRequest", err)
+			}
+		})
+	}
+}

@@ -122,11 +122,26 @@ func (r *ConversationREST) Get(ctx context.Context, name string, _ *metav1.GetOp
 // selector spec.archived=true lists the archive instead (spec.archived=false
 // is the default spelled out). Limit is honored; label selectors and every
 // other field selector are not supported.
+//
+// A namespace that is not the caller's project lists empty rather than
+// Forbidden, unlike every per-object verb. Kubernetes' namespace controller,
+// tearing down a project control plane, lists each deletable resource in each
+// of its namespaces — milo-system, default, not only the project's own — with
+// an identity pinned to that project, and a 403 on any of them leaves the
+// namespace Terminating for good (milo-os/assistant#90). Conversations are
+// keyed by project, so a namespace that is not the caller's project holds no
+// rows for that caller by construction, and empty is the honest answer. It is
+// also the safe one: the store is consulted only when the namespace is the
+// caller's project, so no row from another project is ever returned.
 func (r *ConversationREST) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
-	project, err := tenant.ProjectFromContext(ctx, conversationsResource)
+	sc, err := tenant.ScopeFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
+	if sc.Mismatch {
+		return &assistant.ConversationList{Items: []assistant.Conversation{}}, nil
+	}
+	project := sc.Namespace
 	opts := history.ListOptions{}
 	if options != nil {
 		if options.Limit > 0 {
