@@ -48,6 +48,48 @@ type toolActivityData struct {
 	Summary   string `json:"summary,omitempty"`
 	OK        bool   `json:"ok"`
 	ElapsedMs int64  `json:"elapsedMs"`
+	// Resources are the resources the finished call named (see
+	// internal/agent's toolresources.go). They are identities only — kind,
+	// name, group — never any of the result's content, which stays inside the
+	// service. A client that lets the user point at a resource uses them to
+	// offer what the turn just found.
+	Resources []ResourceData `json:"resources,omitempty"`
+}
+
+// ResourceData is one resource on a tool-activity payload, in the same
+// kind/name/apiGroup shape a client sends a mention back in — a resource the
+// assistant found and one the user typed are interchangeable by the time they
+// reach the client.
+type ResourceData struct {
+	Kind     string `json:"kind"`
+	Name     string `json:"name"`
+	APIGroup string `json:"apiGroup,omitempty"`
+}
+
+// maxActivityResources caps how many resources ride one activity event. The
+// extractor has its own cap; this one is the wire's, so a future extractor
+// cannot grow the event without a deliberate change here.
+const maxActivityResources = 30
+
+// clampResources drops anything malformed and caps the list, on the same terms
+// [Mentions] clamps a client's mentions on the way in: these strings are
+// provider-derived, and a client renders them on a single line.
+func clampResources(in []ResourceData) []ResourceData {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ResourceData, 0, min(len(in), maxActivityResources))
+	for _, r := range in {
+		r.Kind, r.Name, r.APIGroup = clampMentionField(r.Kind), clampMentionField(r.Name), clampMentionField(r.APIGroup)
+		if r.Kind == "" || r.Name == "" {
+			continue
+		}
+		out = append(out, r)
+		if len(out) == maxActivityResources {
+			break
+		}
+	}
+	return out
 }
 
 // Argument-summary limits. A summary is a glance, not a record: a few keys,

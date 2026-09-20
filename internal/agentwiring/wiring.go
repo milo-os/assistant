@@ -418,11 +418,26 @@ func (t *toolActivityTracker) forward(ev agent.Event, sink assistanta2a.RunSink)
 	delete(t.started, key)
 	delete(t.names, key)
 	sink.OnToolFinish(assistanta2a.ToolActivity{
-		ID:      ev.ToolCallID,
-		Name:    name,
-		OK:      !ev.ToolFailed,
-		Elapsed: elapsed,
+		ID:        ev.ToolCallID,
+		Name:      name,
+		OK:        !ev.ToolFailed,
+		Elapsed:   elapsed,
+		Resources: activityResources(ev.ToolResources),
 	})
+}
+
+// activityResources converts the run loop's extracted resources into the a2a
+// layer's wire shape, the same one-way translation toMentions does in the other
+// direction — internal/a2a knows nothing of internal/agent.
+func activityResources(refs []agent.ResourceRef) []assistanta2a.ResourceData {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]assistanta2a.ResourceData, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, assistanta2a.ResourceData{Kind: r.Kind, Name: r.Name, APIGroup: r.APIGroup})
+	}
+	return out
 }
 
 // Compact implements [assistanta2a.Compactor] over the same [agent.Conversation]

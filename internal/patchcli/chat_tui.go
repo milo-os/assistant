@@ -532,6 +532,9 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.applyActivity(msg.act)
+		// What the call came back with is what the next message is likely to
+		// be about, and the user has no other way to have pointed at it.
+		m.noteFound(msg.act.Resources)
 		m.rebuildViewport()
 		return m, nil
 
@@ -702,6 +705,11 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.raw = m.raw[:0]
 		m.answer.Reset()
 		m.activity, m.turnActivity = nil, nil
+		// The picker's shortcut rows belong to the conversation, not the
+		// process: resuming one re-reads what its turns referenced, oldest
+		// first, so noteMentions ends up with the same most-recent-first list
+		// it would have had if the session had never been interrupted.
+		m.mentions.recent = nil
 		for _, mm := range msg.items {
 			switch mm.Role {
 			case "user":
@@ -720,6 +728,9 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.turns = append(m.turns, m.turnBlock(m.st.patch.Render("Patch"), m.renderMarkdown(mm.Content)))
 			}
 			m.raw = append(m.raw, transcriptTurn{role: mm.Role, content: mm.Content})
+			if mm.Role == "user" {
+				m.noteMentions(resolveMentionGroups(parseMentions(mm.Content), m.mentions.kinds))
+			}
 		}
 		// Session state, not conversation content: it closes the loaded
 		// transcript in the viewport but stays out of m.raw, so /export and the
@@ -834,6 +845,7 @@ func (m *chatModel) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.convName = ""
 			m.turns = nil
 			m.raw = nil
+			m.mentions.recent = nil
 			m.answer.Reset()
 			m.activity, m.turnActivity = nil, nil
 			m.follow = true
@@ -1180,6 +1192,7 @@ var composerHelpText = []struct{ keys, desc string }{
 	{"", "…move the cursor once it has several lines or you have edited it"},
 	{"", "…scroll the transcript when there is no history left to recall"},
 	{"@", "mention a project resource — @workload/api-backend (tab/enter inserts, esc closes)"},
+	{"", "…offers what this conversation already referenced first, then every kind"},
 	{"ctrl+r", "search past prompts (enter accepts, esc cancels)"},
 	{"paste", "over 3 lines or 800 characters collapses to a chip, expanded on send"},
 	{"pgup/pgdn, mouse wheel", "scroll the transcript · esc jumps back to the latest when idle"},
@@ -1781,7 +1794,11 @@ func (m *chatModel) submit(text string) tea.Cmd {
 	// this turn without tearing down the session's.
 	ctx, cancel := context.WithCancel(m.baseContext())
 	m.cancelTurn = cancel
-	go m.stream(ctx, m.turnGen, text, m.contextID, m.mentionsIn(text))
+	mentions := m.mentionsIn(text)
+	// What this turn pointed at is what the next turns are most likely about,
+	// so the "@" picker offers it back (see mentionState.recent).
+	m.noteMentions(mentions)
+	go m.stream(ctx, m.turnGen, text, m.contextID, mentions)
 	return m.sp.Tick
 }
 
@@ -2161,8 +2178,8 @@ func (m *chatModel) suggestionRows() int {
 		}
 		return n
 	}
-	if n := len(m.mentionRows()); n > 0 {
-		return min(n, maxMentionRows)
+	if rows := m.mentionRows(); len(rows) > 0 {
+		return mentionBarHeight(rows) + mentionGapRows
 	}
 	return 1
 }
