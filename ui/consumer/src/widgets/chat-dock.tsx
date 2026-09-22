@@ -1,8 +1,8 @@
 import { AssistantWorkspace } from '@datum-cloud/datum-ui/assistant';
 import { usePluginFetch, useProjectContext } from '@datum-cloud/portal-plugin-sdk';
+import { useAssistantWorkspace } from '@datum-cloud/assistant-chat-kit';
 
 import { ASSISTANT_CONFIG } from '../lib/assistant-config';
-import { useAssistantWorkspace } from '../hooks/use-assistant-workspace';
 
 /**
  * `ChatDock` — the module exposed as `assistant.miloapis.com/ChatDock`,
@@ -16,9 +16,11 @@ import { useAssistantWorkspace } from '../hooks/use-assistant-workspace';
  * `AssistantWorkspace` — the same presentational shell cloud-portal's real
  * "Patch" assistant uses (left history rail, "Hey there" empty state,
  * suggestion chips, rich Tiptap composer) — fed entirely by
- * `useAssistantWorkspace`, which translates this plugin's own SSE envelope
- * (`src/lib/sse.ts` via `src/lib/api.ts`'s `sendMessage`) into the
- * `UIMessage[]` shape the workspace expects.
+ * `@datum-cloud/assistant-chat-kit`'s `useAssistantWorkspace`, which
+ * translates the assistant's SSE envelope into the `UIMessage[]` shape the
+ * workspace expects. That package holds the conversation logic so other
+ * plugins (e.g. interconnect's own assistant page) can reuse it too — this
+ * component only supplies the host wiring and renders the shared UI.
  *
  * `AssistantWorkspace` fills its container and has no opinion about
  * open/closed state. Nor does this component: cloud-portal's
