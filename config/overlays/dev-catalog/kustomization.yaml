@@ -37,5 +37,9 @@ patches:
             containers:
               - name: assistant
                 env:
+                  # Explicit rather than inferred — the inference shim is
+                  # scheduled for removal in one release.
+                  - name: CAPABILITY_SOURCE
+                    value: http
                   - name: CAPABILITY_PROVIDER_URL
                     value: http://capability-provider.agent-framework-playground.svc.cluster.local:8080

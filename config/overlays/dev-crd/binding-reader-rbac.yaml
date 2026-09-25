@@ -1,0 +1,64 @@
+# Dev-only read grant for the assistant on CapabilityBinding objects.
+#
+# There is deliberately no such grant in config/base/rbac.yaml: in production
+# these objects live in project control planes, not in the cluster the assistant
+# runs in, so a grant there would authorize reads of objects that do not exist.
+# The production grant is a ClusterRole applied to MILO ROOT
+# (config/milo/rbac/control-plane-auth-delegator.yaml), bound to the assistant's
+# client-certificate identity. In kind there is no Milo, no project router and no
+# virtual control plane, so the workload cluster's own authorizer is what stands
+# between the assistant's ServiceAccount and these objects, and it needs to be
+# told.
+#
+# CLUSTER-SCOPED, as of 2026-09, because CapabilityBinding is
+# (config/crd/capabilitybindings.yaml, scope: Cluster). This used to be a Role +
+# RoleBinding in a demo-project namespace, on the theory that "the production
+# grant is per project, so the dev grant should have the same shape". Both halves
+# of that were wrong: the objects are not namespaced, and the production grant is
+# NOT per project either — root RBAC is evaluated after Milo's project router
+# strips the /projects/{p}/control-plane prefix and recomputes RequestInfo
+# (milo/pkg/server/filters/projects.go:40-62), so the real grant spans every
+# project plane. A namespaced dev grant made the production authority look
+# narrower than it is, which is the opposite of what a dev overlay should do.
+#
+# `get`/`list` on the objects, plus `patch` on the STATUS SUBRESOURCE only —
+# never on the parent. The assistant writes conditions back onto a binding (the
+# feedback loop to whoever authored it) and must never be able to edit the spec
+# it was handed: a service that can rewrite its own entitlement is not reading an
+# entitlement. Ordinary Kubernetes RBAC has a subresource axis and both this
+# grant and the production one use it; Milo IAM does not, which is why the
+# equivalent split on that axis has to be done by withholding `patch` from a
+# whole role (config/milo/iam/roles/capability-publisher.yaml). These rules are
+# verb-for-verb identical to the production ClusterRole's, so a writeback that
+# works here is at least not failing on the verb set — it may still 403 in
+# production if the root-RBAC-authorizes-project-paths assumption is wrong, which
+# logs capability.crd.status_forbidden, deliberately its own event rather than
+# folded into generic write errors.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: assistant:capability-binding-reader
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+rules:
+  - apiGroups: ["capabilities.assistant.miloapis.com"]
+    resources: ["capabilitybindings"]
+    verbs: ["get", "list"]
+  - apiGroups: ["capabilities.assistant.miloapis.com"]
+    resources: ["capabilitybindings/status"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: assistant:capability-binding-reader
+  labels:
+    app.kubernetes.io/part-of: agent-framework-playground
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: assistant:capability-binding-reader
+subjects:
+  - kind: ServiceAccount
+    name: assistant
+    namespace: patch-playground

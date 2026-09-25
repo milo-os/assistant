@@ -1,0 +1,195 @@
+# Projection regression: a CapabilityBinding whose MCP endpoint is the
+# provider's own address instead of the AI gateway is NEITHER DIALED NOR
+# CREDENTIALED, and the rest of the project's composition is unaffected.
+#
+# This is the one test that protects three properties at once. The catalog's
+# projection controller is required to rewrite every mcpServers[].endpoint to the
+# gateway's MCPRoute URL; a controller regression that publishes a raw provider
+# address would otherwise have the assistant dial it faithfully, and with it go
+# (1) the gateway-side copy of the reviewed tool allow-list, which is the one a
+# compromised or misconfigured assistant cannot bypass, (2) metering, since an
+# unproxied tool call is an unbilled one, and (3) the identity-forwarding
+# decision, because a raw host that happened to match
+# CAPABILITY_IDENTITY_FORWARD_HOSTS would receive the caller's bearer token.
+# Splitting projection (catalog) from consumption (assistant) is what created
+# this gap: with the HTTP source the component that rewrote the endpoint and the
+# one that served it were the same process and could not drift.
+#
+# The guard is CAPABILITY_MCP_ENDPOINT_HOSTS, checked in connectTools BEFORE the
+# connection is opened — deliberately at the dial site rather than at admission,
+# because the writer being defended against is the controller that already has
+# write access to these objects.
+#
+# Runs only under CAPABILITY_SOURCE=crd (config/overlays/dev-crd); otherwise SKIP.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: capability-endpoint-guard
+spec:
+  # The environment is persistent — never delete anything from it. The one
+  # object this test creates is removed by the script itself, on success only:
+  # a failed run leaves the binding and its conditions in place to look at.
+  skipDelete: true
+  steps:
+    - name: raw-provider-endpoint-is-refused
+      try:
+        - script:
+            timeout: 300s
+            content: |
+              set -euo pipefail
+              NS=patch-playground
+              BINDING=e2e-raw-endpoint-binding
+              # A project with no prior traffic, so the first turn takes a cache
+              # MISS and sees the binding immediately. The capability cache is
+              # per project with a 60s TTL, and an empty result is never cached,
+              # so a fresh project cannot be pinned to a stale answer.
+              PROJECT=e2e-endpoint-guard
+              RAW_ENDPOINT="http://streamco.patch-playground.svc.cluster.local:7810/mcp"
+
+              SOURCE=$(kubectl -n "${NS}" get deploy assistant \
+                -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CAPABILITY_SOURCE")].value}')
+              if [ "${SOURCE}" != "crd" ]; then
+                echo "SKIP: assistant runs with CAPABILITY_SOURCE=${SOURCE:-<unset>}, not crd (deploy overlays/dev-crd to run this suite)"
+                exit 0
+              fi
+
+              # The guard is off when the list is empty, which is how the fixture
+              # path and plain `dev` stay unaffected. If it is empty here the test
+              # would pass vacuously, so refuse instead.
+              DIALABLE=$(kubectl -n "${NS}" get deploy assistant \
+                -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CAPABILITY_MCP_ENDPOINT_HOSTS")].value}')
+              [ -n "${DIALABLE}" ] \
+                || { echo "FAIL: CAPABILITY_MCP_ENDPOINT_HOSTS is unset — the dial guard is disabled and this test cannot prove anything" >&2; exit 1; }
+              echo "sanctioned MCP endpoint hosts: ${DIALABLE}"
+              echo "${DIALABLE}" | grep -q "streamco" \
+                && { echo "FAIL: the raw provider host is itself sanctioned — the test's premise is broken" >&2; exit 1; }
+
+              # "Not credentialed" has a structural half and a behavioural one.
+              # Structural: identity forwarding is a SEPARATE allow-list, and the
+              # raw host is not on it, so even a dial would carry no bearer token.
+              FORWARD=$(kubectl -n "${NS}" get deploy assistant \
+                -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CAPABILITY_IDENTITY_FORWARD_HOSTS")].value}')
+              echo "identity-forward hosts: ${FORWARD}"
+              echo "${FORWARD}" | grep -q "streamco" \
+                && { echo "FAIL: the raw provider host may receive the caller's credential" >&2; exit 1; }
+
+              SINCE_MARK=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+              # A binding that is perfectly VALID and still must not be dialed.
+              # That distinction is the point: the spec passes admission and
+              # Validate(), so the only thing standing between a projection
+              # regression and a direct provider connection is the dial guard.
+              kubectl apply -f - <<'YAML'
+              apiVersion: capabilities.assistant.miloapis.com/v1alpha1
+              kind: CapabilityBinding
+              metadata:
+                name: e2e-raw-endpoint-binding
+                labels:
+                  app.kubernetes.io/part-of: agent-framework-playground
+              spec:
+                serviceRef:
+                  name: streaming-streamco-raw
+                serviceName: streaming.streamco.raw.example
+                serviceAgentRef:
+                  name: streamco-streaming-agent
+                configurationVersion: v1-e2e-raw-endpoint
+                tools:
+                  mcpServers:
+                    - name: rawstream
+                      # The PROVIDER'S OWN address, not the gateway. This is
+                      # exactly what a projection-controller regression writes.
+                      endpoint: http://streamco.patch-playground.svc.cluster.local:7810/mcp
+                      toolSelector:
+                        include:
+                          - streams_list
+                      mutating: []
+              YAML
+
+              PORT=1986
+              if ! curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
+                kubectl -n "${NS}" port-forward svc/assistant ${PORT}:7820 >/dev/null 2>&1 &
+                PF=$!
+                trap 'kill ${PF} 2>/dev/null || true' EXIT
+                for i in $(seq 1 30); do
+                  curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null && break
+                  [ "$i" = 30 ] && { echo "assistant not reachable over port-forward" >&2; exit 1; }
+                  sleep 1
+                done
+              fi
+
+              REPO="$(git rev-parse --show-toplevel)"
+              cd "${REPO}"
+              export PATCH_URL="http://127.0.0.1:${PORT}"
+              PATCH_TOKEN="$(kubectl -n "${NS}" create token patch-dev --duration=10m)"
+              export PATCH_TOKEN
+
+              # Drive composition for the project until the binding has been seen
+              # and its verdict written back. Conditions are written by a
+              # background worker on transition only, so both the LIST and the
+              # write are asynchronous with respect to the turn.
+              COMPOSED=""
+              MESSAGE=""
+              for i in $(seq 1 8); do
+                go run ./cmd/patch chat "diagnose pipeline p-1" --project "${PROJECT}" >/dev/null 2>&1 || true
+                COMPOSED=$(kubectl get capabilitybinding "${BINDING}" \
+                  -o jsonpath='{.status.conditions[?(@.type=="Composed")].status}' 2>/dev/null || true)
+                MESSAGE=$(kubectl get capabilitybinding "${BINDING}" \
+                  -o jsonpath='{.status.conditions[?(@.type=="Composed")].message}' 2>/dev/null || true)
+                [ -n "${COMPOSED}" ] && break
+                sleep 10
+              done
+
+              # 1. The verdict lands on the object the catalog team owns, which is
+              #    the difference between "identity forwarding mysteriously
+              #    stopped" and a condition naming the host.
+              [ "${COMPOSED}" = "False" ] \
+                || { echo "FAIL: Composed=${COMPOSED:-<none>} — the raw endpoint was not refused" >&2
+                     kubectl get capabilitybinding "${BINDING}" -o yaml >&2; exit 1; }
+              echo "Composed message: ${MESSAGE}"
+              echo "${MESSAGE}" | grep -q "was not dialed" \
+                || { echo "FAIL: the condition does not say the endpoint went undialed" >&2; exit 1; }
+              echo "${MESSAGE}" | grep -qF "${RAW_ENDPOINT}" \
+                || { echo "FAIL: the condition does not name the offending endpoint" >&2; exit 1; }
+
+              # 2. The spec itself is fine. Accepted stays True: this is a
+              #    composition verdict about an operator's dial policy, not a
+              #    validation failure, and conflating them would send the provider
+              #    hunting for a schema error that is not there.
+              ACCEPTED=$(kubectl get capabilitybinding "${BINDING}" \
+                -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null || true)
+              [ "${ACCEPTED}" = "True" ] \
+                || { echo "FAIL: Accepted=${ACCEPTED:-<none>} — the refusal was reported as a spec defect" >&2; exit 1; }
+
+              # 3. Neither dialed: the refusal is its own log event, and the
+              #    connect/list events that only a real connection can produce are
+              #    absent for this endpoint. A dial that merely failed would show
+              #    capability.mcp.connect_failed instead — a different incident,
+              #    with a different owner, which is why they are distinct events.
+              LOGS=$(kubectl -n "${NS}" logs deploy/assistant --since-time="${SINCE_MARK}" --tail=-1)
+              echo "${LOGS}" | grep -F "${RAW_ENDPOINT}" | grep -q "capability.mcp.endpoint_not_sanctioned" \
+                || { echo "FAIL: no endpoint_not_sanctioned event for the raw endpoint" >&2; exit 1; }
+              if echo "${LOGS}" | grep -F "${RAW_ENDPOINT}" | grep -qE "capability.mcp.(connect_failed|list_failed|tool_missing)"; then
+                echo "FAIL: the raw endpoint was dialed — a connection-stage event exists for it" >&2
+                exit 1
+              fi
+              echo "PASS: the raw provider endpoint was refused before any connection was opened"
+
+              # 4. Nor credentialed. The caller's bearer token is attached at the
+              #    dial call site and nowhere else, so an endpoint that was never
+              #    dialed received nothing — and the forward allow-list checked
+              #    above would have refused it in any case. Two independent gates,
+              #    which is the reason they are two variables.
+              echo "PASS: no credential could reach it — never dialed, and not on the identity-forward list"
+
+              # 5. The blast radius is one server. A refused endpoint is skipped
+              #    exactly like an unreachable one; the project's other bindings
+              #    still compose, so a projection regression degrades one provider
+              #    rather than the assistant.
+              ANSWER=$(go run ./cmd/patch chat "diagnose pipeline p-1" --project "${PROJECT}" 2>/dev/null)
+              echo "diagnose answer: ${ANSWER}"
+              echo "${ANSWER}" | grep -q "The provider tool reported" \
+                || { echo "FAIL: the sanctioned binding stopped composing — the guard is too broad" >&2; exit 1; }
+              echo "PASS: the sanctioned gateway endpoint still composed"
+
+              # Success only: a failed run leaves the object behind on purpose.
+              kubectl delete capabilitybinding "${BINDING}" --ignore-not-found

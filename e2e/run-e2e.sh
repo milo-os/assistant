@@ -268,6 +268,7 @@ boot_assistant() {
   ( cd "${ASSISTANT_REPO}" \
       && PORT="${ASSISTANT_PORT}" \
          env "${CONTROL_PLANE_ENV[@]}" \
+         CAPABILITY_SOURCE=fixture \
          CAPABILITY_DOCS_FIXTURE="${FIXTURE}" \
          CAPABILITY_ALLOW_PRIVATE_NETWORKS=true \
          MODEL_MODE="${MODEL_MODE:-mock}" \
@@ -417,6 +418,7 @@ run_gateway() {
   note "GATEWAY_URL=${GATEWAY_URL} model=${GATEWAY_MODEL} fixture=${GW_FIXTURE}"
   ( cd "${ASSISTANT_REPO}" \
       && PORT="${ASSISTANT_PORT}" env "${CONTROL_PLANE_ENV[@]}" \
+         CAPABILITY_SOURCE=fixture \
          CAPABILITY_DOCS_FIXTURE="${GW_FIXTURE}" CAPABILITY_ALLOW_PRIVATE_NETWORKS=true USAGE_GATEWAY_URL="${SINK_URL}" \
          PUBLIC_BASE_URL="${PUBLIC_BASE_URL}" \
          MODEL_MODE=gateway GATEWAY_URL="${GATEWAY_URL}" GATEWAY_MODEL="${GATEWAY_MODEL}" \

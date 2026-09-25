@@ -1,0 +1,109 @@
+# promtool unit tests for the assistant.capability rules in alerts.yaml.
+#
+# NOT a Kubernetes resource and not referenced by kustomization.yaml — kustomize
+# ignores it. It is here rather than under docs/ because a threshold and a `for:`
+# duration are claims about what is normal, and a claim that nothing executes
+# rots. CI has no promtool step (.github/workflows/build.yaml runs
+# validate-kustomize, which only proves the bundle renders), so this is run by
+# hand:
+#
+#   python3 -c "import yaml; d=[x for x in yaml.safe_load_all(open('config/overlays/production/alerts.yaml')) if x][0]; yaml.safe_dump({'groups': d['spec']['groups']}, open('/tmp/rules.yaml','w'))"
+#   cp config/overlays/production/alerts_promtool_test.yaml /tmp/
+#   (cd /tmp && promtool test rules alerts_promtool_test.yaml)
+#
+# The first two cases are the ones worth having. Case 1 asserts the group is
+# silent when the assistant is NOT in crd mode — the series simply do not exist,
+# and the rules must not translate that into an alert. Case 4 asserts the
+# opposite hazard: a cold-start outage produces refresh_failed with no
+# stale_served series at all, and the degraded-to-empty rule must still fire
+# rather than evaluating an empty subtraction and going quiet exactly when it
+# matters. Everything else guards the thresholds.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # http mode: none of the capability series exist. Nothing may fire.
+  - interval: 1m
+    input_series:
+      - series: 'assistant_http_requests_total{code="200"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: AssistantCapabilityServingStaleConfig
+      - eval_time: 90m
+        alertname: AssistantCapabilityFetchDegradedToEmpty
+      - eval_time: 90m
+        alertname: AssistantCapabilityStatusWriteForbidden
+      - eval_time: 90m
+        alertname: AssistantCapabilityScopeMismatch
+  # crd mode, healthy: hits and misses only.
+  - interval: 1m
+    input_series:
+      - series: 'assistant_capability_fetch_total{outcome="hit"}'
+        values: '0+60x120'
+      - series: 'assistant_capability_fetch_total{outcome="miss"}'
+        values: '0+1x120'
+      - series: 'assistant_capability_fetch_total{outcome="empty"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: AssistantCapabilityServingStaleConfig
+      - eval_time: 90m
+        alertname: AssistantCapabilityFetchDegradedToEmpty
+  # crd mode, control plane down but cache covers every failure: stale fires,
+  # degraded-to-empty does not.
+  - interval: 1m
+    input_series:
+      - series: 'assistant_capability_fetch_total{outcome="refresh_failed"}'
+        values: '0+10x120'
+      - series: 'assistant_capability_fetch_total{outcome="stale_served"}'
+        values: '0+10x120'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AssistantCapabilityServingStaleConfig
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Assistant is serving stale capability configuration"
+              runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/capability-source-degraded.md"
+              description: 'assistant_capability_fetch_total{outcome="stale_served"} has been nonzero for 15 minutes: capability LISTs against project control planes are failing and projects are running on cached configuration. Entitlement changes — including revocations — are not being picked up. Chats are unaffected and will report nothing.'
+      - eval_time: 20m
+        alertname: AssistantCapabilityFetchDegradedToEmpty
+  # cold start during an outage: refresh_failed with NO stale_served series.
+  - interval: 1m
+    input_series:
+      - series: 'assistant_capability_fetch_total{outcome="refresh_failed"}'
+        values: '0+10x120'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AssistantCapabilityFetchDegradedToEmpty
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Assistant capability fetches are failing with nothing to serve stale"
+              runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/capability-source-degraded.md"
+              description: "assistant_capability_fetch_total shows refresh_failed exceeding stale_served: some projects' LISTs are failing with no cached answer to fall back on, so those projects are composing NO capabilities — a built-ins-only assistant, indistinguishable to the user from being entitled to nothing. Check control-plane reachability first; rollback to CAPABILITY_SOURCE=http is one env var. See the runbook."
+  # forbidden + scope mismatch
+  - interval: 1m
+    input_series:
+      - series: 'assistant_capability_status_write_total{outcome="forbidden"}'
+        values: '0+1x60'
+      - series: 'assistant_capability_scope_dropped_total{reason="mismatch"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AssistantCapabilityStatusWriteForbidden
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Assistant CapabilityBinding status writes are being refused (403)"
+              runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/capability-source-degraded.md"
+              description: 'assistant_capability_status_write_total{outcome="forbidden"} is nonzero: Milo is rejecting the status PATCH. The grant assumes a status write authorizes as `patch` on capabilitybindings; if that is wrong this is the only place it shows. Capability composition and chats are unaffected — only the producer feedback loop is broken. See the runbook''s "forbidden" section for the exact IAM hypothesis to test.'
+      - eval_time: 10m
+        alertname: AssistantCapabilityScopeMismatch
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Capability documents dropped for naming another project"
+              runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/capability-source-degraded.md"
+              description: 'assistant_capability_scope_dropped_total{reason="mismatch"} is nonzero: a capability source returned a document whose metadata names a different project than the turn being served, and the tenant-scope gate dropped it. Nothing crossed tenants, but a producer is emitting documents it should not. Identify the project from the capability logs (they carry projectName; the metric deliberately does not) and take it to whoever owns that source.'

@@ -1,0 +1,116 @@
+# Dev overlay — CRD capability mode: capabilities come from CapabilityBinding
+# objects read out of the project's control plane, instead of the fixture file
+# (overlays/dev) or the catalog's HTTP adapter (overlays/dev-catalog). Apply
+# with `task dev:deploy OVERLAY=dev-crd`.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# READ THIS BEFORE TREATING A GREEN dev-crd AS PROOF.
+#
+# In kind there is ONE apiserver and there are NO virtual project control
+# planes. In production a Milo project IS a virtual control plane, and the
+# assistant addresses it as
+#
+#   /apis/resourcemanager.miloapis.com/v1alpha1/projects/<project>/control-plane
+#     /apis/capabilities.assistant.miloapis.com/v1alpha1/capabilitybindings
+#
+# Here that prefix, if it is served at all, collapses onto the same apiserver
+# that holds everything else. The bindings below are cluster-scoped objects in
+# the only plane there is, so EVERY project a dev overlay addresses sees the same
+# bindings — the separation that makes this design tenant-safe in production
+# (one control plane per project, partitioned storage) has no analogue here at
+# all. So this overlay proves the CRD schema, the conversion, the cache, and the
+# scope gate. It does NOT prove the production topology:
+#
+#   * not per-project addressing, and specifically not per-project ISOLATION,
+#     which in kind is provided by nothing;
+#   * not the read grant, which in production is a root ClusterRole on MILO
+#     (config/milo/rbac/control-plane-auth-delegator.yaml) resting on the
+#     unverified assumption that root RBAC is evaluated for project control-plane
+#     paths — here it is an ordinary ClusterRole in the same cluster as the pod,
+#     which tests nothing about that;
+#   * not the CRD's install path, which in production is a one-time registration
+#     against Milo ROOT delivered by a Flux Kustomization that does not yet exist
+#     in datum-cloud/infra (see config/milo/kustomization.yaml) — here the CRD is
+#     applied directly to the kind cluster by the resource entry below;
+#   * not the credential, since in kind the assistant's service-account token is
+#     accepted and on Milo it is not (Milo validates only against its own issuer;
+#     the production identity is an x509 client certificate).
+#
+# The same caveat already applies to the SubjectAccessReview path, which has
+# always composed this same prefix (internal/auth/sar.go). If the dev apiserver
+# does not serve it, the capability source degrades exactly as designed —
+# `capability.crd.fetch_failed` in the assistant's logs, an assistant with
+# built-ins only — which is deliberately NOT silent. A dev-crd that shows no
+# StreamCo tools and no such log line is a different bug from one that shows the
+# log line.
+# ─────────────────────────────────────────────────────────────────────────────
+# Caller RBAC (the patch-dev ServiceAccount `task dev:chat` mints a token for)
+# is NOT included here, exactly as in overlays/dev-catalog: kustomize refuses to
+# reference a file outside the overlay, and duplicating it would leave two
+# copies to drift. Apply overlays/dev once on a fresh cluster to create it, or
+# create the ServiceAccount and binding by hand.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  # The CapabilityBinding CRD. Referenced HERE rather than inherited from
+  # ../../base, which stopped composing it in 2026-09: in production the CRD is
+  # registered once against Milo root, because Milo keeps CRD definitions global
+  # and partitions only instance data
+  # (milo/internal/apiserver/storage/project/restoptions.go:35-38), and it is
+  # composed from config/milo/ which is applied to Milo itself. kind has no Milo,
+  # so the overlay that needs the kind installs it — and the fact that this line
+  # exists only in the CRD-mode overlay is itself the reminder that the real
+  # install target is a different cluster entirely.
+  - ../../crd
+  - capability-bindings.yaml
+  - binding-reader-rbac.yaml
+  - ../../components/gateway
+  - ../../components/llm-stub
+  - ../../components/streamco
+  - ../../components/sink
+
+# The APIService that registers the aggregated apiserver, as in overlays/dev.
+components:
+  - ../../components/api-registration
+
+images:
+  - name: ghcr.io/milo-os/assistant
+    newTag: dev
+  - name: ghcr.io/milo-os/assistant-streamco
+    newTag: dev
+  - name: ghcr.io/milo-os/assistant-sink
+    newTag: dev
+
+patches:
+  # Dev has no cluster CA to trust for the aggregated apiserver's self-signed
+  # serving cert (same as overlays/dev).
+  - target:
+      kind: APIService
+      name: v1alpha1.assistant.miloapis.com
+    patch: |-
+      - op: replace
+        path: /spec/insecureSkipTLSVerify
+        value: true
+  # CAPABILITY_SOURCE=crd takes NO companion variable: the control plane it
+  # reads, the CA bundle it verifies with, and the credential it presents are
+  # the ones the SubjectAccessReview path is already configured with
+  # (AUTHZ_SAR_*). Two ways to name one control plane is two ways to point half
+  # the service at the wrong one.
+  - target:
+      kind: Deployment
+      name: assistant
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: assistant
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: assistant
+                env:
+                  - name: CAPABILITY_SOURCE
+                    value: crd

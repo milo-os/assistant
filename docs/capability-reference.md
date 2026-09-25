@@ -1,6 +1,6 @@
 # Capabilities — knowledge, tools, skills
 
-How a provider service contributes to Patch: the capability-document schema this service owns, and the provider API that serves it.
+How a provider service contributes to Patch: the capability-document schema this service owns, and the three producers that serve it — a fixture file, the capability-provider HTTP API, and the `CapabilityBinding` CRD.
 
 ## Capability documents (provider capabilities)
 
@@ -206,18 +206,24 @@ type Source interface {
 }
 ```
 
-Two implementations ship, selected by env and **mutually exclusive** (the
-config loader rejects setting both):
+Three implementations ship, selected by `CAPABILITY_SOURCE` (see
+[configuration.md](configuration.md#capability-source)); exactly one is built:
 
-- **Fixture source** (`CAPABILITY_DOCS_FIXTURE`) — a local JSON file (bare
-  array or a `{"items": […]}` List). Good for local dev and e2e.
-- **HTTP source** (`CAPABILITY_PROVIDER_URL`) — the **capability-provider
-  API** below. Documents are fetched per conversation (no cache in v0).
+- **Fixture source** (`CAPABILITY_SOURCE=fixture`, `CAPABILITY_DOCS_FIXTURE`) —
+  a local JSON file (bare array or a `{"items": […]}` List). Good for local dev
+  and e2e.
+- **HTTP source** (`CAPABILITY_SOURCE=http`, `CAPABILITY_PROVIDER_URL`) — the
+  **capability-provider API** below. Documents are fetched per conversation (no
+  cache in v0).
+- **CRD source** (`CAPABILITY_SOURCE=crd`) — a cached per-project LIST of
+  [`CapabilityBinding`](#crd-source-capabilitybinding) objects from that
+  project's control plane. The production source.
 
-The schema below is the wire contract for **both** the fixture file and
-the HTTP response body. **The assistant owns this schema** — a capability
-provider (the control-plane adapter) serves documents in this shape; if
-the shape changes, it changes here first.
+The schema below is the wire contract for the fixture file, the HTTP response
+body, and — field for field — a `CapabilityBinding`'s `spec`. **The assistant
+owns this schema** — a capability provider (the control-plane adapter, the
+catalog's projection controller) produces documents in this shape; if the shape
+changes, it changes here first.
 
 #### Endpoint
 
@@ -347,3 +353,161 @@ resources into this shape (rewriting MCP `endpoint`s to the gateway
 MCPRoute URL). Because the assistant owns the schema, the adapter is
 written against **this** contract, not the other way around.
 
+
+### CRD source (`CapabilityBinding`)
+
+In production the documents above are not fetched from a file or an HTTP
+endpoint. They are read from **`CapabilityBinding` objects**
+(`capabilities.assistant.miloapis.com/v1alpha1`) living in each project's own
+Milo control plane. This is not a new contract — it is the same schema,
+expressed as a Kubernetes resource, so the assistant still owns it and producers
+still conform. The Go types are `pkg/apis/capabilities/v1alpha1`; the manifest is
+`config/crd/capabilitybindings.yaml`.
+
+#### Cluster-scoped, because the control plane is the tenancy boundary
+
+The kind is `scope: Cluster`. A Milo project is a **virtual control plane** — one
+apiserver partitioned by an etcd key prefix — not a namespace in the cluster the
+assistant runs in. A project plane has its own ordinary namespace set
+(`milo-system`, `default`) and nothing creates a namespace named after the
+project, so a namespaced kind would have forced every producer to invent a
+namespace convention that means nothing and that the storage layer never checks.
+An assistant LISTing `/namespaces/<project>/capabilitybindings` against a project
+plane would get a well-formed, permanently empty list, and every project would
+compose as though it had bought nothing.
+
+The consequence is that a binding carries **no project handle at all**, and it
+does not need one: the objects `acme` is entitled to are the objects reachable
+through `acme`'s control-plane path, and another tenant's bindings are not
+filtered out of the response — they are not in the keyspace being read. The
+`ScopeDocuments` namespace check that guards the fixture and HTTP sources is a
+no-op here, and that is a strengthening, not a hole: a string comparison against
+a producer's convention has been replaced by a path the storage layer enforces.
+
+#### `spec` is the capability document's `spec`
+
+Field for field, and byte-identical in the JSON tags:
+
+| Document (`spec`) | `CapabilityBindingSpec` | |
+|---|---|---|
+| `serviceRef`, `serviceName`, `serviceAgentRef`, `configurationVersion` | same names | required, mirroring `Validate()` |
+| `knowledge`, `tools`, `skills`, `authority`, `reportingProject` | same names | optional |
+
+The source marshals the KRM object's spec and feeds the bytes straight through
+the same `ParseDocuments` path the other two sources use. That is what makes one
+schema serve three producers rather than three parsers serving one schema — and
+it is also the hazard: a JSON tag that drifts between
+`pkg/apis/capabilities/v1alpha1/types.go` and
+`internal/capability/document.go` does not fail a build, it silently drops a
+field from every project's prompt. Change both or neither.
+
+Required-ness is mirrored into the OpenAPI schema, which moves the structural
+half of validation to admission: a `kubectl apply` of a binding missing
+`spec.serviceName` fails immediately, against the person who typed it. The
+runtime `Validate()` stays — it still guards the fixture path, and a newer
+assistant may refuse what an older CRD admitted.
+
+A complete example, the CRD form of the StreamCo fixture, is
+`config/overlays/dev-crd/capability-bindings.yaml`.
+
+#### Reading: a cached per-project LIST
+
+On a cache miss the source issues
+
+```
+GET {AUTHZ_SAR_API_URL}/apis/resourcemanager.miloapis.com/v1alpha1/projects/{project}/control-plane
+    /apis/capabilities.assistant.miloapis.com/v1alpha1/capabilitybindings
+```
+
+with the assistant's own client certificate. There is no `namespaces/` segment —
+the kind is cluster-scoped, and the project in the prefix is the only thing that
+scopes the read.
+
+The cache is the reason this source exists rather than being a third way to say
+the same thing:
+
+- **60 seconds, per project**, matching the SAR cache's TTL. The config plane
+  comes off the turn path for every request but the first of each window. The
+  cost is honest: a revoked entitlement lingers for up to the TTL, which is the
+  same window the platform already accepts for a revoked *authorization*.
+- **Serve stale on failure.** When a refresh LIST fails and a previous good
+  answer for that project is in hand, the assistant serves the stale answer
+  rather than nothing. Without a cache, a provider outage and "entitled to
+  nothing" are the same user experience: built-ins only, no signal, and the
+  only evidence a warn line in the assistant's own logs.
+- **Never cache an empty result.** An empty LIST is what a project with no
+  bindings returns *and* what a project returns in the window between the
+  catalog creating its first binding and that write landing. Caching it would
+  pin a newly-entitled project to a built-ins-only assistant for a TTL, for no
+  reason the user can see. The cache therefore only ever holds a positive
+  entitlement set.
+- **Bounded**, with the same eviction policy as the SAR allow-cache: expired
+  entries swept first, then one live entry.
+
+The degradation contract is the one the other sources already have — transport
+error, non-2xx, or undecodable body is logged and falls back — with the fallback
+improved from "nothing" to "the last good answer". Staleness is invisible in the
+product by design; its audience is the operator and its channel is
+`assistant_capability_fetch_total{outcome="stale_served"}`.
+
+#### `status.conditions`: the feedback loop to the producer
+
+The assistant is the **sole writer** of `status` on these objects, and the
+producer must not write it — two writers on one status block is a hot loop. This
+is what the CRD buys that neither the fixture nor the HTTP source can: today a
+provider whose MCP endpoint is unreachable learns nothing, because the failure is
+a log line in someone else's service. As a condition it is a
+`kubectl describe capabilitybinding` away for the team that owns the endpoint.
+
+| Type | `True` | `False` |
+|---|---|---|
+| `Accepted` | The spec parsed and validated; the binding is eligible to compose. | Validation failed. The message is the same path-qualified error the assistant would otherwise only log (`spec.skills[0].source: required`). Reasons: `Validated` / `ValidationFailed`. |
+| `Composed` | The last turn that consulted this binding could use everything it declared. | An MCP endpoint outside `CAPABILITY_MCP_ENDPOINT_HOSTS` (named, with "was not dialed"); a connect failure or timeout; a `tools/list` that failed; a declared tool the server does not offer; a name already won by another binding; or total knowledge loss. Reasons: `Composed` / `CompositionDegraded`. |
+
+Two things are deliberately **not** `Composed=False`: a knowledge source that
+fails while its siblings succeed (including byte-cap truncation — the knowledge
+arrived, just less of it), and a skill body that fails to fetch, which happens
+lazily inside a turn and has no compose-time verdict at all. Each leaves a
+working binding and each would flap per turn, and a flapping condition is a
+per-turn control-plane write.
+
+Writes are coalesced and rate-limited accordingly: only on a transition of
+(type, status, reason, observed generation), never from a request goroutine, onto
+a bounded queue drained by one worker that drops on overflow. A status update
+that is lost is cosmetic; a status update that blocks a chat turn is an outage.
+The patch is a `merge-patch` against the `status` subresource and therefore
+carries the **full** condition set the writer knows — merge patch replaces an
+array wholesale — so two replicas can transiently clobber each other until each
+one's next transition. There is deliberately no conflict-retry loop; the next
+observation is a better retry than an immediate one.
+
+#### What a producer owes
+
+The service catalog's projection controller materializes one binding per
+(project, entitled service). Three obligations are not expressible in the
+schema and are load-bearing:
+
+1. **Rewrite `mcpServers[].endpoint` to the AI gateway's MCPRoute URL**, never
+   the provider's own address. A raw endpoint loses the gateway-side copy of the
+   tool allow-list, goes unmetered, and receives no caller identity. The
+   assistant does not trust this: an endpoint outside
+   `CAPABILITY_MCP_ENDPOINT_HOSTS` is refused at the dial site and reported as
+   `Composed=False` (see
+   [configuration.md](configuration.md#two-host-lists-not-one)). The check is
+   the enforcement; the condition is how the catalog team finds out.
+2. **Delete the binding when an entitlement is revoked**, rather than merely
+   ceasing to serve it. A deleted binding stops composing after one cache TTL; an
+   abandoned one composes indefinitely.
+3. **Read the conditions.** A projection the assistant rejects should be visible
+   on the producing side too, which is the entire point of writing them.
+
+#### What this does not prove in dev
+
+`config/overlays/dev-crd` seeds bindings directly and exercises the object model,
+the conversion, the cache, and the endpoint guard. It does **not** exercise the
+production topology: kind runs one apiserver with no project router, so the
+control-plane path collapses onto the same server, the grant is an ordinary
+ClusterRole beside the pod rather than root RBAC at Milo, and the credential is a
+service-account token that Milo itself would reject. Per-project isolation in
+particular is provided by nothing in kind and is satisfied trivially there — see
+`test/e2e/README.md` for why no e2e asserts it.

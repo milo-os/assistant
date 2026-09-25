@@ -123,15 +123,24 @@ type CapabilitySpec struct {
 	Authority            *Authority `json:"authority,omitempty"`
 	// ReportingProject is the Milo project where this service's own team
 	// reviews capability-gap reports (see internal/gapreport) — resolved by
-	// the service catalog from its own service registration, distinct from
-	// Metadata.Namespace (the consumer project this document was entitled
-	// to). Optional: when a document declares Tools but no
+	// the service catalog from its own service registration, distinct from the
+	// consumer project this document was entitled to (which is the project the
+	// Source was asked for, not a field on the document). Optional: when a document declares Tools but no
 	// ReportingProject, capability-gap reporting is simply unavailable for
 	// that service (no tool is registered) rather than an error.
 	ReportingProject string `json:"reportingProject,omitempty"`
 }
 
 // Metadata mirrors the object metadata carried on the CRD projection.
+//
+// Name is the identifier the CRD status writer PATCHes conditions back on, and
+// is the only half of that key a document supplies: the project comes from
+// whoever asked the Source, never from here.
+//
+// Namespace is EMPTY for every CapabilityBinding — the kind is cluster-scoped
+// inside its project's control plane, which is the tenancy boundary. It is kept
+// because the fixture and HTTP wire schemas may still carry one, and
+// [ScopeDocuments] checks it when they do.
 type Metadata struct {
 	Name      string `json:"name,omitempty"`
 	Namespace string `json:"namespace,omitempty"`

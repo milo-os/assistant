@@ -67,6 +67,12 @@ patches:
             containers:
               - name: assistant
                 env:
+                  # Stated explicitly rather than inferred. The loader still
+                  # infers the mode from a lone companion variable, but that
+                  # shim is scheduled for removal in one release — an overlay
+                  # relying on it breaks silently at the upgrade that drops it.
+                  - name: CAPABILITY_SOURCE
+                    value: fixture
                   - name: CAPABILITY_DOCS_FIXTURE
                     value: /config/capability-documents.json
                 volumeMounts:

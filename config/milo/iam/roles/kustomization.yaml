@@ -5,4 +5,6 @@ resources:
   - conversation-creator.yaml
   - conversation-viewer.yaml
   - conversation-editor.yaml
+  - capability-publisher.yaml
+  - capability-viewer.yaml
   - user.yaml

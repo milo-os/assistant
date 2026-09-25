@@ -19,6 +19,31 @@
 # process check. Pods that are Running but never Ready are reporting a broken
 # dependency, not a broken assistant. Both runbooks lead with that, because it
 # inverts the usual triage order.
+#
+# ONE EXCEPTION, added with the CRD capability source: the assistant.capability
+# group below reads the assistant's OWN metrics, not kube-state-metrics. It is
+# here rather than in config/components/observability/alerts.yaml because that
+# component is dev-only — it is layered by the dev-observability overlays into
+# patch-playground and is never part of a production render — while the failure
+# it watches (a project silently running on stale or absent capability
+# configuration) exists only in production, where CAPABILITY_SOURCE points at a
+# real control plane. An alert that only loads where the failure cannot happen
+# is not an alert.
+#
+# PREREQUISITE: these rules need the assistant's /metrics scraped in
+# patch-system. That is wired by ANNOTATION, not by a ServiceMonitor — this
+# overlay's deployment-patch.yaml carries prometheus.io/scrape, /port 7820 and
+# /path /metrics, and datum-cloud/infra
+# apps/patch-assistant/base/networkpolicy.yaml:40-48 admits the telemetry-system
+# collector on 7820 with a comment naming exactly that arrangement ("No
+# ServiceMonitor is wired yet ... but the pod carries the prometheus.io/scrape
+# annotations, so allow the collector in").
+#
+# So the path is intentional on both sides, not missing. What is NOT proven here
+# is that the production collector actually performs annotation-based discovery.
+# Confirm once, with an instant query for `assistant_capability_fetch_total`,
+# before trusting silence from this group — an alert evaluating over no series
+# is permanently green for the wrong reason.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -102,3 +127,209 @@ spec:
               Every conversation-store CloudNativePG instance is unready.
               Conversation history and task state are unavailable, and
               AssistantDown will follow shortly.
+
+    # ── Capability source ─────────────────────────────────────────────────
+    #
+    # These five rules watch CAPABILITY_SOURCE=crd, where the assistant reads
+    # each project's CapabilityBinding objects from that project's control
+    # plane behind a 60s TTL cache. Everything here is invisible to users by
+    # design: a capability failure DEGRADES a chat, it never fails one (the
+    # turn proceeds with whatever configuration is in hand and says nothing,
+    # because "your capability configuration may be out of date" is noise a
+    # user cannot act on). No 5xx, no failed turn, no error in the product —
+    # so these metrics are not the best signal, they are the ONLY signal.
+    #
+    # SILENCE IN fixture/http MODE IS STRUCTURAL, NOT THRESHOLDED. The fetch
+    # and status-write series are CounterVecs whose children are created on
+    # first increment, and nothing increments them unless a CRDSource is
+    # constructed. Under CAPABILITY_SOURCE=http the series do not exist, every
+    # expression below evaluates to an empty vector, and an empty vector never
+    # fires. That is why no rule here is written as `== 0`, `absent()`, or
+    # `... or vector(0)` on its LEFT-hand side: each of those turns "the mode
+    # is not enabled" into "the alert is firing". The one place a default is
+    # supplied — the stale-coverage subtraction — supplies it on the RIGHT only,
+    # and the comment there explains why that is safe.
+    #
+    # Deliberately NOT alerted on, because each is the design working:
+    #   * outcome="miss" — one LIST per TTL per active project is the cache's
+    #     designed steady state, not a fault.
+    #   * outcome="empty" — the correct answer for a project with no bindings,
+    #     and (because empty is never cached) also the correct answer during the
+    #     window before a newly-entitled project's first binding lands.
+    #   * outcome="refresh_failed" immediately followed by outcome="stale_served"
+    #     — that pair IS the degradation contract executing. Only the
+    #     uncovered remainder is alerted, by AssistantCapabilityFetchDegradedToEmpty.
+    #   * status writes with outcome="dropped" — the bounded queue shedding
+    #     under a control-plane outage, deliberately preferred to blocking a
+    #     turn. A lost status update is cosmetic; a status update on the request
+    #     path is an outage.
+    #   * assistant_capability_fetch_duration_seconds — a slow LIST costs one
+    #     turn's prologue once per TTL and is already caught as an outcome when
+    #     it times out. Alerting on its latency would page for a cost the cache
+    #     exists to amortize.
+    - name: assistant.capability
+      rules:
+        - alert: AssistantCapabilityServingStaleConfig
+          # The one failure that silently harms customers. stale_served means a
+          # LIST failed and the last known-good answer was served instead —
+          # better than nothing, but it also means an entitlement REVOCATION the
+          # assistant never received: a project keeps composing a capability it
+          # is no longer entitled to, and there is no in-band signal anywhere.
+          #
+          # for: 15m, because the TTL is 60s. A healthy project re-fetches once
+          # a minute, so a control-plane blip shows up as stale serves for a
+          # minute or two and clears itself; 15 consecutive TTL cycles of
+          # failure is a sustained outage, not a blip. Shorter would page on
+          # every apiserver rollout.
+          #
+          # warning, not critical: chats are still answered with real (if old)
+          # configuration. The escalation below is what makes it a page.
+          expr: |
+            sum(rate(assistant_capability_fetch_total{outcome="stale_served"}[10m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Assistant is serving stale capability configuration"
+            runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/capability-source-degraded.md"
+            description: >-
+              assistant_capability_fetch_total{outcome="stale_served"} has been
+              nonzero for 15 minutes: capability LISTs against project control
+              planes are failing and projects are running on cached
+              configuration. Entitlement changes — including revocations — are
+              not being picked up. Chats are unaffected and will report nothing.
+
+        - alert: AssistantCapabilityServingStaleConfig
+          # Severity-tiered pair, the same shape as AssistantHighErrorRate in
+          # the observability component. One hour of continuous stale serving is
+          # 60 TTL cycles: the control plane is not coming back on its own, and
+          # the divergence between what a project is entitled to and what it is
+          # being served is now old enough to be a compliance question rather
+          # than an availability one.
+          expr: |
+            sum(rate(assistant_capability_fetch_total{outcome="stale_served"}[10m])) > 0
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: "Assistant has served stale capability configuration for an hour"
+            runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/capability-source-degraded.md"
+            description: >-
+              Capability LISTs have been failing for an hour and every affected
+              project is composing configuration the control plane can no longer
+              confirm. Revoked entitlements may still be in use. Roll back to
+              CAPABILITY_SOURCE=http if the control plane cannot be restored —
+              see the runbook.
+
+        - alert: AssistantCapabilityFetchDegradedToEmpty
+          # The failure the cache was supposed to eliminate, happening anyway.
+          # Documents() increments refresh_failed on every failed LIST and then
+          # stale_served only if it had something retained to serve. The
+          # DIFFERENCE is failures with no fallback: those projects compose zero
+          # capabilities and present to the user exactly as if they were
+          # entitled to nothing — the original defect, restored. Expect it after
+          # a restart during a control-plane outage (nothing cached yet), or for
+          # a project whose entry was evicted.
+          #
+          # The right-hand `or on() vector(0)` supplies a default ONLY for the
+          # subtrahend. It is needed because a total outage from cold produces
+          # refresh_failed with no stale_served series at all, and a subtraction
+          # against an empty vector yields nothing — the alert would go quiet
+          # exactly when it matters most. It is safe because the left side is
+          # still a real series: in http/fixture mode there is no
+          # refresh_failed either, so the whole expression is empty and this
+          # rule stays silent like the rest.
+          #
+          # for: 15m against a 10m rate window means one isolated uncovered
+          # failure cannot hold the condition true for the full duration; it
+          # takes a recurring one. critical because it is a whole-population
+          # capability outage that produces no user-visible error.
+          expr: |
+            sum(rate(assistant_capability_fetch_total{outcome="refresh_failed"}[10m]))
+            -
+            (sum(rate(assistant_capability_fetch_total{outcome="stale_served"}[10m])) or on() vector(0))
+            > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Assistant capability fetches are failing with nothing to serve stale"
+            runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/capability-source-degraded.md"
+            description: >-
+              assistant_capability_fetch_total shows refresh_failed exceeding
+              stale_served: some projects' LISTs are failing with no cached
+              answer to fall back on, so those projects are composing NO
+              capabilities — a built-ins-only assistant, indistinguishable to
+              the user from being entitled to nothing. Check control-plane
+              reachability first; rollback to CAPABILITY_SOURCE=http is one env
+              var. See the runbook.
+
+        - alert: AssistantCapabilityStatusWriteForbidden
+          # A named hypothesis, instrumented. Status conditions are written with
+          # a merge PATCH to capabilitybindings/status, and the grant assumes
+          # Milo evaluates that as `patch` on the parent resource — the
+          # updateStatus convention that appears across the platform is inert
+          # (GetVerb never returns it), so no SubjectAccessReview can match it.
+          # If that assumption is wrong, EVERY status write 403s and nothing
+          # else is visibly wrong: it presents as "conditions never appear",
+          # which reads like a bug in the writer, in the catalog, or in nobody.
+          # This rule makes it say so instead.
+          #
+          # 403 is never normal here, so the threshold is zero and for: 5m
+          # exists only to require a second occurrence rather than a single
+          # token-refresh race. warning, not critical: nothing user-facing
+          # depends on status writes — the producer's feedback loop does.
+          #
+          # This alert earns its keep loudest in the first ten minutes after the
+          # crd cutover, which is when the hypothesis is actually tested.
+          expr: |
+            sum(rate(assistant_capability_status_write_total{outcome="forbidden"}[10m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Assistant CapabilityBinding status writes are being refused (403)"
+            runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/capability-source-degraded.md"
+            description: >-
+              assistant_capability_status_write_total{outcome="forbidden"} is
+              nonzero: Milo is rejecting the status PATCH. The grant assumes a
+              status write authorizes as `patch` on capabilitybindings; if that
+              is wrong this is the only place it shows. Capability composition
+              and chats are unaffected — only the producer feedback loop is
+              broken. See the runbook's "forbidden" section for the exact IAM
+              hypothesis to test.
+
+        - alert: AssistantCapabilityScopeMismatch
+          # Tenant isolation. ScopeDocuments drops a document whose own metadata
+          # names a project other than the turn's; "mismatch" is a positive
+          # crossing, not an absent field. Any nonzero value means a Source
+          # handed this process another project's configuration and only the
+          # scope gate stopped it.
+          #
+          # Note this series is emitted for ALL sources, not just crd —
+          # ScopeDocuments guards the fixture and HTTP paths, where the namespace
+          # is a producer's convention rather than an etcd prefix. So unlike its
+          # neighbours this rule is live in http mode too, which is correct: the
+          # question it asks does not depend on where documents came from.
+          #
+          # Threshold zero and for: 5m: the gate working is not an emergency
+          # (nothing leaked), but a producer emitting cross-project documents is
+          # a bug that must be chased to its source before the next change
+          # removes the gate's luck. 15m rate window so a single event stays
+          # visible long enough to satisfy the 5m hold.
+          expr: |
+            sum(rate(assistant_capability_scope_dropped_total{reason="mismatch"}[15m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Capability documents dropped for naming another project"
+            runbook_url: "https://github.com/milo-os/assistant/blob/main/docs/runbooks/capability-source-degraded.md"
+            description: >-
+              assistant_capability_scope_dropped_total{reason="mismatch"} is
+              nonzero: a capability source returned a document whose metadata
+              names a different project than the turn being served, and the
+              tenant-scope gate dropped it. Nothing crossed tenants, but a
+              producer is emitting documents it should not. Identify the project
+              from the capability logs (they carry projectName; the metric
+              deliberately does not) and take it to whoever owns that source.

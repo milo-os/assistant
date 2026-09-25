@@ -130,6 +130,95 @@ Every rule carries `for:`, a `severity` label, and `summary`/`description`
 annotations that name the underlying metric and threshold, so an on-call
 engineer doesn't need to read the YAML or PromQL to understand what fired.
 
+## Capability-source metrics and alerts (`CAPABILITY_SOURCE=crd`)
+
+A second, separate set of rules lives in
+`config/overlays/production/alerts.yaml`, group `assistant.capability`, and
+covers the CRD capability source: the assistant reading each project's
+`CapabilityBinding` objects from that project's Milo control plane behind a 60s
+TTL cache, and PATCHing `status.conditions` back
+(`docs/enhancements/crd-capability-source.md`).
+
+Why they are in the production overlay rather than here in the observability
+component, even though they read the assistant's own metrics like everything
+else on this page: the component is dev-only — layered by the
+`dev-observability` overlays into `patch-playground` — while the failure it
+watches only exists where `CAPABILITY_SOURCE` points at a real control plane.
+The overlay file's header says the same thing from the other side.
+
+### The metrics
+
+All six are `assistant_`-prefixed, registered unconditionally, and **carry no
+project label** — project cardinality is tenant count, which this repository
+neither controls nor can bound, and an operator debugging one project reads the
+logs, which already carry `projectName` on every capability line.
+
+| Metric | Type | Labels | What it answers |
+|---|---|---|---|
+| `assistant_capability_fetch_total` | counter | `outcome` = `hit`/`miss`/`refresh_failed`/`stale_served`/`empty` | Cache effectiveness *and* outage behavior in one series. `hit`+`miss` is the steady state; `refresh_failed`→`stale_served` is the degradation contract executing; `refresh_failed` without `stale_served` is a project composing nothing. |
+| `assistant_capability_fetch_duration_seconds` | histogram | `outcome` = `ok`/`error` | The LIST round trip. The design's claim is that this latency is off the turn path except once per TTL — only provable if the uncommon path is measured. |
+| `assistant_capability_cache_entry_age_seconds` | histogram | — | Age of the entry served, observed at **serve** time. Buckets run to 3600s because an outage's whole story is in the tail; a healthy deployment lives below 60. A histogram rather than a gauge because entries are per project and there is no single "the cache" age. |
+| `assistant_capability_cache_entries` | gauge | — | Resident entries, one per actively-chatting project. Bounded at 4096 (copied from `maxSARCacheEntries`); pinned at the bound means live entries are being evicted. |
+| `assistant_capability_status_write_total` | counter | `outcome` = `ok`/`error`/`forbidden`/`dropped` | Status writeback. `forbidden` is deliberately not folded into `error`: it is the only evidence for whether a status PATCH authorizes as expected. `dropped` is the bounded queue shedding, which is designed behavior. |
+| `assistant_capability_scope_dropped_total` | counter | `reason` = `mismatch` | Tenant isolation. Emitted for **all** sources, not just `crd`, because `ScopeDocuments` guards the fixture and HTTP paths where a namespace is a producer's convention. |
+
+Dashboard panels for these have **not** been built. The existing two dashboards
+are dev-cluster artifacts in `patch-playground` and the capability source does
+not run there; the alerts, the runbook, and the queries in it are the operator
+surface for now. A panel set — fetch outcome rates, served-entry-age p99, and
+status-write outcomes — is the obvious follow-up once there is a production
+Grafana to put it in.
+
+### What's in the assistant.capability group
+
+Four alert names, five rules (one is a severity-tiered pair, matching
+`AssistantHighErrorRate`'s shape above):
+
+| Alert | Trigger | Severity | Notes |
+|---|---|---|---|
+| `AssistantCapabilityServingStaleConfig` | `stale_served` rate > 0 for 15m | warning | second rule at 1h | critical — projects are composing configuration the control plane can no longer confirm, including entitlements that may have been revoked |
+| `AssistantCapabilityFetchDegradedToEmpty` | `refresh_failed` rate exceeds `stale_served` rate for 15m | critical | LISTs failing with nothing cached to fall back on: those projects compose no capabilities and it looks, to their users, like they bought nothing |
+| `AssistantCapabilityStatusWriteForbidden` | `forbidden` status writes > 0 for 5m | warning | the diagnostic for an unverified IAM assumption; fires loudest in the ten minutes after a cutover |
+| `AssistantCapabilityScopeMismatch` | `scope_dropped_total{reason="mismatch"}` > 0 for 5m | warning | tenant-isolation signal; the gate held, but a producer is emitting cross-project documents |
+
+Everything else is deliberately unalerted, because each is the design working:
+`miss` (one LIST per TTL per active project), `empty` (a project with no
+bindings, and the never-cache-empty rule re-asking each time), a
+`refresh_failed` covered by a `stale_served`, `dropped` status writes (the queue
+shedding rather than blocking a turn), and LIST latency (the cost the cache
+exists to amortize).
+
+Two properties of this group worth knowing before you trust its silence:
+
+- **It is silent in `fixture`/`http` mode structurally, not by threshold.**
+  These counters' children are created on first increment, so without a
+  `CRDSource` the series do not exist and every expression evaluates to an empty
+  vector. That is why no rule uses `== 0`, `absent()`, or a left-hand
+  `or vector(0)` — each would convert "the mode is off" into "the alert is
+  firing". The single default in the group is on the right-hand side of
+  `AssistantCapabilityFetchDegradedToEmpty`'s subtraction, so that a cold-start
+  outage (no `stale_served` series at all) still fires.
+- **It needs a production scrape that this repo does not ship.** There is no
+  `ServiceMonitor` in the production overlay; point whatever scrapes
+  `patch-system` at `assistant:7820/metrics`, and confirm with an instant query
+  for `assistant_capability_fetch_total` before reading silence as health.
+
+Triage for all of them, plus the cutover and rollback procedure, is in
+[`docs/runbooks/capability-source-degraded.md`](../runbooks/capability-source-degraded.md).
+
+### Verifying the rules
+
+There is no promtool step in CI (`.github/workflows/build.yaml` runs
+`validate-kustomize`, which only checks that the bundle renders). The rules and
+their absent-vs-zero behavior are covered by a promtool unit test committed
+beside them; run it with:
+
+```bash
+python3 -c "import yaml,sys; d=[x for x in yaml.safe_load_all(open('config/overlays/production/alerts.yaml')) if x][0]; yaml.safe_dump({'groups': d['spec']['groups']}, open('/tmp/rules.yaml','w'))"
+cp config/overlays/production/alerts_promtool_test.yaml /tmp/
+(cd /tmp && promtool test rules alerts_promtool_test.yaml)
+```
+
 ## Deployment status — what's actually wired up, and what was verified live
 
 **Corrected from an earlier version of this doc**, which said no

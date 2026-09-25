@@ -78,9 +78,21 @@ const (
 // Always project-scoped: the assistant only ever asks whether a subject may act
 // in a specific project, and Milo decides that at the project's control plane.
 func sarEndpoint(baseURL, projectName string) string {
+	return ProjectControlPlaneURL(baseURL, projectName) + sarPath
+}
+
+// ProjectControlPlaneURL returns baseURL addressed at projectName's own control
+// plane — the prefix every project-scoped call to Milo hangs off.
+//
+// Exported for the CRD capability source, which appends the CapabilityBinding
+// LIST path to it. A project is a VIRTUAL control plane, not a namespace in the
+// assistant's cluster, so a caller that addresses baseURL directly (or watches
+// kubernetes.default.svc) observes zero objects forever rather than failing;
+// sharing this one constructor is what keeps a second consumer from inventing
+// that silent mistake.
+func ProjectControlPlaneURL(baseURL, projectName string) string {
 	return strings.TrimRight(baseURL, "/") +
-		fmt.Sprintf(projectControlPlanePath, url.PathEscape(projectName)) +
-		sarPath
+		fmt.Sprintf(projectControlPlanePath, url.PathEscape(projectName))
 }
 
 // SubjectAccessReview is the minimal authorization.k8s.io/v1 SubjectAccessReview

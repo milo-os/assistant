@@ -1,0 +1,131 @@
+# Capabilities from a CRD: a CapabilityBinding object in the cluster becomes a
+# provider tool the model actually calls — the CRD analogue of chat-smoke's
+# fixture path, end to end (binding -> LIST -> compose -> MCP over the gateway
+# -> tool result quoted in the answer), plus the status conditions written back
+# onto the binding that no other source can produce.
+#
+# Runs only when the assistant is deployed with CAPABILITY_SOURCE=crd
+# (config/overlays/dev-crd). Under overlays/dev or dev-catalog the binding is
+# not the source of truth and the assertions below would prove nothing, so the
+# test reports SKIP rather than failing — the same convention chat-smoke uses
+# for its fixture-only skill check.
+#
+# Port-forward handling is chat-smoke's, and for the same reason: the patch CLI
+# fetches the agent card from PATCH_URL and then POSTs to the URL the card
+# advertises (PUBLIC_BASE_URL, hardcoded to http://localhost:1986), so the
+# forward must be on :1986 specifically. Reuses an existing `task dev:forward`.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: capability-crd
+spec:
+  # The environment is persistent — never delete anything from it.
+  skipDelete: true
+  steps:
+    - name: capabilities-composed-from-a-binding
+      try:
+        - script:
+            timeout: 300s
+            content: |
+              set -euo pipefail
+              NS=patch-playground
+              PROJECT=demo-project
+              BINDING=streamco-playground-binding
+
+              SOURCE=$(kubectl -n "${NS}" get deploy assistant \
+                -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CAPABILITY_SOURCE")].value}')
+              if [ "${SOURCE}" != "crd" ]; then
+                echo "SKIP: assistant runs with CAPABILITY_SOURCE=${SOURCE:-<unset>}, not crd (deploy overlays/dev-crd to run this suite)"
+                exit 0
+              fi
+
+              # The kind must be registered before anything can hold an object of
+              # it. In production this is one apply at Milo root (CRD definitions
+              # are global there, only instance data is partitioned); here the
+              # dev-crd overlay installs it into the kind cluster.
+              kubectl get crd capabilitybindings.capabilities.assistant.miloapis.com >/dev/null \
+                || { echo "FAIL: CapabilityBinding CRD is not registered" >&2; exit 1; }
+
+              # Cluster-scoped: no -n. A binding carries no project handle at all
+              # — in production the control-plane path it was written through is
+              # the tenancy statement.
+              kubectl get capabilitybinding "${BINDING}" >/dev/null \
+                || { echo "FAIL: seed binding ${BINDING} is missing" >&2; exit 1; }
+              ENDPOINT=$(kubectl get capabilitybinding "${BINDING}" \
+                -o jsonpath='{.spec.tools.mcpServers[0].endpoint}')
+              echo "binding endpoint: ${ENDPOINT}"
+
+              PORT=1986
+              if ! curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
+                kubectl -n "${NS}" port-forward svc/assistant ${PORT}:7820 >/dev/null 2>&1 &
+                PF=$!
+                trap 'kill ${PF} 2>/dev/null || true' EXIT
+                for i in $(seq 1 30); do
+                  curl -sf -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null && break
+                  [ "$i" = 30 ] && { echo "assistant not reachable over port-forward" >&2; exit 1; }
+                  sleep 1
+                done
+              fi
+
+              REPO="$(git rev-parse --show-toplevel)"
+              cd "${REPO}"
+              export PATCH_URL="http://127.0.0.1:${PORT}"
+              # No static token: the assistant resolves callers via TokenReview.
+              PATCH_TOKEN="$(kubectl -n "${NS}" create token patch-dev --duration=10m)"
+              export PATCH_TOKEN
+
+              # The stub model calls a *pipeline_diagnose* tool when one is in the
+              # tool set and the prompt says "diagnose", then quotes the tool's
+              # findings. So this single answer proves the whole chain: the
+              # binding was LISTed, converted, and composed; its MCP endpoint was
+              # dialed; and the provider's result came back into the prompt. A
+              # composed-but-undialed tool would leave the generic reply instead.
+              ANSWER=$(go run ./cmd/patch chat "diagnose pipeline p-1" --project "${PROJECT}" 2>/dev/null)
+              echo "diagnose answer: ${ANSWER}"
+              if ! echo "${ANSWER}" | grep -q "The provider tool reported"; then
+                # Two very different bugs read alike from here, so separate them
+                # before reporting. A LIST that failed means the environment
+                # never served the project control-plane prefix
+                #   /apis/resourcemanager.miloapis.com/v1alpha1/projects/<p>/control-plane
+                # which a plain kind apiserver does not: `projects` is an
+                # ordinary CRD there, with a status subresource and nothing else.
+                # That is an environment precondition, not a composition defect.
+                if kubectl -n "${NS}" logs deploy/assistant --tail=2000 | grep -q "capability.crd.fetch_failed"; then
+                  echo "FAIL: the capability LIST failed — this cluster does not serve the project control-plane path the CRD source addresses (see capability.crd.fetch_failed in the assistant log)" >&2
+                else
+                  echo "FAIL: no provider tool was called — the binding's tools were not composed" >&2
+                fi
+                exit 1
+              fi
+              echo "${ANSWER}" | grep -q "CONSUMER_LAG" \
+                || { echo "FAIL: the provider's own diagnosis did not reach the answer" >&2; exit 1; }
+              echo "PASS: a CapabilityBinding's tool was composed, dialed, and quoted"
+
+              # The documents came from the control plane, not from a file. The
+              # fetch counter only moves in crd mode, and outcome=miss|hit is the
+              # cached LIST doing its job.
+              METRICS=$(curl -sf -m 5 "http://127.0.0.1:${PORT}/metrics")
+              echo "${METRICS}" | grep -E '^assistant_capability_fetch_total' || true
+              echo "${METRICS}" | grep -Eq '^assistant_capability_fetch_total\{outcome="(hit|miss)"\} [1-9]' \
+                || { echo "FAIL: no capability LIST was recorded — documents did not come from the CRD source" >&2; exit 1; }
+              echo "PASS: documents were served by the cached per-project LIST"
+
+              # Status writeback is the feedback loop the fixture and HTTP
+              # sources cannot have: the assistant is the sole writer of these
+              # conditions, and the provider reads them with kubectl. Writes are
+              # coalesced onto a background worker, so poll rather than assume the
+              # turn above already landed them.
+              for i in $(seq 1 30); do
+                ACCEPTED=$(kubectl get capabilitybinding "${BINDING}" \
+                  -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null || true)
+                COMPOSED=$(kubectl get capabilitybinding "${BINDING}" \
+                  -o jsonpath='{.status.conditions[?(@.type=="Composed")].status}' 2>/dev/null || true)
+                [ "${ACCEPTED}" = "True" ] && [ "${COMPOSED}" = "True" ] && break
+                [ "$i" = 30 ] && {
+                  echo "FAIL: conditions did not settle True (Accepted=${ACCEPTED:-<none>} Composed=${COMPOSED:-<none>})" >&2
+                  kubectl get capabilitybinding "${BINDING}" -o yaml >&2
+                  exit 1
+                }
+                sleep 2
+              done
+              echo "PASS: Accepted=True and Composed=True written back onto the binding"
