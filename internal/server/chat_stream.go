@@ -3,12 +3,12 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/auth"
+	"github.com/milo-os/assistant/internal/sse"
 )
 
 // chatStreamRequestBody is the POST /chat/conversations/{contextId}/sendmessage
@@ -19,6 +19,10 @@ type chatStreamRequestBody struct {
 	Text     string                 `json:"text"`
 	Mentions []assistanta2a.Mention `json:"mentions,omitempty"`
 }
+
+// chatStreamKeepAlive is the heartbeat interval for chatStreamHandler's
+// stream; a var only so tests can shorten it.
+var chatStreamKeepAlive = sse.KeepAliveInterval
 
 // chatStreamHandler serves POST /chat/conversations/{contextId}/sendmessage: a
 // second, REST-shaped front door onto the exact same [assistanta2a.AgentRunner]
@@ -107,8 +111,13 @@ func chatStreamHandler(runner assistanta2a.AgentRunner, authenticator auth.Authe
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
 
-		sink := &chatStreamSink{w: w, flusher: flusher}
+		// Heartbeat through the silent stretches of a turn (model thinking,
+		// slow tool calls) so an idle-closing proxy in front of us — the
+		// portal's, today — doesn't cut the stream. See package sse.
+		sink := &chatStreamSink{out: sse.NewWriter(w, flusher)}
+		stopKeepAlive := sink.out.KeepAlive(chatStreamKeepAlive)
 		result := runner.Run(ctx, assistanta2a.RunRequest{
 			UserText:    body.Text,
 			ProjectName: projectName,
@@ -116,6 +125,7 @@ func chatStreamHandler(runner assistanta2a.AgentRunner, authenticator auth.Authe
 			TaskID:      newRequestID(),
 			Mentions:    body.Mentions,
 		}, sink)
+		stopKeepAlive()
 		if sink.aborted {
 			return
 		}
@@ -142,8 +152,7 @@ func chatStreamHandler(runner assistanta2a.AgentRunner, authenticator auth.Authe
 // instead of accumulating an A2A artifact/status-update sequence for something
 // downstream to translate later.
 type chatStreamSink struct {
-	w       http.ResponseWriter
-	flusher http.Flusher
+	out *sse.Writer
 	// aborted is set once a write fails (the client went away). Once set,
 	// every later callback and the terminal frame in chatStreamHandler are
 	// skipped — there is no one left to write to.
@@ -198,9 +207,7 @@ func (s *chatStreamSink) write(frame map[string]any) {
 		s.aborted = true
 		return
 	}
-	if _, err := fmt.Fprintf(s.w, "data: %s\n\n", encoded); err != nil {
+	if err := s.out.Data(encoded); err != nil {
 		s.aborted = true
-		return
 	}
-	s.flusher.Flush()
 }
