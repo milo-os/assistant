@@ -60,6 +60,23 @@ func TestBuildSystemPrompt_AddendumAppended(t *testing.T) {
 	}
 }
 
+// Tool and skill names are implementation detail. The rule lives in the fixed
+// rules so a persona override cannot bring back "the access-log-triage skill
+// failed to load" in a customer-facing answer.
+func TestOperatingRulesKeepInternalsOutOfAnswers(t *testing.T) {
+	prompt := BuildSystemPrompt("A completely different persona.", "")
+
+	for _, phrase := range []string{
+		"Never name a tool, a skill",
+		"never describe what your tools do or don't return",
+		"without naming what failed",
+	} {
+		if !strings.Contains(prompt, phrase) {
+			t.Errorf("the fixed rules do not say %q", phrase)
+		}
+	}
+}
+
 // The plan token proves what gets applied is what somebody was shown, not
 // that they agreed. Only the prompt can require that human step, and it lives
 // in the fixed rules rather than the persona so replacing the branding cannot
