@@ -162,6 +162,16 @@ spec:
                 secretKeyRef:
                   name: conversation-store-app
                   key: uri
+            # Usage collector. The sendmessage subresource runs agent turns
+            # (the portal's chat path), so it meters usage exactly like the
+            # assistant does. Empty here — unlike the assistant, whose env an
+            # environment replaces wholesale, this env merges by name, so a dev
+            # value would leak into any environment that forgot to override
+            # it. Empty means turns run and nothing is billed (logged as
+            # usage.emit.disabled at startup); the dev overlay points it at the
+            # sink, and a real environment at its platform collector.
+            - name: USAGE_GATEWAY_URL
+              value: ""
           readinessProbe:
             httpGet:
               path: /readyz

@@ -83,3 +83,22 @@ patches:
               - name: capabilities
                 configMap:
                   name: assistant-capabilities
+  # Meter sendmessage turns into the same sink the assistant emits to, so
+  # portal-path usage is visible via the sink's GET /events.
+  - target:
+      kind: Deployment
+      name: assistant-apiserver
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: assistant-apiserver
+        namespace: patch-playground
+      spec:
+        template:
+          spec:
+            containers:
+              - name: apiserver
+                env:
+                  - name: USAGE_GATEWAY_URL
+                    value: "http://sink.patch-playground.svc.cluster.local:7811"
