@@ -26,7 +26,8 @@ spec:
           port: 8443
 
   # Egress: DNS, the CloudNativePG store (5432, same namespace), and the
-  # kube-apiserver for delegated TokenReview / SubjectAccessReview.
+  # kube-apiserver for delegated TokenReview / SubjectAccessReview, and the
+  # usage sink.
   egress:
     # DNS — UDP and TCP for large responses.
     - to:
@@ -62,3 +63,12 @@ spec:
           port: 6443
         - protocol: TCP
           port: 443
+    # Usage sink (USAGE_GATEWAY_URL) for turns run by sendmessage. An
+    # environment with a platform collector adds its own egress rule for it.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: sink
+      ports:
+        - protocol: TCP
+          port: 7811

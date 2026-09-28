@@ -156,6 +156,13 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		Source:     cfg.PublicBaseURL + "/a2a",
 		Logger:     log,
 	})
+	// Emit's no-op path logs at Debug per turn, so at the default level an
+	// unset collector is otherwise invisible: turns complete and nothing is
+	// billed. Say so once, loudly, at startup.
+	if cfg.Usage.GatewayURL == "" {
+		log.Warn("usage.emit.disabled",
+			"reason", "USAGE_GATEWAY_URL is unset — usage will not be metered")
+	}
 
 	// StepLimit and MaxOutputTokens are left at zero: the agent layer applies
 	// the TS-parity defaults (step limit 8, MaxOutputTokens 4096) — that policy
