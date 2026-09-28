@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/auth"
@@ -304,5 +306,52 @@ func TestChatStream_ForwardsBearerTokenForCapabilityProviders(t *testing.T) {
 	}
 	if got := auth.BearerTokenFromContext(recorder.lastCtx); got != goodToken {
 		t.Fatalf("bearer token on ctx = %q, want %q (capability providers forward this)", got, goodToken)
+	}
+}
+
+// silentRunner goes quiet for d before completing — a model thinking or a
+// slow tool call, with no frames to send.
+type silentRunner struct{ d time.Duration }
+
+func (s silentRunner) Run(ctx context.Context, _ assistanta2a.RunRequest, _ assistanta2a.RunSink) assistanta2a.RunResult {
+	select {
+	case <-time.After(s.d):
+	case <-ctx.Done():
+	}
+	return assistanta2a.RunResult{State: assistanta2a.RunCompleted, Text: "ok"}
+}
+
+// A turn that emits nothing for a while must still put bytes on the wire, or
+// the portal's proxy idle-closes the stream (~12s) and the browser shows a
+// bare "network error". The heartbeats are SSE comments, so the frame
+// vocabulary a client decodes is unchanged.
+func TestChatStream_HeartbeatsThroughSilentTurn(t *testing.T) {
+	old := chatStreamKeepAlive
+	chatStreamKeepAlive = 10 * time.Millisecond
+	t.Cleanup(func() { chatStreamKeepAlive = old })
+
+	cfg := testConfig(t)
+	authn, authz := testAuth()
+	srv := httptest.NewServer(New(Deps{
+		Config:        cfg,
+		Logger:        logger.Silent(),
+		Authenticator: authn,
+		Authorizer:    authz,
+		Runner:        silentRunner{d: 100 * time.Millisecond},
+	}))
+	defer srv.Close()
+
+	res := postChatStream(t, srv, goodToken, "c1", project, map[string]any{"text": "hi"})
+	defer res.Body.Close()
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	if n := strings.Count(body, ": ping\n\n"); n < 2 {
+		t.Fatalf("got %d heartbeats during a silent turn, want >= 2; body = %q", n, body)
+	}
+	if !strings.HasSuffix(body, "data: {\"state\":\"completed\",\"text\":\"ok\",\"type\":\"done\"}\n\n") {
+		t.Fatalf("stream did not end on the done frame; body = %q", body)
 	}
 }

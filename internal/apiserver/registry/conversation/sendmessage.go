@@ -15,6 +15,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 
 	"github.com/milo-os/assistant/internal/a2a"
+	"github.com/milo-os/assistant/internal/sse"
 	"github.com/milo-os/assistant/internal/tenant"
 	"github.com/milo-os/assistant/pkg/apis/assistant"
 )
@@ -152,7 +153,10 @@ func (r *SendMessageREST) Connect(ctx context.Context, id string, _ runtime.Obje
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 
-		sink := &sseSink{w: w, flusher: flusher}
+		// Heartbeat through the silent stretches of a turn so an idle-closing
+		// proxy between us and the client can't cut the stream. See package sse.
+		sink := &sseSink{out: sse.NewWriter(w, flusher)}
+		stopKeepAlive := sink.out.KeepAlive(sse.KeepAliveInterval)
 		result := r.runner.Run(req.Context(), a2a.RunRequest{
 			UserText:    body.Text,
 			ProjectName: project,
@@ -160,6 +164,7 @@ func (r *SendMessageREST) Connect(ctx context.Context, id string, _ runtime.Obje
 			TaskID:      uuid.NewString(),
 			Mentions:    body.Mentions,
 		}, sink)
+		stopKeepAlive()
 
 		sink.writeEvent(doneEvent{
 			Type:  "done",
@@ -174,8 +179,7 @@ func (r *SendMessageREST) Connect(ctx context.Context, id string, _ runtime.Obje
 // the response, flushing after every event so a client sees deltas as they
 // happen instead of buffered until the turn completes.
 type sseSink struct {
-	w       http.ResponseWriter
-	flusher http.Flusher
+	out *sse.Writer
 }
 
 func (s *sseSink) OnTextDelta(text string) {
@@ -199,6 +203,5 @@ func (s *sseSink) writeEvent(v any) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(s.w, "data: %s\n\n", data)
-	s.flusher.Flush()
+	_ = s.out.Data(data)
 }
