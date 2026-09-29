@@ -1070,3 +1070,68 @@ func TestComposeObserver_PanickingCallbackDoesNotBreakTheTurn(t *testing.T) {
 		t.Fatalf("expected the panic to be logged; logs:\n%s", buf.String())
 	}
 }
+
+// A host allow-list entry written as a URL or with a port can never match the
+// hostname it is compared against, so composition refuses to start rather than
+// leaving the setting silently doing nothing.
+func TestComposeHostAllowLists_RejectEntriesThatCouldNeverMatch(t *testing.T) {
+	doc := mcpEndpointDoc("http://gateway.example/mcp")
+
+	for _, tc := range []struct {
+		name string
+		opts ComposeOptions
+		want string
+	}{
+		{
+			name: "dial list with a port",
+			opts: ComposeOptions{AllowedMCPEndpointHosts: []string{"gateway.example:8080"}},
+			want: "CAPABILITY_MCP_ENDPOINT_HOSTS",
+		},
+		{
+			name: "dial list as a URL",
+			opts: ComposeOptions{AllowedMCPEndpointHosts: []string{"https://gateway.example/mcp"}},
+			want: "CAPABILITY_MCP_ENDPOINT_HOSTS",
+		},
+		{
+			name: "identity list with a port",
+			opts: ComposeOptions{IdentityForwardHosts: []string{"compute-mcp.compute-system.svc.cluster.local:8080"}},
+			want: "CAPABILITY_IDENTITY_FORWARD_HOSTS",
+		},
+		{
+			name: "identity list as a URL",
+			opts: ComposeOptions{IdentityForwardHosts: []string{"http://compute-mcp.compute-system.svc.cluster.local/mcp"}},
+			want: "CAPABILITY_IDENTITY_FORWARD_HOSTS",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			composed, err := Compose(context.Background(), []CapabilityDocument{doc}, tc.opts)
+			if err == nil {
+				composed.Close()
+				t.Fatalf("compose succeeded; want a rejection naming %s", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want it to name %s", err, tc.want)
+			}
+		})
+	}
+}
+
+// A bare IPv6 address is a legitimate host and must survive the port check.
+func TestComposeHostAllowLists_BareIPv6IsAccepted(t *testing.T) {
+	var dialed []string
+	session := newFakeSession("streams_list")
+	doc := mcpEndpointDoc("http://[2001:db8::1]/mcp")
+	composed, err := Compose(context.Background(), []CapabilityDocument{doc}, ComposeOptions{
+		connect:                 dialRecorder(map[string]*fakeSession{"http://[2001:db8::1]/mcp": session}, &dialed),
+		AllowedMCPEndpointHosts: []string{"2001:db8::1"},
+		IdentityForwardHosts:    []string{"2001:db8::1"},
+	})
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	defer composed.Close()
+
+	if len(dialed) != 1 {
+		t.Fatalf("dialed = %v, want the sanctioned endpoint", dialed)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -339,6 +340,9 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 
 	// Sanctioned identity-forwarding hosts. A malformed entry fails composition
 	// closed, exactly as a malformed SSRF allow-list entry does.
+	if err := validateHostAllowList("CAPABILITY_IDENTITY_FORWARD_HOSTS", opts.IdentityForwardHosts); err != nil {
+		return nil, err
+	}
 	sanctioned, err := parseHostAllowList(opts.IdentityForwardHosts, nil)
 	if err != nil {
 		return nil, err
@@ -356,7 +360,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 	// Sanctioned MCP endpoint hosts (the gateway). Same fail-closed parse as the
 	// two allow-lists above: a mis-typed entry must not silently leave the dial
 	// site unguarded.
-	if err := validateEndpointHosts(opts.AllowedMCPEndpointHosts); err != nil {
+	if err := validateHostAllowList("CAPABILITY_MCP_ENDPOINT_HOSTS", opts.AllowedMCPEndpointHosts); err != nil {
 		return nil, err
 	}
 	dialable, err := parseHostAllowList(opts.AllowedMCPEndpointHosts, nil)
@@ -586,22 +590,31 @@ func ScopeDocuments(docs []CapabilityDocument, expectedProject string, logger *s
 	return kept
 }
 
-// validateEndpointHosts rejects an AllowedMCPEndpointHosts entry that is not a
-// bare host. parseHostAllowList only hard-errors on a malformed CIDR, and this
-// knob takes no CIDRs, so without this a mis-typed entry — a full URL
-// ("https://gateway.example/mcp"), a host:port, a CIDR — would normalize into a
-// string that can never match u.Hostname() and the allow-list would quietly
-// sanction nothing. That failure mode is the worst one available here: every
-// endpoint gets skipped and provider tools disappear cluster-wide with no
-// configuration error to point at. Fail closed at startup instead.
-func validateEndpointHosts(entries []string) error {
+// validateHostAllowList rejects an entry that is not a bare host, for either of
+// the two host allow-lists.
+//
+// Both are matched against a URL's hostname, so an entry written as a URL or as
+// host:port can never match anything. Nothing else notices: the list parses, the
+// assistant starts, and the setting silently does nothing — which for the dial
+// allow-list means every provider tool disappears, and for the identity list
+// means provider calls quietly stop carrying the caller. Refusing to start is
+// the kinder outcome.
+//
+// knob names the setting in the error so an operator knows which one to fix.
+func validateHostAllowList(knob string, entries []string) error {
 	for _, e := range entries {
 		trimmed := strings.TrimSpace(e)
 		if trimmed == "" {
 			continue // blank entries are dropped, as elsewhere
 		}
 		if strings.ContainsAny(trimmed, "/ \t") {
-			return fmt.Errorf("invalid MCP endpoint host %q: expected a bare host, not a URL, host:port, or CIDR", e)
+			return fmt.Errorf("invalid %s entry %q: expected a bare host, not a URL or CIDR", knob, e)
+		}
+		// A port is the easy mistake to make, since the endpoints these match
+		// nearly always carry one. SplitHostPort succeeds only on host:port, so
+		// a bare IPv6 address still passes.
+		if _, _, err := net.SplitHostPort(trimmed); err == nil {
+			return fmt.Errorf("invalid %s entry %q: expected a bare host, drop the port", knob, e)
 		}
 	}
 	return nil
