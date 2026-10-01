@@ -5,6 +5,15 @@ import { useAssistantWorkspace } from '@datum-cloud/assistant-chat-kit';
 import { ASSISTANT_CONFIG } from '../lib/assistant-config';
 
 /**
+ * Props cloud-portal mounts every `portal.dock/project` widget with (its
+ * `DockWidgetProps`). Optional, so the standalone preview can mount this bare.
+ */
+interface ChatDockProps {
+  /** Closes the dock panel. */
+  onClose?: () => void;
+}
+
+/**
  * `ChatDock` — the module exposed as `assistant.miloapis.com/ChatDock`,
  * `$codeRef`'d by the `portal.dock/project` extension in
  * `public/plugin-manifest.json` (id `assistant-chat`, title "Patch AI").
@@ -23,22 +32,26 @@ import { ASSISTANT_CONFIG } from '../lib/assistant-config';
  * component only supplies the host wiring and renders the shared UI.
  *
  * `AssistantWorkspace` fills its container and has no opinion about
- * open/closed state. Nor does this component: cloud-portal's
- * project-bottom-bar (host) already owns opening/closing the panel this gets
- * mounted into (its own toolbar button + slide animation, via `Activity`
- * visible/hidden) — an internal open/closed toggle here would double up with
- * that and force a second click through a redundant collapsed state before
- * the workspace itself ever renders. This component only ever renders the
- * workspace.
+ * open/closed state. Nor does this component: cloud-portal's dock panel (host)
+ * already owns opening/closing the panel this gets mounted into (its own
+ * header button + slide animation, via `Activity` visible/hidden) — an
+ * internal open/closed toggle here would double up with that and force a
+ * second click through a redundant collapsed state before the workspace
+ * itself ever renders. This component only ever renders the workspace.
+ *
+ * The dock is a tall, narrow column, so the workspace renders in its vertical
+ * orientation (top bar + history drawer). The manifest declares
+ * `handlesClose`, so the host drops the close button it would otherwise
+ * overlay on the panel's corner and mounts this with an `onClose` prop
+ * instead; the workspace renders that in its own header.
  *
  * Reads its host wiring (fetch implementation + active project) from
  * `@datum-cloud/portal-plugin-sdk`'s `usePluginFetch()`/`useProjectContext()`
- * rather than props, since a Module Federation `$codeRef` is mounted
- * generically by the host with no way to pass props in — the host wraps this
- * tree in a `PortalPluginHostProvider` instead (see `src/main.tsx` for the
- * standalone-preview example).
+ * — the host wraps this tree in a `PortalPluginHostProvider` (see
+ * `src/main.tsx` for the standalone-preview example). The only prop is the
+ * dock's `onClose`.
  */
-export default function ChatDock() {
+export default function ChatDock({ onClose }: ChatDockProps) {
   const { project } = useProjectContext();
   const pluginFetch = usePluginFetch();
   const projectName = project?.name ?? '';
@@ -51,6 +64,8 @@ export default function ChatDock() {
       style={{ position: 'relative', height: '100%', width: '100%' }}
     >
       <AssistantWorkspace
+        orientation="vertical"
+        onClose={onClose}
         config={ASSISTANT_CONFIG}
         title={workspace.title}
         messages={workspace.messages}

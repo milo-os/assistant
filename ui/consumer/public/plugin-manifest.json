@@ -19,7 +19,8 @@
         "component": {
           "$codeRef": "ChatDock"
         },
-        "order": 0
+        "order": 0,
+        "handlesClose": true
       }
     }
   ]
