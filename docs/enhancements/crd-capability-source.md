@@ -325,19 +325,17 @@ Status writes are a `PATCH` to the binding's `status` subresource through the
 identity. The LIST that produced the document already yielded the object's name,
 which — with the project in the path — is all a status patch needs.
 
-**A note on the subresource axis, because it is a platform trap.** An earlier
-version of this document said Milo's permission model "has no subresource
-axis". That is not quite right, and the truth is worse. A subresource-flavoured
-*convention* does exist and is used across `service-catalog` and `ipam-range`:
-permissions named `updateStatus`. It is **inert** — `GetVerb()` never returns
-`updateStatus`, so no SubjectAccessReview can ever match such a permission,
-while plain `patch` silently confers the ability to write status. Anyone reading
-a `ProtectedResource` would reasonably conclude that granting `updateStatus`
-grants status writes and that withholding it withholds them; neither is true.
-Our `capability-publisher` role therefore withholds `patch` outright rather than
-relying on the convention (`config/milo/iam/roles/capability-publisher.yaml`),
-which is correct by accident of not trusting it. This is a latent platform bug
-worth reporting upstream; it is not this design's to fix.
+Milo registers `capabilitybindings/status.get`, `.update`, and `.patch`
+separately from binding permissions. With subresource authorization enabled,
+customer and capability-publisher Roles cannot access `/status`; neither receives
+these grants. Customers can still read conditions through ordinary binding reads.
+The assistant continues to patch conditions through its Kubernetes RBAC grant.
+
+The provider feature remains off by default. Until it is enabled, IAM checks
+status requests against base resource verbs: withholding `patch` alone does not
+prevent a publisher with `update` from issuing `PUT /status`. The historical
+`updateStatus` permission does not correspond to a Kubernetes request verb and
+must not be used as a status authorization boundary.
 
 The writes are **rate-limited and coalesced** — a turn must not issue an API
 write per binding per message, and this matters more without an informer, since

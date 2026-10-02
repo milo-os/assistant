@@ -106,13 +106,10 @@ rules:
   # (docs/enhancements/crd-capability-source.md, "Rejected alternatives").
   #
   #
-  # The spec/status split below is expressible only because ORDINARY KUBERNETES
-  # RBAC HAS A SUBRESOURCE AXIS. Milo IAM's permission list does not (see
-  # ../iam/resources/capabilitybindings.yaml), which is why the equivalent
-  # separation over there has to be done by withholding `patch` from a whole
-  # role. Here the assistant can be given get/list on the object and patch on
-  # /status ONLY: a service that could rewrite the spec it was handed is not
-  # reading an entitlement, it is granting itself one.
+  # The assistant reads binding specifications and patches only their status.
+  # This certificate identity uses Kubernetes RBAC; the separate Milo IAM status
+  # registration does not change its grant. A service that could rewrite the
+  # spec it was handed could grant itself an entitlement.
   - apiGroups: ["capabilities.assistant.miloapis.com"]
     resources: ["capabilitybindings"]
     verbs: ["get", "list"]
