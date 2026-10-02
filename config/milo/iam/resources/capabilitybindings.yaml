@@ -88,24 +88,20 @@ spec:
   #                         cache miss; watch is declared for `kubectl get -w`
   #                         and for the catalog's own controller, which watches
   #                         what it projects.
-  #   patch                 the assistant's status writeback. A status update is
-  #                         a PATCH to the status subresource, so the review
-  #                         arrives with verb `patch`; without it here the write
-  #                         403s and the feedback loop this design exists to
-  #                         build is silently dead. `update` covers the
-  #                         update-shaped path and is already present for the
-  #                         catalog.
+  #   patch                 retained for compatibility while subresource
+  #                         authorization is off. The publisher Role does not
+  #                         grant this base permission.
   #
-  # Note what is NOT expressible here: this list has no subresource axis, so it
-  # cannot distinguish "patch the spec" from "patch status". The split is
-  # enforced by the ROLES instead — capability-publisher omits patch, so the
-  # catalog cannot write status; see config/milo/iam/roles/. Ordinary Kubernetes
-  # RBAC *does* have a subresource axis, which is why the assistant's own grant
-  # (../../rbac/control-plane-auth-delegator.yaml) can be get/list on the object
-  # and patch on capabilitybindings/status only, and this list cannot. Whether
-  # Milo's authorizer evaluates a status write as `capabilitybindings.patch` on
-  # the parent (assumed here) or as a distinct subresource permission still needs
-  # confirmation for the CATALOG's side; it no longer blocks the assistant.
+  # The CRD serves GET, PUT and PATCH on /status. Register them separately so
+  # enabling Milo subresource authorization requires an explicit status grant.
+  # Customer and publisher IAM Roles receive none; normal reads still include
+  # the assistant's reported conditions. Its own writes use Kubernetes RBAC.
+  subresources:
+    - name: status
+      permissions:
+        - get
+        - update
+        - patch
   permissions:
     - create
     - update

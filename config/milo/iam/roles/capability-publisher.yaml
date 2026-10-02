@@ -9,39 +9,17 @@
 # project's assistant can reach. It is not a role for a human project member;
 # the read-only capability-viewer below is.
 #
-# Note what it does NOT include: `patch`. CONFIRMED CORRECT, 2026-09, and it is
-# better than the house convention — which is inert.
+# The publisher manages binding specifications and receives no /status
+# permissions. With Milo subresource authorization enabled, only an explicit
+# capabilitybindings/status.update or .patch grant can change the assistant's
+# Accepted and Composed conditions. Leaving patch out of the base permissions
+# alone is not a status boundary: legacy authorization also accepts base update
+# for PUT /status. Enforcement remains off by default until the platform enables
+# the provider feature.
 #
-# service-catalog and ipam-range both declare an `updateStatus` permission on
-# their ProtectedResources and include it in admin roles
-# (service-catalog/config/components/iam/protected-resources/service.yaml:19,
-# ipam-range/config/components/iam/roles/ipam-admin.yaml:22-24). Nothing ever
-# checks it: Milo's authorizer builds the permission from
-# attributes.GetVerb() (openfga-provider/internal/webhook/
-# subjectaccessreview_authorizer.go:611), and GetVerb() returns Kubernetes verbs
-# — get/list/create/update/patch/delete/watch — never `updateStatus`. A status
-# write arrives as a PATCH (or an UPDATE) and is checked as plain `patch` on the
-# parent, so `updateStatus` is a permission no request can ever request and
-# `patch` silently confers status-write to anyone holding it. Roles that grant
-# `patch` "for spec edits" and withhold `updateStatus` "to protect status" have
-# it exactly backwards.
-#
-# Withholding `patch` is therefore the only thing that actually keeps a producer
-# off status on this axis.
-#
-# The assistant writes its report back
-# about what it validated and composed (the Accepted and Composed conditions) by
-# PATCHing the binding's status subresource. The assistant's own authority for
-# that does NOT come from this axis — Milo IAM cannot express a grant for a
-# certificate identity at all, so the assistant is authorized on the RBAC leg
-# (../../rbac/control-plane-auth-delegator.yaml, and ./capability-viewer.yaml for
-# the full reasoning). Milo's permission list carries no subresource axis
-# (see ../resources/capabilitybindings.yaml), so withholding `patch` from this
-# role is what keeps the producer off status here; the RBAC grant can and does
-# use the subresource axis, giving the assistant patch on
-# capabilitybindings/status only. A producer that could write status
-# could claim its binding was accepted when it was skipped, which would defeat
-# the entire point of having conditions.
+# The assistant's own status writeback uses the existing Kubernetes RBAC grant
+# in ../../rbac/control-plane-auth-delegator.yaml: get/list on bindings and patch
+# on capabilitybindings/status. This Role does not authorize that identity.
 apiVersion: iam.miloapis.com/v1alpha1
 kind: Role
 metadata:

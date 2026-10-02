@@ -25,15 +25,11 @@
 # never on the parent. The assistant writes conditions back onto a binding (the
 # feedback loop to whoever authored it) and must never be able to edit the spec
 # it was handed: a service that can rewrite its own entitlement is not reading an
-# entitlement. Ordinary Kubernetes RBAC has a subresource axis and both this
-# grant and the production one use it; Milo IAM does not, which is why the
-# equivalent split on that axis has to be done by withholding `patch` from a
-# whole role (config/milo/iam/roles/capability-publisher.yaml). These rules are
-# verb-for-verb identical to the production ClusterRole's, so a writeback that
-# works here is at least not failing on the verb set — it may still 403 in
-# production if the root-RBAC-authorizes-project-paths assumption is wrong, which
-# logs capability.crd.status_forbidden, deliberately its own event rather than
-# folded into generic write errors.
+# entitlement. These Kubernetes RBAC rules match the production ClusterRole.
+# Milo IAM separately registers status permissions for UID-bearing callers;
+# enabling that feature does not change this certificate identity's RBAC grant.
+# A failed status write logs capability.crd.status_forbidden separately from
+# generic write errors.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

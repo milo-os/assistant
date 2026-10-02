@@ -265,15 +265,10 @@ spec:
               var. See the runbook.
 
         - alert: AssistantCapabilityStatusWriteForbidden
-          # A named hypothesis, instrumented. Status conditions are written with
-          # a merge PATCH to capabilitybindings/status, and the grant assumes
-          # Milo evaluates that as `patch` on the parent resource — the
-          # updateStatus convention that appears across the platform is inert
-          # (GetVerb never returns it), so no SubjectAccessReview can match it.
-          # If that assumption is wrong, EVERY status write 403s and nothing
-          # else is visibly wrong: it presents as "conditions never appear",
-          # which reads like a bug in the writer, in the catalog, or in nobody.
-          # This rule makes it say so instead.
+          # The assistant patches capabilitybindings/status using its dedicated
+          # Kubernetes RBAC grant. Missing status permission prevents Accepted
+          # and Composed conditions from reaching providers, even when binding
+          # reads and conversation requests continue to succeed.
           #
           # 403 is never normal here, so the threshold is zero and for: 5m
           # exists only to require a second occurrence rather than a single

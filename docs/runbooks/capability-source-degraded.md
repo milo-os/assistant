@@ -149,15 +149,16 @@ assumption.
 
 and the ClusterRole grants `patch` on `capabilitybindings/status` *only* —
 never on the parent, because a service that can rewrite the spec it was handed
-is not reading an entitlement, it is granting itself one. That split is
-expressible because ordinary Kubernetes RBAC has a subresource axis. **Milo IAM
-does not** — its `updateStatus`-style permission convention is inert (`GetVerb`
-never returns it), so on that leg a status write is just `patch` on the parent.
-The open question is which leg answers, and whether the project router's
-`RequestInfo` recomputation preserves the `status` subresource across the
-prefix strip. If it does not, the request authorizes as plain `patch` on
-`capabilitybindings`, which this identity does not have, and **every** status
-write 403s.
+is not reading an entitlement, it is granting itself one. The assistant's
+certificate uses this Kubernetes RBAC grant. Milo IAM also registers separate
+status permissions, enforced only when the provider's subresource authorization
+feature is enabled; no customer or publisher Role receives them. With that
+feature off, IAM still checks status requests against base resource verbs.
+
+For a failed writeback, verify that the project router preserves the `status`
+subresource and that the assistant's identity has the dedicated RBAC grant.
+Losing the subresource would check `patch` on the parent binding, which this
+identity does not have.
 
 **How to test it, in this order:**
 
