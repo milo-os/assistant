@@ -23,6 +23,7 @@ spec:
   includedPermissions:
     - assistant.miloapis.com/conversations.get
     - assistant.miloapis.com/conversations.list
+    - assistant.miloapis.com/conversations/messages.get
     - assistant.miloapis.com/capabilitygapreports.list
     - assistant.miloapis.com/capabilitygaps.list
     - assistant.miloapis.com/assistantendpoints.get

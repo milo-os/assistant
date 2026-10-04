@@ -113,15 +113,7 @@ func (c completedConfig) New() (*ConversationServer, error) {
 
 	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(v1alpha1.GroupName, Scheme, metav1.ParameterCodec, Codecs)
 
-	v1alpha1Storage := map[string]rest.Storage{
-		"conversations":             conversation.NewConversationREST(c.ExtraConfig.Conversations),
-		"conversations/messages":    conversation.NewMessagesREST(c.ExtraConfig.Conversations),
-		"conversations/sendmessage": conversation.NewSendMessageREST(c.ExtraConfig.Runner),
-		"capabilitygapreports":      capabilitygapreport.NewCapabilityGapReportREST(c.ExtraConfig.GapReports),
-		"capabilitygaps":            capabilitygapreport.NewCapabilityGapREST(c.ExtraConfig.GapReports),
-		"assistantendpoints":        endpoint.NewAssistantEndpointREST(c.ExtraConfig.PublicBaseURL),
-	}
-	apiGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = v1alpha1Storage
+	apiGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = v1alpha1Storage(c.ExtraConfig)
 
 	if err := s.GenericAPIServer.InstallAPIGroup(&apiGroupInfo); err != nil {
 		return nil, err
@@ -129,4 +121,15 @@ func (c completedConfig) New() (*ConversationServer, error) {
 
 	klog.Info("conversations apiserver initialized")
 	return s, nil
+}
+
+func v1alpha1Storage(extra *ExtraConfig) map[string]rest.Storage {
+	return map[string]rest.Storage{
+		"conversations":             conversation.NewConversationREST(extra.Conversations),
+		"conversations/messages":    conversation.NewMessagesREST(extra.Conversations),
+		"conversations/sendmessage": conversation.NewSendMessageREST(extra.Runner),
+		"capabilitygapreports":      capabilitygapreport.NewCapabilityGapReportREST(extra.GapReports),
+		"capabilitygaps":            capabilitygapreport.NewCapabilityGapREST(extra.GapReports),
+		"assistantendpoints":        endpoint.NewAssistantEndpointREST(extra.PublicBaseURL),
+	}
 }
