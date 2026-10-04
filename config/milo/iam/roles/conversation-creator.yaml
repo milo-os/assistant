@@ -1,6 +1,6 @@
-# The grant that makes Patch usable. This single permission is what the
-# assistant's SubjectAccessReview asks for on every request; a subject without
-# it gets a 403 before the agent loop is ever entered.
+# The grant that makes Patch usable. These permissions are what A2A and
+# sendmessage requests ask for; a subject without them gets a 403 before the
+# agent loop is ever entered.
 apiVersion: iam.miloapis.com/v1alpha1
 kind: Role
 metadata:
@@ -13,3 +13,4 @@ spec:
   launchStage: Beta
   includedPermissions:
     - assistant.miloapis.com/conversations.create
+    - assistant.miloapis.com/conversations/sendmessage.create

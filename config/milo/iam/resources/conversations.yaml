@@ -35,6 +35,14 @@ spec:
     - update
     - patch
     - delete
+  # Checked with no fallback to the base permissions above.
+  subresources:
+    - name: messages
+      permissions:
+        - get
+    - name: sendmessage
+      permissions:
+        - create
   # Conversations are scoped to a project: the SAR carries the project name as
   # the request namespace (internal/tenant treats the namespace as
   # authoritative). Organization is listed so an org-level grant is inherited
