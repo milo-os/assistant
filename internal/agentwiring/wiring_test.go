@@ -132,3 +132,40 @@ func TestToolActivityTracker_RemembersNameForResult(t *testing.T) {
 		t.Fatalf("finished = %+v, want the name carried over from the call", sink.done)
 	}
 }
+
+// A result's resources reach the sink on the finished half, where a client can
+// use them; the started half has nothing to report yet.
+func TestToolActivityTracker_ForwardsResultResources(t *testing.T) {
+	sink := &recordingSink{}
+	tr := newToolActivityTracker()
+
+	tr.forward(agent.Event{Kind: agent.EventToolCall, ToolName: "list_workloads", ToolCallID: "call-1"}, sink)
+	tr.forward(agent.Event{
+		Kind: agent.EventToolResult, ToolName: "list_workloads", ToolCallID: "call-1",
+		ToolResources: []agent.ResourceRef{
+			{Kind: "workload", Name: "web-frontend", APIGroup: "compute.datumapis.com"},
+		},
+	}, sink)
+
+	if len(sink.started[0].Resources) != 0 {
+		t.Errorf("started = %+v, want no resources before the call ran", sink.started[0].Resources)
+	}
+	got := sink.done[0].Resources
+	if len(got) != 1 || got[0].Name != "web-frontend" || got[0].Kind != "workload" {
+		t.Fatalf("finished resources = %+v", got)
+	}
+	if got[0].APIGroup != "compute.datumapis.com" {
+		t.Errorf("group should survive the translation: %+v", got[0])
+	}
+}
+
+// A result that named nothing carries nothing — not an empty slice on the wire.
+func TestToolActivityTracker_NoResourcesIsNil(t *testing.T) {
+	sink := &recordingSink{}
+	tr := newToolActivityTracker()
+	tr.forward(agent.Event{Kind: agent.EventToolCall, ToolName: "load_skill"}, sink)
+	tr.forward(agent.Event{Kind: agent.EventToolResult, ToolName: "load_skill"}, sink)
+	if sink.done[0].Resources != nil {
+		t.Fatalf("resources = %+v, want nil", sink.done[0].Resources)
+	}
+}

@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -171,5 +172,63 @@ func TestSummarizeToolInput_CapsLength(t *testing.T) {
 	}
 	if strings.Contains(got, strings.Repeat("x", maxSummaryValueLen+1)) {
 		t.Errorf("a single value escaped its cap: %q", got)
+	}
+}
+
+// A finished call carries the resources it reported, so a client can offer the
+// user what the turn just found.
+func TestExecute_ToolResourcesRideTheFinishedEvent(t *testing.T) {
+	exec := NewExecutor(activityRunner{
+		start: []ToolActivity{{ID: "call-1", Name: "list_workloads"}},
+		finish: []ToolActivity{{ID: "call-1", Name: "list_workloads", OK: true, Resources: []ResourceData{
+			{Kind: "workload", Name: "web-frontend", APIGroup: "compute.datumapis.com"},
+			{Kind: "workload", Name: "api-backend", APIGroup: "compute.datumapis.com"},
+		}}},
+	}, nil)
+
+	acts := activityParts(t, mustEvents(t, exec))
+	if len(acts) != 2 {
+		t.Fatalf("activity data parts = %d, want 2: %+v", len(acts), acts)
+	}
+	if len(acts[0].Resources) != 0 {
+		t.Errorf("a started event has no result to report: %+v", acts[0].Resources)
+	}
+	got := acts[1].Resources
+	if len(got) != 2 || got[0].Name != "web-frontend" || got[1].Name != "api-backend" {
+		t.Fatalf("finished resources = %+v, want both workloads in order", got)
+	}
+	if got[0].Kind != "workload" || got[0].APIGroup != "compute.datumapis.com" {
+		t.Errorf("resource = %+v, want the kind and group a mention carries", got[0])
+	}
+}
+
+// The strings are provider-derived and a client renders them on one line, so
+// they are clamped exactly as an inbound mention is.
+func TestClampResources(t *testing.T) {
+	long := strings.Repeat("x", maxMentionField+1)
+	got := clampResources([]ResourceData{
+		{Kind: " workload ", Name: " web-frontend "},      // trimmed
+		{Kind: "workload", Name: "line\nbreak"},           // dropped
+		{Kind: "", Name: "no-kind"},                       // dropped
+		{Kind: "workload", Name: ""},                      // dropped
+		{Kind: long, Name: "too-long-a-kind"},             // dropped
+		{Kind: "httpproxy", Name: "edge", APIGroup: long}, // kept, group dropped
+	})
+	if len(got) != 2 {
+		t.Fatalf("clamped = %+v, want the two well-formed refs", got)
+	}
+	if got[0].Kind != "workload" || got[0].Name != "web-frontend" {
+		t.Errorf("ref = %+v, want it trimmed", got[0])
+	}
+	if got[1].APIGroup != "" {
+		t.Errorf("an over-long group should be dropped, not carried: %+v", got[1])
+	}
+
+	over := make([]ResourceData, maxActivityResources*2)
+	for i := range over {
+		over[i] = ResourceData{Kind: "workload", Name: fmt.Sprintf("w-%d", i)}
+	}
+	if got := clampResources(over); len(got) != maxActivityResources {
+		t.Fatalf("clamped %d refs, want the cap of %d", len(got), maxActivityResources)
 	}
 }
