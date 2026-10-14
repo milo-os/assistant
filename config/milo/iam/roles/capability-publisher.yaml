@@ -9,8 +9,9 @@
 # project's assistant can reach. It is not a role for a human project member;
 # the read-only capability-viewer below is.
 #
-# The publisher manages binding specifications and receives no /status
-# permissions. With Milo subresource authorization enabled, only an explicit
+# The publisher manages binding specifications. It may read /status, which a
+# normal get already returns, but receives no status write permissions. With
+# Milo subresource authorization enabled, only an explicit
 # capabilitybindings/status.update or .patch grant can change the assistant's
 # Accepted and Composed conditions. Leaving patch out of the base permissions
 # alone is not a status boundary: legacy authorization also accepts base update
@@ -35,5 +36,6 @@ spec:
     - capabilities.assistant.miloapis.com/capabilitybindings.update
     - capabilities.assistant.miloapis.com/capabilitybindings.delete
     - capabilities.assistant.miloapis.com/capabilitybindings.get
+    - capabilities.assistant.miloapis.com/capabilitybindings/status.get
     - capabilities.assistant.miloapis.com/capabilitybindings.list
     - capabilities.assistant.miloapis.com/capabilitybindings.watch

@@ -326,9 +326,10 @@ identity. The LIST that produced the document already yielded the object's name,
 which — with the project in the path — is all a status patch needs.
 
 Milo registers `capabilitybindings/status.get`, `.update`, and `.patch`
-separately from binding permissions. With subresource authorization enabled,
-customer and capability-publisher Roles cannot access `/status`; neither receives
-these grants. Customers can still read conditions through ordinary binding reads.
+separately from binding permissions. Customer and capability-publisher Roles
+receive `status.get`, because ordinary binding reads already return the
+conditions. Neither receives `status.update` or `status.patch`, so with
+subresource authorization enabled neither can write `/status`.
 The assistant continues to patch conditions through its Kubernetes RBAC grant.
 
 The provider feature remains off by default. Until it is enabled, IAM checks
