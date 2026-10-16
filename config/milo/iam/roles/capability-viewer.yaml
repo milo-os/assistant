@@ -87,6 +87,7 @@ spec:
   launchStage: Beta
   includedPermissions:
     - capabilities.assistant.miloapis.com/capabilitybindings.get
+    - capabilities.assistant.miloapis.com/capabilitybindings/status.get
     - capabilities.assistant.miloapis.com/capabilitybindings.list
     # watch is for a human's `kubectl get -w` while debugging a projection. The
     # assistant does not watch — it polls on a cache miss — so this permission

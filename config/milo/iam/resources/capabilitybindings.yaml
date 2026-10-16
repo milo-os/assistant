@@ -94,8 +94,9 @@ spec:
   #
   # The CRD serves GET, PUT and PATCH on /status. Register them separately so
   # enabling Milo subresource authorization requires an explicit status grant.
-  # Customer and publisher IAM Roles receive none; normal reads still include
-  # the assistant's reported conditions. Its own writes use Kubernetes RBAC.
+  # Roles that read bindings also grant status.get, since a normal read already
+  # returns the conditions. No IAM Role grants status update or patch; the
+  # assistant's own writes use Kubernetes RBAC.
   subresources:
     - name: status
       permissions:

@@ -152,8 +152,9 @@ never on the parent, because a service that can rewrite the spec it was handed
 is not reading an entitlement, it is granting itself one. The assistant's
 certificate uses this Kubernetes RBAC grant. Milo IAM also registers separate
 status permissions, enforced only when the provider's subresource authorization
-feature is enabled; no customer or publisher Role receives them. With that
-feature off, IAM still checks status requests against base resource verbs.
+feature is enabled. Customer and publisher Roles receive only `status.get`;
+no Role receives a status write. With that feature off, IAM still checks status
+requests against base resource verbs.
 
 For a failed writeback, verify that the project router preserves the `status`
 subresource and that the assistant's identity has the dedicated RBAC grant.
