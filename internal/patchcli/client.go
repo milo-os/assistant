@@ -103,6 +103,11 @@ type toolActivity struct {
 	Summary   string `json:"summary"`
 	OK        bool   `json:"ok"`
 	ElapsedMs int64  `json:"elapsedMs"`
+	// Resources are the resources the finished call reported back — the same
+	// kind/name/group shape a mention is sent in, because that is what they
+	// become: the "@" picker offers what a turn found as well as what the user
+	// typed (see chat_mentions.go). Absent from a service that predates them.
+	Resources []mention `json:"resources"`
 }
 
 // The data part's discriminator and its in-flight phase, matching the

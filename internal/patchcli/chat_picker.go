@@ -380,6 +380,7 @@ func (m *chatModel) onPickerDeleted(msg pickerDeleteMsg) tea.Cmd {
 		m.convName = ""
 		m.turns = nil
 		m.raw = nil
+		m.mentions.recent = nil
 		m.answer.Reset()
 		m.activity, m.turnActivity = nil, nil
 		m.follow = true

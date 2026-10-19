@@ -268,6 +268,11 @@ type Event struct {
 	ToolInput json.RawMessage
 	// ToolFailed marks an [EventToolResult] the tool reported as an error.
 	ToolFailed bool
+	// ToolResources are the resources an [EventToolResult] named — what the
+	// call actually came back with, for clients that let the user point at a
+	// resource (see toolresources.go). The result's text itself stays
+	// internal; only these identities leave the service.
+	ToolResources []ResourceRef
 }
 
 // UsageSummary is the run's aggregated token usage and metering outcome.
@@ -705,13 +710,15 @@ func (s *Stream) Recv() (Event, error) {
 			}
 		case agentcore.StreamPartToolResult:
 			// Surfaced so callers can close out the activity they showed for
-			// the matching tool call; the content itself stays internal.
+			// the matching tool call, and to report the resources the call
+			// named; the content itself stays internal.
 			if part.ToolResult != nil {
 				return Event{
-					Kind:       EventToolResult,
-					ToolName:   part.ToolResult.Name,
-					ToolCallID: part.ToolResult.ToolCallID,
-					ToolFailed: part.ToolResult.IsError,
+					Kind:          EventToolResult,
+					ToolName:      part.ToolResult.Name,
+					ToolCallID:    part.ToolResult.ToolCallID,
+					ToolFailed:    part.ToolResult.IsError,
+					ToolResources: resourcesInToolResult(part.ToolResult.Content),
 				}, nil
 			}
 		case agentcore.StreamPartFinish:

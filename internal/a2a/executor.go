@@ -172,6 +172,7 @@ func (s *streamSink) OnToolFinish(act ToolActivity) {
 		Kind: toolActivityKind, Phase: toolPhaseFinished,
 		ID: act.ID, Name: act.Name, Summary: act.Summary,
 		OK: act.OK, ElapsedMs: act.Elapsed.Milliseconds(),
+		Resources: clampResources(act.Resources),
 	})
 }
 

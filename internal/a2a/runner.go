@@ -58,6 +58,10 @@ type ToolActivity struct {
 	OK bool
 	// Elapsed is how long the call took; meaningful on the finished half only.
 	Elapsed time.Duration
+	// Resources are the resources the call reported back; meaningful on the
+	// finished half only. They let a client offer what the turn found as
+	// something the user can reference next (see toolActivityData.Resources).
+	Resources []ResourceData
 }
 
 // RunSink receives incremental output while an agent run is in progress. The
