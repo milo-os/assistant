@@ -1,6 +1,7 @@
 import { AssistantWorkspace } from '@datum-cloud/datum-ui/assistant';
 import { usePluginFetch, useProjectContext } from '@datum-cloud/portal-plugin-sdk';
 import { useAssistantWorkspace } from '@datum-cloud/assistant-chat-kit';
+import { useEffect, useRef } from 'react';
 
 import { ASSISTANT_CONFIG } from '../lib/assistant-config';
 
@@ -11,6 +12,11 @@ import { ASSISTANT_CONFIG } from '../lib/assistant-config';
 interface ChatDockProps {
   /** Closes the dock panel. */
   onClose?: () => void;
+  /**
+   * Set when the host opens the dock to ask something. A new `id` means a
+   * new request, even with the same `text`.
+   */
+  prompt?: { id: string; text: string };
 }
 
 /**
@@ -48,14 +54,52 @@ interface ChatDockProps {
  * Reads its host wiring (fetch implementation + active project) from
  * `@datum-cloud/portal-plugin-sdk`'s `usePluginFetch()`/`useProjectContext()`
  * — the host wraps this tree in a `PortalPluginHostProvider` (see
- * `src/main.tsx` for the standalone-preview example). The only prop is the
- * dock's `onClose`.
+ * `src/main.tsx` for the standalone-preview example). Its props are the
+ * dock's `onClose` and an optional `prompt`.
+ *
+ * `prompt` lets the host open the dock with a question already asked (e.g.
+ * a "Ask Patch" button elsewhere in the portal). Each new `prompt.id` starts
+ * a fresh chat and sends `prompt.text` as its first message, once. If the
+ * workspace is mid-turn or the project hasn't resolved yet, the prompt waits
+ * until it can be sent rather than aborting the turn or being dropped. With
+ * no `prompt` the dock behaves as a plain, empty chat.
  */
-export default function ChatDock({ onClose }: ChatDockProps) {
+export default function ChatDock({ onClose, prompt }: ChatDockProps) {
   const { project } = useProjectContext();
   const pluginFetch = usePluginFetch();
   const projectName = project?.name ?? '';
   const workspace = useAssistantWorkspace({ pluginFetch, projectName });
+
+  // Host prompts run in two commits. `onNewChat` points the hook's chat-id
+  // ref at a fresh id synchronously, but `onSuggestion` reads the prior
+  // messages and readiness from refs that only catch up on the next commit;
+  // sending in the same tick would prepend the old chat's transcript. So the
+  // first pass starts the chat and parks the text, and the second pass (once
+  // `currentChatId` has moved off the old id) sends it. Both refs survive
+  // StrictMode's double effects, so a prompt id is acted on at most once.
+  const handledPromptIdRef = useRef<string | null>(null);
+  const pendingSendRef = useRef<{ text: string; fromChatId: string } | null>(null);
+  const { isReady, currentChatId, onNewChat, onSuggestion } = workspace;
+  const messageCount = workspace.messages.length;
+
+  useEffect(() => {
+    const pending = pendingSendRef.current;
+    if (pending && currentChatId !== pending.fromChatId) {
+      pendingSendRef.current = null;
+      // Anything other than a blank, idle chat means the user moved on
+      // (e.g. opened a past chat) before this commit; don't send into it.
+      if (isReady && messageCount === 0) onSuggestion(pending.text);
+      return;
+    }
+
+    if (!prompt || prompt.id === handledPromptIdRef.current) return;
+    // Wait out an in-flight turn or transcript load (`onNewChat` would abort
+    // it) and an unresolved project (a turn needs its name).
+    if (!isReady || !projectName) return;
+    handledPromptIdRef.current = prompt.id;
+    pendingSendRef.current = { text: prompt.text, fromChatId: currentChatId };
+    onNewChat();
+  }, [prompt, isReady, projectName, currentChatId, messageCount, onNewChat, onSuggestion]);
 
   return (
     <div
