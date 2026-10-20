@@ -18,6 +18,10 @@ import (
 type chatStreamRequestBody struct {
 	Text     string                 `json:"text"`
 	Mentions []assistanta2a.Mention `json:"mentions,omitempty"`
+	// Surface says where the conversation is happening (e.g. the portal's
+	// project home page during first-run setup). It is validated before it
+	// goes anywhere; see [assistanta2a.ValidateSurface].
+	Surface *assistanta2a.Surface `json:"surface,omitempty"`
 }
 
 // chatStreamKeepAlive is the heartbeat interval for chatStreamHandler's
@@ -81,6 +85,11 @@ func chatStreamHandler(runner assistanta2a.AgentRunner, authenticator auth.Authe
 			return
 		}
 
+		surface, note := assistanta2a.ValidateSurface(body.Surface)
+		if note != "" {
+			logger.Debug("http.chatstream.surface_ignored", "contextId", contextID, "reason", note)
+		}
+
 		if err := authorizer.AuthorizeProject(ctx, principal, projectName); err != nil {
 			writeAuthErrWith(w, logger, err, "Authorization failed")
 			return
@@ -124,6 +133,7 @@ func chatStreamHandler(runner assistanta2a.AgentRunner, authenticator auth.Authe
 			ContextID:   contextID,
 			TaskID:      newRequestID(),
 			Mentions:    body.Mentions,
+			Surface:     surface,
 		}, sink)
 		stopKeepAlive()
 		if sink.aborted {

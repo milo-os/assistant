@@ -240,6 +240,9 @@ type Params struct {
 	// Mentions are the resources the user referenced with "@kind/name"; they
 	// add one system note to this turn (see mentionNote).
 	Mentions []Mention
+	// Surface says where the conversation is happening; a known surface adds
+	// one section to this turn's system prompt (see surfaceSection).
+	Surface *Surface
 }
 
 // EventKind discriminates streamed [Event]s.
@@ -392,11 +395,14 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	turnCtx, turnSpan := tracer.Start(turnCtx, "conversation.turn")
 	turnStart := time.Now()
 
-	// The mention note is per-turn, so it is appended after the (stable)
-	// system prompt rather than composed into it.
+	// The mention note and surface section are per-turn, so they are appended
+	// after the (stable) system prompt rather than composed into it.
 	system := BuildSystemPrompt(c.deps.Persona, composed.SystemPromptAddendum)
 	if note := mentionNote(params.ProjectName, params.Mentions); note != "" {
 		system += "\n\n" + note
+	}
+	if section := surfaceSection(params.Surface); section != "" {
+		system += "\n\n" + section
 	}
 
 	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{

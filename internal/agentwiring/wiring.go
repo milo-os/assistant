@@ -335,6 +335,7 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 		ContextID:   req.ContextID,
 		TaskID:      req.TaskID,
 		Mentions:    agentMentions(req.Mentions),
+		Surface:     agentSurface(req.Surface),
 	})
 	defer stream.Close()
 
@@ -378,6 +379,15 @@ func agentMentions(ms []assistanta2a.Mention) []agent.Mention {
 		out = append(out, agent.Mention{Kind: m.Kind, Name: m.Name, APIGroup: m.APIGroup})
 	}
 	return out
+}
+
+// agentSurface restates the transport's surface as the orchestration layer's
+// own type, for the same reason as agentMentions.
+func agentSurface(s *assistanta2a.Surface) *agent.Surface {
+	if s == nil {
+		return nil
+	}
+	return &agent.Surface{Name: s.Name, Network: s.Network}
 }
 
 // toolActivityTracker turns the run loop's tool-call/tool-result event pair
