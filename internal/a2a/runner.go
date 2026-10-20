@@ -30,6 +30,9 @@ type RunRequest struct {
 	// Mentions are the resources the user pointed at with "@kind/name". They
 	// are advisory context for the turn, already present verbatim in UserText.
 	Mentions []Mention
+	// Surface says where the conversation is happening. Nil when the caller
+	// sent none; otherwise already passed through [ValidateSurface].
+	Surface *Surface
 }
 
 // RunResult is the terminal outcome of [AgentRunner.Run].

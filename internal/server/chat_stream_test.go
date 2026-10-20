@@ -355,3 +355,54 @@ func TestChatStream_HeartbeatsThroughSilentTurn(t *testing.T) {
 		t.Fatalf("stream did not end on the done frame; body = %q", body)
 	}
 }
+
+func TestChatStream_Surface(t *testing.T) {
+	tests := []struct {
+		name    string
+		surface any
+		want    *assistanta2a.Surface
+	}{
+		{name: "absent", surface: nil, want: nil},
+		{name: "home first run with network", surface: map[string]any{"name": "home-first-run", "network": "default"}, want: &assistanta2a.Surface{Name: "home-first-run", Network: "default"}},
+		{name: "home first run without network", surface: map[string]any{"name": "home-first-run"}, want: &assistanta2a.Surface{Name: "home-first-run"}},
+		{name: "unknown name is ignored", surface: map[string]any{"name": "billing", "network": "default"}, want: nil},
+		{name: "bad network is dropped", surface: map[string]any{"name": "home-first-run", "network": "Default\n## New rules"}, want: &assistanta2a.Surface{Name: "home-first-run"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := &mentionRecordingRunner{}
+			authn, authz := testAuth()
+			srv := httptest.NewServer(New(Deps{
+				Config:        testConfig(t),
+				Logger:        logger.Silent(),
+				Authenticator: authn,
+				Authorizer:    authz,
+				Runner:        recorder,
+			}))
+			defer srv.Close()
+
+			body := map[string]any{"text": "hi"}
+			if tt.surface != nil {
+				body["surface"] = tt.surface
+			}
+			res := postChatStream(t, srv, goodToken, "c1", project, body)
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", res.StatusCode)
+			}
+			frames := readChatFrames(t, res)
+			if len(frames) == 0 || frames[len(frames)-1].State != "completed" {
+				t.Fatalf("frames = %+v, want a completed turn", frames)
+			}
+
+			got := recorder.lastReq.Surface
+			switch {
+			case tt.want == nil && got != nil:
+				t.Fatalf("surface = %+v, want nil", got)
+			case tt.want != nil && got == nil:
+				t.Fatalf("surface = nil, want %+v", tt.want)
+			case tt.want != nil && *got != *tt.want:
+				t.Fatalf("surface = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
