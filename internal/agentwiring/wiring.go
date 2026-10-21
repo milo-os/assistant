@@ -8,7 +8,9 @@
 package agentwiring
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +26,7 @@ import (
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/capability/crdsource"
 	"github.com/milo-os/assistant/internal/config"
+	"github.com/milo-os/assistant/internal/execapproval"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
@@ -260,6 +263,22 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	execApprovalKey, err := resolveExecApprovalKey(cfg.AssistantExecKey, planTokenKey)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// Exec approvals require a shared, durable consume ledger. A deployment
+	// without Postgres cannot run compute exec, even if it can diagnose it.
+	var execApprovals execapproval.Store
+	if cfg.ConversationStoreURL != "" && len(execApprovalKey) >= 32 {
+		pg, err := execapproval.NewPostgresStore(ctx, cfg.ConversationStoreURL)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		execApprovals = pg
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); pg.Close() }
+	}
 
 	// The Composed half of the status feedback loop, wired only when there is a
 	// status writer — i.e. only under CAPABILITY_SOURCE=crd, where a document
@@ -286,6 +305,8 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		GapReports:                     gaps,
 		PlatformAPI:                    platformAPI,
 		PlanTokenKey:                   planTokenKey,
+		ExecApprovalKey:                execApprovalKey,
+		ExecApprovals:                  execApprovals,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
 		CapabilityIdentityForwardHosts: cfg.CapabilityIdentityForwardHosts,
 		CapabilityMCPEndpointHosts:     cfg.CapabilityMCPEndpointHosts,
@@ -294,6 +315,23 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		Metrics:                        metrics,
 	})
 	return conversationRunner{conv: conv}, store, cleanup, nil
+}
+
+func resolveExecApprovalKey(encoded string, planTokenKey []byte) ([]byte, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		key, err = base64.RawStdEncoding.DecodeString(encoded)
+	}
+	if err != nil || len(key) < 32 {
+		return nil, errors.New("ASSISTANT_EXEC_KEY must be base64-encoded and at least 32 bytes")
+	}
+	if bytes.Equal(key, planTokenKey) {
+		return nil, errors.New("ASSISTANT_EXEC_KEY must differ from PLAN_TOKEN_KEY")
+	}
+	return key, nil
 }
 
 // newPlatformAPI builds the client the base platform tools read and write a
@@ -330,14 +368,15 @@ type conversationRunner struct {
 
 func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest, sink assistanta2a.RunSink) assistanta2a.RunResult {
 	stream := r.conv.Run(ctx, agent.Params{
-		UserText:    req.UserText,
-		ProjectName: req.ProjectName,
-		ContextID:   req.ContextID,
-		TaskID:      req.TaskID,
-		Mentions:    agentMentions(req.Mentions),
-		Surface:     agentSurface(req.Surface),
+		UserText:     req.UserText,
+		ApprovalText: req.ApprovalText,
+		ProjectName:  req.ProjectName,
+		ContextID:    req.ContextID,
+		TaskID:       req.TaskID,
+		Mentions:     agentMentions(req.Mentions),
+		Surface:      agentSurface(req.Surface),
 	})
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	activity := newToolActivityTracker()
 	for {

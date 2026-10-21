@@ -37,6 +37,15 @@ func UserText(msg *a2a.Message) string {
 	return strings.TrimSpace(strings.Join(parts, " "))
 }
 
+// ApprovalText preserves the raw text only for a single user-role text part.
+// Joined or mixed content must never become a command approval.
+func ApprovalText(msg *a2a.Message) string {
+	if msg == nil || msg.Role != a2a.MessageRoleUser || len(msg.Parts) != 1 {
+		return ""
+	}
+	return msg.Parts[0].Text()
+}
+
 func metaString(meta map[string]any, key string) string {
 	if meta == nil {
 		return ""

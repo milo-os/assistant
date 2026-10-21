@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -483,5 +485,23 @@ func TestLoad_PlanTokenKeyIsOptional(t *testing.T) {
 	}
 	if cfg.PlanTokenKey != "a-configured-secret-that-is-long" {
 		t.Errorf("plan token key = %q, want it trimmed", cfg.PlanTokenKey)
+	}
+}
+
+func TestLoad_AssistantExecKeyIsSeparateAndOptional(t *testing.T) {
+	cfg, err := load(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AssistantExecKey != "" {
+		t.Fatal("exec key must be absent by default")
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("e", 32)))
+	cfg, err = load(t, map[string]string{"PLAN_TOKEN_KEY": "resource-plan-secret", "ASSISTANT_EXEC_KEY": "  " + encoded + "  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PlanTokenKey != "resource-plan-secret" || cfg.AssistantExecKey != encoded {
+		t.Fatalf("keys crossed or untrimmed: plan=%q exec=%q", cfg.PlanTokenKey, cfg.AssistantExecKey)
 	}
 }

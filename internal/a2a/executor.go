@@ -76,11 +76,12 @@ func (e *Executor) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter
 
 		sink := &streamSink{ec: ec, yield: yield}
 		result := e.runner.Run(ctx, RunRequest{
-			UserText:    userText,
-			ProjectName: projectName,
-			ContextID:   ec.ContextID,
-			TaskID:      string(ec.TaskID),
-			Mentions:    Mentions(ec.Message, ec.Metadata),
+			UserText:     userText,
+			ApprovalText: ApprovalText(ec.Message),
+			ProjectName:  projectName,
+			ContextID:    ec.ContextID,
+			TaskID:       string(ec.TaskID),
+			Mentions:     Mentions(ec.Message, ec.Metadata),
 		}, sink)
 		if sink.stopped {
 			return

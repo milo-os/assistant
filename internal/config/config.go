@@ -226,6 +226,11 @@ type Config struct {
 	// holds, but an outstanding plan is lost on restart and refused by a
 	// sibling replica. See internal/plantoken.
 	PlanTokenKey string
+	// AssistantExecKey signs human-approved compute exec assertions (env
+	// ASSISTANT_EXEC_KEY; base64-encoded key of at least 32 bytes). It is
+	// separate from PlanTokenKey, which authorizes resource plan/apply.
+	// Unset disables the exec run tool.
+	AssistantExecKey string
 
 	// CapabilityIdentityForwardHosts are the operator-sanctioned MCP endpoint
 	// hosts that may receive the calling user's bearer token and the turn's
@@ -462,6 +467,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		},
 		PlatformAPIURL:                 platformAPIURL,
 		PlanTokenKey:                   env("PLAN_TOKEN_KEY"),
+		AssistantExecKey:               env("ASSISTANT_EXEC_KEY"),
 		PlatformAPICACertPath:          platformAPICACertPath,
 		CapabilitySource:               capabilitySource,
 		CapabilityDocsFixture:          capabilityDocsFixture,

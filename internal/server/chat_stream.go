@@ -128,12 +128,13 @@ func chatStreamHandler(runner assistanta2a.AgentRunner, authenticator auth.Authe
 		sink := &chatStreamSink{out: sse.NewWriter(w, flusher)}
 		stopKeepAlive := sink.out.KeepAlive(chatStreamKeepAlive)
 		result := runner.Run(ctx, assistanta2a.RunRequest{
-			UserText:    body.Text,
-			ProjectName: projectName,
-			ContextID:   contextID,
-			TaskID:      newRequestID(),
-			Mentions:    body.Mentions,
-			Surface:     surface,
+			UserText:     body.Text,
+			ApprovalText: body.Text,
+			ProjectName:  projectName,
+			ContextID:    contextID,
+			TaskID:       newRequestID(),
+			Mentions:     body.Mentions,
+			Surface:      surface,
 		}, sink)
 		stopKeepAlive()
 		if sink.aborted {
