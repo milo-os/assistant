@@ -95,10 +95,20 @@ func approvedExecResult(messages []agentcore.Message) string {
 			}
 			var b strings.Builder
 			fmt.Fprintf(&b, "Approved exec request result for %s (container %s).\n", out.Instance, out.Container)
-			if out.Session != "" {
-				fmt.Fprintf(&b, "Session: %s\n", out.Session)
+			if out.Session == "" {
+				b.WriteString("No console session was created; the command did not run.\n")
+				if out.Reason != "" {
+					fmt.Fprintf(&b, "Reason: %s\n", out.Reason)
+				}
+				b.WriteString("The approval was consumed. Create a new plan before retrying.")
+				return b.String()
 			}
-			fmt.Fprintf(&b, "Exit code: %d\n", out.ExitCode)
+			fmt.Fprintf(&b, "Session: %s\n", out.Session)
+			if out.Reason == "Completed" {
+				fmt.Fprintf(&b, "Exit code: %d\n", out.ExitCode)
+			} else {
+				b.WriteString("Command exit code was not confirmed.\n")
+			}
 			if out.Reason != "" {
 				fmt.Fprintf(&b, "Reason: %s\n", out.Reason)
 			}
