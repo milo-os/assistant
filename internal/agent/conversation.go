@@ -17,6 +17,7 @@ import (
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/auth"
 	"github.com/milo-os/assistant/internal/capability"
+	"github.com/milo-os/assistant/internal/execapproval"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
@@ -141,6 +142,9 @@ type Deps struct {
 	// cannot check a token must not issue one. Ignored when PlatformAPI is
 	// nil. See internal/plantoken.
 	PlanTokenKey []byte
+	// ExecApprovals atomically consumes human-approved compute exec plans.
+	// Nil removes the execution tool from the model's available tools.
+	ExecApprovals execapproval.Store
 	// GapReports backs the report_capability_gap__<service> tools: lets
 	// the model flag that a provider service is missing a tool or lookup
 	// a user needed, written to THAT PROVIDER's own project (see
@@ -406,10 +410,11 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	}
 
 	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
-		Model:           tracedModel(c.deps.Model, c.deps.Metrics),
-		System:          system,
-		Messages:        messages,
-		Tools:           tracedTools(composed.Tools, composed.Mutating, c.deps.Metrics),
+		Model:    tracedModel(c.deps.Model, c.deps.Metrics),
+		System:   system,
+		Messages: messages,
+		Tools: tracedTools(gateExecTools(composed.Tools, params.UserText, params.ProjectName,
+			caller.BearerToken, c.deps.ExecApprovals, c.deps.PlanTokenKey), composed.Mutating, c.deps.Metrics),
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),
@@ -588,7 +593,7 @@ func summarize(ctx context.Context, model agentcore.Model, turns []history.Turn)
 	if err != nil {
 		return history.Turn{}, fmt.Errorf("agent: summarize: %w", err)
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	var text strings.Builder
 	for {

@@ -24,6 +24,7 @@ import (
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/capability/crdsource"
 	"github.com/milo-os/assistant/internal/config"
+	"github.com/milo-os/assistant/internal/execapproval"
 	"github.com/milo-os/assistant/internal/gapreport"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/memory"
@@ -260,6 +261,18 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// Exec approvals require a shared, durable consume ledger. A deployment
+	// without Postgres cannot run compute exec, even if it can diagnose it.
+	var execApprovals execapproval.Store
+	if cfg.ConversationStoreURL != "" && len(planTokenKey) >= 32 {
+		pg, err := execapproval.NewPostgresStore(ctx, cfg.ConversationStoreURL)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		execApprovals = pg
+		prevCleanup := cleanup
+		cleanup = func() { prevCleanup(); pg.Close() }
+	}
 
 	// The Composed half of the status feedback loop, wired only when there is a
 	// status writer — i.e. only under CAPABILITY_SOURCE=crd, where a document
@@ -286,6 +299,7 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		GapReports:                     gaps,
 		PlatformAPI:                    platformAPI,
 		PlanTokenKey:                   planTokenKey,
+		ExecApprovals:                  execApprovals,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
 		CapabilityIdentityForwardHosts: cfg.CapabilityIdentityForwardHosts,
 		CapabilityMCPEndpointHosts:     cfg.CapabilityMCPEndpointHosts,
@@ -337,7 +351,7 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 		Mentions:    agentMentions(req.Mentions),
 		Surface:     agentSurface(req.Surface),
 	})
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	activity := newToolActivityTracker()
 	for {
