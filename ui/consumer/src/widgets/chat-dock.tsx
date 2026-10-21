@@ -27,7 +27,7 @@ interface ChatDockProps {
    * same value again is a no-op.
    */
   chatId?: string;
-  /** Called whenever the current conversation changes, including the initial one. */
+  /** Called when the current conversation changes, once it is saved server side (has messages, no reply streaming). */
   onChatChange?: (chatId: string) => void;
   /**
    * Where the host placed it: `dock` (default) is the tall, narrow side
@@ -102,7 +102,9 @@ interface ChatDockProps {
  *
  * `chatId` and `onChatChange` let the host move one conversation between
  * placements (e.g. from the page body into the dock). `onChatChange` reports
- * the current chat id on mount and on every change; handing that id to
+ * the current chat id once it is saved on the server (it has messages and no
+ * reply is streaming), and again whenever it changes to another saved chat;
+ * handing that id to
  * another instance as `chatId` opens it there, once readiness allows, the
  * same way the prompt waits. A `prompt` that has not been acted on yet wins
  * over a `chatId` arriving with it. Only the persisted transcript is loaded,
@@ -197,13 +199,17 @@ export default function ChatDock({
   }, [prompt, chatId, isReady, projectName, currentChatId, chatList, messageCount, onNewChat, onLoadChat, onSuggestion]);
 
   // Report each distinct chat id once, so StrictMode's double effects and
-  // unrelated re-renders don't repeat it to the host.
+  // unrelated re-renders don't repeat it to the host. Only a saved chat is
+  // reported: the assistant stores a conversation when a turn finishes with
+  // an answer, so a blank chat, or one whose first reply is still streaming,
+  // would 404 in another instance asked to open it.
+  const savedChat = messageCount > 0 && workspace.status === 'ready';
   const reportedChatIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!onChatChange || currentChatId === reportedChatIdRef.current) return;
+    if (!onChatChange || !savedChat || currentChatId === reportedChatIdRef.current) return;
     reportedChatIdRef.current = currentChatId;
     onChatChange(currentChatId);
-  }, [currentChatId, onChatChange]);
+  }, [currentChatId, savedChat, onChatChange]);
 
   const noProjectNotice = !project && (
     <p role="status" style={{ position: 'absolute', bottom: 0, left: 0, right: 0, opacity: 0.7 }}>

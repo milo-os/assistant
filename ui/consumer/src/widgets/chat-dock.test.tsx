@@ -318,27 +318,40 @@ describe('ChatDock chatId', () => {
 });
 
 describe('ChatDock onChatChange', () => {
-  it('reports the chat on mount and on change, not on re-render', async () => {
+  it('reports only chats with messages, once each, not on re-render', async () => {
     const onChatChange = vi.fn();
     const reported = () => onChatChange.mock.calls.map(([id]) => id as string);
     const { rerender } = renderDockWith({ onChatChange });
     await settle();
-    // StrictMode's extra new chat on mount (see above) is a real change, so
-    // it may be reported too; the last report is the chat on screen and no
-    // id is reported twice in a row.
-    expect(reported().at(-1)).toBe(chatId());
-    expect(reported().every((id, i, all) => id !== all[i - 1])).toBe(true);
-    const mounted = reported().length;
+    // The blank chat it mounts with isn't saved on the server yet, so nothing
+    // is handed over until a conversation has messages.
+    expect(reported()).toEqual([]);
 
     // A re-render, even with a fresh callback identity, is not a change.
     rerender({ onChatChange: (id: string) => onChatChange(id) });
     await settle();
-    expect(reported()).toHaveLength(mounted);
+    expect(reported()).toEqual([]);
 
     rerender({ onChatChange, chatId: 'chat-a' });
     await waitFor(() => expect(chatId()).toBe('chat-a'));
     await settle();
-    expect(reported().slice(mounted)).toEqual(['chat-a']);
+    expect(reported()).toEqual(['chat-a']);
+  });
+});
+
+describe('ChatDock onChatChange while a reply streams', () => {
+  it('reports a prompt chat only after its first reply finishes', async () => {
+    const onChatChange = vi.fn();
+    renderDockWith({ prompt: { id: 'p1', text: 'hello' }, onChatChange });
+    await waitFor(() => expect(turns).toHaveLength(1));
+    await settle();
+    // The assistant saves a conversation when a turn finishes, so an id
+    // handed over now would 404 in the other instance.
+    expect(onChatChange).not.toHaveBeenCalled();
+
+    await act(async () => turns[0]!.finish());
+    await settle();
+    expect(onChatChange.mock.calls.map(([id]) => id)).toEqual([turns[0]!.chatId]);
   });
 });
 
