@@ -104,7 +104,9 @@ func approvedExecResult(messages []agentcore.Message) string {
 				return b.String()
 			}
 			fmt.Fprintf(&b, "Session: %s\n", out.Session)
-			if out.Reason == "Completed" {
+			// Compute omits reason when the command exits normally, including
+			// nonzero exits. A nonempty reason describes a platform ending.
+			if !out.TimedOut && (out.Reason == "" || out.Reason == "Completed") {
 				fmt.Fprintf(&b, "Exit code: %d\n", out.ExitCode)
 			} else {
 				b.WriteString("Command exit code was not confirmed.\n")

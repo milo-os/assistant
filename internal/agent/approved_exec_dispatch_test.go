@@ -35,7 +35,7 @@ func TestApprovedExecRunsBeforeModelCanReplan(t *testing.T) {
 				t.Errorf("provider received unapproved input")
 			}
 			calls.Add(1)
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: `{"instance":"test","container":"app","session":"assistant-exec-test","stdout":"ok","exitCode":0,"reason":"Completed"}`}}}, nil
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: `{"instance":"test","container":"app","session":"assistant-exec-test","stdout":"ok","exitCode":0}`}}}, nil
 		})
 	srv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true}))
@@ -140,5 +140,27 @@ func TestApprovedExecResultDoesNotInventCommandExitBeforeSession(t *testing.T) {
 	if !strings.Contains(answer, "command did not run") || !strings.Contains(answer, "approval was consumed") ||
 		strings.Contains(answer, "Exit code:") {
 		t.Fatalf("pre-session failure reported as a command exit: %q", answer)
+	}
+}
+
+func TestApprovedExecResultDistinguishesCommandExitFromPlatformEnding(t *testing.T) {
+	for _, tc := range []struct {
+		name, result string
+		wantExit     bool
+	}{
+		{"nonzero command exit", `{"instance":"test","container":"app","session":"assistant-exec-test","exitCode":7}`, true},
+		{"stream failure", `{"instance":"test","container":"app","session":"assistant-exec-test","exitCode":1,"reason":"session stream ended: disconnected"}`, false},
+		{"timeout", `{"instance":"test","container":"app","session":"assistant-exec-test","exitCode":1,"timedOut":true}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			messages := []agentcore.Message{{Role: agentcore.RoleTool, Content: []agentcore.ContentPart{{
+				Kind: agentcore.ContentToolResult,
+				ToolResult: &agentcore.ToolResult{Name: computeExecRunTool, Content: tc.result},
+			}}}}
+			answer := approvedExecResult(messages)
+			if got := strings.Contains(answer, "Exit code:"); got != tc.wantExit {
+				t.Fatalf("exit code shown = %v, want %v: %q", got, tc.wantExit, answer)
+			}
+		})
 	}
 }
