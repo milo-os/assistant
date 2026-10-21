@@ -55,6 +55,10 @@ func TestExecApprovalRequiresCurrentExactUserTurnAndConsumesOnce(t *testing.T) {
 	if got != execApprovalAssertion(key, "project", "caller-token", plan) || got == "model-forged" {
 		t.Fatal("provider did not receive the server-created approval assertion")
 	}
+	if got == execApprovalAssertion(key, "other-project", "caller-token", plan) ||
+		got == execApprovalAssertion(key, "project", "refreshed-token", plan) {
+		t.Fatal("approval assertion was not bound to project and current bearer token")
+	}
 	if _, err := approved.Execute(ctx, input); err == nil || inner.called != 1 {
 		t.Fatalf("replay accepted: err=%v, provider calls=%d", err, inner.called)
 	}

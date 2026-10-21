@@ -264,7 +264,7 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	// Exec approvals require a shared, durable consume ledger. A deployment
 	// without Postgres cannot run compute exec, even if it can diagnose it.
 	var execApprovals execapproval.Store
-	if cfg.ConversationStoreURL != "" && len(planTokenKey) >= 32 {
+	if cfg.ConversationStoreURL != "" && cfg.PlanTokenKey != "" && len(planTokenKey) >= 32 {
 		pg, err := execapproval.NewPostgresStore(ctx, cfg.ConversationStoreURL)
 		if err != nil {
 			return nil, nil, nil, err
