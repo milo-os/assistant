@@ -415,12 +415,19 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		system += "\n\n" + section
 	}
 
+	gatedTools := gateExecTools(composed.Tools, params.ApprovalText, params.ProjectName,
+		caller.BearerToken, c.deps.ExecApprovals, c.deps.ExecApprovalKey)
+	model := agentcore.Model(tracedModel(c.deps.Model, c.deps.Metrics))
+	if token, ok := approvedExecToken(params.ApprovalText, params.UserText); ok {
+		if _, available := gatedTools[computeExecRunTool]; available {
+			model = &approvedExecModel{inner: model, planToken: token}
+		}
+	}
 	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
-		Model:    tracedModel(c.deps.Model, c.deps.Metrics),
-		System:   system,
-		Messages: messages,
-		Tools: tracedTools(gateExecTools(composed.Tools, params.ApprovalText, params.ProjectName,
-			caller.BearerToken, c.deps.ExecApprovals, c.deps.ExecApprovalKey), composed.Mutating, c.deps.Metrics),
+		Model:           model,
+		System:          system,
+		Messages:        messages,
+		Tools:           tracedTools(gatedTools, composed.Mutating, c.deps.Metrics),
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),
