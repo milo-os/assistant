@@ -142,6 +142,9 @@ type Deps struct {
 	// cannot check a token must not issue one. Ignored when PlatformAPI is
 	// nil. See internal/plantoken.
 	PlanTokenKey []byte
+	// ExecApprovalKey signs compute exec assertions after a human approval.
+	// It must be shared only with the compute exec provider.
+	ExecApprovalKey []byte
 	// ExecApprovals atomically consumes human-approved compute exec plans.
 	// Nil removes the execution tool from the model's available tools.
 	ExecApprovals execapproval.Store
@@ -414,7 +417,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		System:   system,
 		Messages: messages,
 		Tools: tracedTools(gateExecTools(composed.Tools, params.UserText, params.ProjectName,
-			caller.BearerToken, c.deps.ExecApprovals, c.deps.PlanTokenKey), composed.Mutating, c.deps.Metrics),
+			caller.BearerToken, c.deps.ExecApprovals, c.deps.ExecApprovalKey), composed.Mutating, c.deps.Metrics),
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),

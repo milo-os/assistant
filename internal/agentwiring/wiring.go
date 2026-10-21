@@ -9,6 +9,7 @@ package agentwiring
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -261,10 +262,20 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	var execApprovalKey []byte
+	if cfg.AssistantExecKey != "" {
+		execApprovalKey, err = base64.StdEncoding.DecodeString(cfg.AssistantExecKey)
+		if err != nil {
+			execApprovalKey, err = base64.RawStdEncoding.DecodeString(cfg.AssistantExecKey)
+		}
+		if err != nil || len(execApprovalKey) < 32 {
+			return nil, nil, nil, errors.New("ASSISTANT_EXEC_KEY must be base64-encoded and at least 32 bytes")
+		}
+	}
 	// Exec approvals require a shared, durable consume ledger. A deployment
 	// without Postgres cannot run compute exec, even if it can diagnose it.
 	var execApprovals execapproval.Store
-	if cfg.ConversationStoreURL != "" && cfg.PlanTokenKey != "" && len(planTokenKey) >= 32 {
+	if cfg.ConversationStoreURL != "" && len(execApprovalKey) >= 32 {
 		pg, err := execapproval.NewPostgresStore(ctx, cfg.ConversationStoreURL)
 		if err != nil {
 			return nil, nil, nil, err
@@ -299,6 +310,7 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		GapReports:                     gaps,
 		PlatformAPI:                    platformAPI,
 		PlanTokenKey:                   planTokenKey,
+		ExecApprovalKey:                execApprovalKey,
 		ExecApprovals:                  execApprovals,
 		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
 		CapabilityIdentityForwardHosts: cfg.CapabilityIdentityForwardHosts,
