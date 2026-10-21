@@ -158,11 +158,12 @@ func (r *SendMessageREST) Connect(ctx context.Context, id string, _ runtime.Obje
 		sink := &sseSink{out: sse.NewWriter(w, flusher)}
 		stopKeepAlive := sink.out.KeepAlive(sse.KeepAliveInterval)
 		result := r.runner.Run(req.Context(), a2a.RunRequest{
-			UserText:    body.Text,
-			ProjectName: project,
-			ContextID:   id,
-			TaskID:      uuid.NewString(),
-			Mentions:    body.Mentions,
+			UserText:     body.Text,
+			ApprovalText: body.Text,
+			ProjectName:  project,
+			ContextID:    id,
+			TaskID:       uuid.NewString(),
+			Mentions:     body.Mentions,
 		}, sink)
 		stopKeepAlive()
 

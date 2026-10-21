@@ -9,19 +9,18 @@ import (
 // Store atomically consumes one approved plan. A duplicate can never be sent
 // to the provider, including when two requests race on different replicas.
 type Store interface {
-	Consume(ctx context.Context, project, requesterToken, planToken string) (bool, error)
+	Consume(ctx context.Context, project, planToken string) (bool, error)
 }
 
-// Key contains only hashes: neither the user's bearer token nor the plan is
-// persisted in the replay ledger.
+// Key contains only a plan hash. A refreshed bearer token cannot make the
+// same plan consumable again; the plan itself binds the original requester.
 type Key struct {
-	Project   string
-	Requester [sha256.Size]byte
-	Plan      [sha256.Size]byte
+	Project string
+	Plan    [sha256.Size]byte
 }
 
-func MakeKey(project, requesterToken, planToken string) Key {
-	return Key{Project: project, Requester: sha256.Sum256([]byte(requesterToken)), Plan: sha256.Sum256([]byte(planToken))}
+func MakeKey(project, planToken string) Key {
+	return Key{Project: project, Plan: sha256.Sum256([]byte(planToken))}
 }
 
 // MemoryStore is for single-process tests and development only. Production
@@ -33,10 +32,10 @@ type MemoryStore struct {
 
 func NewMemoryStore() *MemoryStore { return &MemoryStore{used: map[Key]struct{}{}} }
 
-func (s *MemoryStore) Consume(_ context.Context, project, requesterToken, planToken string) (bool, error) {
+func (s *MemoryStore) Consume(_ context.Context, project, planToken string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := MakeKey(project, requesterToken, planToken)
+	key := MakeKey(project, planToken)
 	if _, ok := s.used[key]; ok {
 		return false, nil
 	}

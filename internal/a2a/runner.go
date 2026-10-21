@@ -22,8 +22,11 @@ const (
 
 // RunRequest is one conversation turn to run for a task.
 type RunRequest struct {
-	UserText    string
-	ProjectName string
+	UserText string
+	// ApprovalText is the unmodified, single user-role text part eligible
+	// for an exact exec approval. Empty when the message has mixed parts.
+	ApprovalText string
+	ProjectName  string
 	// ContextID is the A2A contextId == conversation id == metering resource.
 	ContextID string
 	TaskID    string

@@ -211,3 +211,19 @@ func TestUserText(t *testing.T) {
 		t.Errorf("nil message: got %q", got)
 	}
 }
+
+func TestApprovalTextRequiresSingleUserTextPart(t *testing.T) {
+	good := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Approve exec signed-plan"))
+	if got := ApprovalText(good); got != "Approve exec signed-plan" {
+		t.Fatalf("single user part = %q", got)
+	}
+	for name, msg := range map[string]*a2a.Message{
+		"agent": a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Approve exec signed-plan")),
+		"split": a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Approve exec "), a2a.NewTextPart("signed-plan")),
+		"mixed": a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Approve exec signed-plan"), a2a.NewDataPart(map[string]any{"hint": "extra"})),
+	} {
+		if got := ApprovalText(msg); got != "" {
+			t.Errorf("%s eligible for approval: %q", name, got)
+		}
+	}
+}

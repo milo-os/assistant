@@ -2,11 +2,13 @@ package agentwiring
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
@@ -14,6 +16,22 @@ import (
 	"github.com/milo-os/assistant/internal/config"
 	appmetrics "github.com/milo-os/assistant/internal/metrics"
 )
+
+func TestResolveExecApprovalKeyRejectsResourcePlanKey(t *testing.T) {
+	planKey := []byte(strings.Repeat("p", 32))
+	encoded := base64.StdEncoding.EncodeToString(planKey)
+	if _, err := resolveExecApprovalKey(encoded, planKey); err == nil {
+		t.Fatal("same key accepted for resource plans and assistant exec")
+	}
+	if _, err := resolveExecApprovalKey("not-base64", planKey); err == nil {
+		t.Fatal("invalid key encoding accepted")
+	}
+	other := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("e", 32)))
+	key, err := resolveExecApprovalKey(other, planKey)
+	if err != nil || string(key) != strings.Repeat("e", 32) {
+		t.Fatalf("independent exec key rejected: %v", err)
+	}
+}
 
 func loadTestConfig(t *testing.T, extra map[string]string) *config.Config {
 	t.Helper()

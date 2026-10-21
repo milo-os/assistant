@@ -238,6 +238,9 @@ func New(deps Deps) *Conversation {
 type Params struct {
 	// UserText is the user's message.
 	UserText string
+	// ApprovalText is eligible for exact exec approval only when it came
+	// unchanged from one authenticated user text field or A2A text part.
+	ApprovalText string
 	// ProjectName scopes capabilities and metering. Empty disables metering.
 	ProjectName string
 	// ContextID is the A2A contextId == conversation id == metering resource.
@@ -416,7 +419,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		Model:    tracedModel(c.deps.Model, c.deps.Metrics),
 		System:   system,
 		Messages: messages,
-		Tools: tracedTools(gateExecTools(composed.Tools, params.UserText, params.ProjectName,
+		Tools: tracedTools(gateExecTools(composed.Tools, params.ApprovalText, params.ProjectName,
 			caller.BearerToken, c.deps.ExecApprovals, c.deps.ExecApprovalKey), composed.Mutating, c.deps.Metrics),
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,

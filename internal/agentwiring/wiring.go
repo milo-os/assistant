@@ -8,6 +8,7 @@
 package agentwiring
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -262,15 +263,9 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	var execApprovalKey []byte
-	if cfg.AssistantExecKey != "" {
-		execApprovalKey, err = base64.StdEncoding.DecodeString(cfg.AssistantExecKey)
-		if err != nil {
-			execApprovalKey, err = base64.RawStdEncoding.DecodeString(cfg.AssistantExecKey)
-		}
-		if err != nil || len(execApprovalKey) < 32 {
-			return nil, nil, nil, errors.New("ASSISTANT_EXEC_KEY must be base64-encoded and at least 32 bytes")
-		}
+	execApprovalKey, err := resolveExecApprovalKey(cfg.AssistantExecKey, planTokenKey)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	// Exec approvals require a shared, durable consume ledger. A deployment
 	// without Postgres cannot run compute exec, even if it can diagnose it.
@@ -322,6 +317,23 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	return conversationRunner{conv: conv}, store, cleanup, nil
 }
 
+func resolveExecApprovalKey(encoded string, planTokenKey []byte) ([]byte, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		key, err = base64.RawStdEncoding.DecodeString(encoded)
+	}
+	if err != nil || len(key) < 32 {
+		return nil, errors.New("ASSISTANT_EXEC_KEY must be base64-encoded and at least 32 bytes")
+	}
+	if bytes.Equal(key, planTokenKey) {
+		return nil, errors.New("ASSISTANT_EXEC_KEY must differ from PLAN_TOKEN_KEY")
+	}
+	return key, nil
+}
+
 // newPlatformAPI builds the client the base platform tools read and write a
 // project through, or nil when the deployment named no platform API — in which
 // case the base tools are simply not composed and a conversation runs on
@@ -356,12 +368,13 @@ type conversationRunner struct {
 
 func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest, sink assistanta2a.RunSink) assistanta2a.RunResult {
 	stream := r.conv.Run(ctx, agent.Params{
-		UserText:    req.UserText,
-		ProjectName: req.ProjectName,
-		ContextID:   req.ContextID,
-		TaskID:      req.TaskID,
-		Mentions:    agentMentions(req.Mentions),
-		Surface:     agentSurface(req.Surface),
+		UserText:     req.UserText,
+		ApprovalText: req.ApprovalText,
+		ProjectName:  req.ProjectName,
+		ContextID:    req.ContextID,
+		TaskID:       req.TaskID,
+		Mentions:     agentMentions(req.Mentions),
+		Surface:      agentSurface(req.Surface),
 	})
 	defer func() { _ = stream.Close() }()
 

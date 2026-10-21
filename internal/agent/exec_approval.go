@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/execapproval"
@@ -63,7 +64,7 @@ func (t *execApprovalTool) Execute(ctx context.Context, input json.RawMessage) (
 		t.userText != execApprovalPrefix+args.PlanToken {
 		return "", errors.New("exec requires a fresh, exact approval from the person who asked")
 	}
-	used, err := t.store.Consume(ctx, t.project, t.requesterToken, args.PlanToken)
+	used, err := t.store.Consume(ctx, t.project, args.PlanToken)
 	if err != nil {
 		return "", err
 	}
@@ -74,21 +75,21 @@ func (t *execApprovalTool) Execute(ctx context.Context, input json.RawMessage) (
 	// The provider independently verifies this assertion and the plan token.
 	// It is made only after the current user turn passes the gate and the
 	// durable consume succeeds. A model-provided field is overwritten.
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(input, &fields); err != nil || fields == nil {
-		return "", errors.New("invalid exec plan arguments")
-	}
 	assertion := execApprovalAssertion(t.key, t.project, t.requesterToken, args.PlanToken)
-	encoded, err := json.Marshal(assertion)
+	// Do not forward any other model-supplied fields. Compute accepts only
+	// planToken and approval and derives the target and argv from the signed plan.
+	approved, err := json.Marshal(struct {
+		PlanToken string `json:"planToken"`
+		Approval  string `json:"approval"`
+	}{PlanToken: args.PlanToken, Approval: assertion})
 	if err != nil {
 		return "", err
 	}
-	fields["approval"] = encoded
-	approved, err := json.Marshal(fields)
+	result, err := t.inner.Execute(ctx, approved)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("exec failed after approval was consumed; create a new plan before retrying: %w", err)
 	}
-	return t.inner.Execute(ctx, approved)
+	return result, nil
 }
 
 func execApprovalAssertion(key []byte, project, requesterToken, planToken string) string {
