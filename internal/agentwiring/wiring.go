@@ -375,6 +375,7 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 		TaskID:       req.TaskID,
 		Mentions:     agentMentions(req.Mentions),
 		Surface:      agentSurface(req.Surface),
+		ApprovePlan:  agentPlanApproval(req.ApprovePlan),
 	})
 	defer func() { _ = stream.Close() }()
 
@@ -395,6 +396,18 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 			}
 		case agent.EventToolCall, agent.EventToolResult:
 			activity.forward(ev, sink)
+		case agent.EventChoices:
+			if ev.Choices != nil {
+				sink.OnChoices(a2aChoices(*ev.Choices))
+			}
+		case agent.EventPlan:
+			if ev.Plan != nil {
+				sink.OnPlan(a2aPlan(*ev.Plan))
+			}
+		case agent.EventPlanResult:
+			if ev.PlanResult != nil {
+				sink.OnPlanResult(a2aPlanResult(*ev.PlanResult))
+			}
 		}
 	}
 
@@ -416,6 +429,47 @@ func agentMentions(ms []assistanta2a.Mention) []agent.Mention {
 	out := make([]agent.Mention, 0, len(ms))
 	for _, m := range ms {
 		out = append(out, agent.Mention{Kind: m.Kind, Name: m.Name, APIGroup: m.APIGroup})
+	}
+	return out
+}
+
+// a2aChoices restates a question as the transport's own type, for the same
+// reason as agentMentions.
+func a2aChoices(c agent.Choices) assistanta2a.Choices {
+	out := assistanta2a.Choices{ID: c.ID, Question: c.Question, Options: make([]assistanta2a.ChoiceOption, 0, len(c.Options))}
+	for _, o := range c.Options {
+		out.Options = append(out.Options, assistanta2a.ChoiceOption{ID: o.ID, Label: o.Label, Icon: o.Icon})
+	}
+	return out
+}
+
+// agentPlanApproval, a2aPlan and a2aPlanResult restate plans between the two
+// layers, for the same reason as agentMentions.
+func agentPlanApproval(a *assistanta2a.PlanApproval) *agent.PlanApproval {
+	if a == nil {
+		return nil
+	}
+	return &agent.PlanApproval{Token: a.Token, Manifests: a.Manifests}
+}
+
+func a2aPlan(p agent.Plan) assistanta2a.Plan {
+	out := assistanta2a.Plan{ID: p.ID, Token: p.Token, ExpiresAt: p.ExpiresAt,
+		Resources: make([]assistanta2a.PlanResource, 0, len(p.Resources))}
+	for _, r := range p.Resources {
+		out.Resources = append(out.Resources, assistanta2a.PlanResource{
+			Kind: r.Kind, Name: r.Name, Namespace: r.Namespace, Action: r.Action,
+			Summary: r.Summary, Diff: r.Diff, Manifest: r.Manifest,
+		})
+	}
+	return out
+}
+
+func a2aPlanResult(r agent.PlanResult) assistanta2a.PlanResult {
+	out := assistanta2a.PlanResult{PlanID: r.PlanID, OK: r.OK, Error: r.Error}
+	for _, a := range r.Applied {
+		out.Applied = append(out.Applied, assistanta2a.AppliedResource{
+			Action: a.Action, Kind: a.Kind, Name: a.Name, Namespace: a.Namespace,
+		})
 	}
 	return out
 }

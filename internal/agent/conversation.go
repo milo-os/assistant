@@ -16,6 +16,7 @@ import (
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/auth"
+	"github.com/milo-os/assistant/internal/basetools"
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/execapproval"
 	"github.com/milo-os/assistant/internal/gapreport"
@@ -253,6 +254,9 @@ type Params struct {
 	// Surface says where the conversation is happening; a known surface adds
 	// one section to this turn's system prompt (see surfaceSection).
 	Surface *Surface
+	// ApprovePlan, when set, is the person clicking Approve on a plan card:
+	// the turn starts by applying exactly that plan (see approvedPlanModel).
+	ApprovePlan *PlanApproval
 }
 
 // EventKind discriminates streamed [Event]s.
@@ -265,6 +269,15 @@ const (
 	EventToolCall EventKind = "tool-call"
 	// EventToolResult reports that a tool call finished, successfully or not.
 	EventToolResult EventKind = "tool-result"
+	// EventChoices puts a pick-one question to the person (see
+	// [AskChoiceToolName]). The turn ends after it.
+	EventChoices EventKind = "choices"
+	// EventPlan is a plan the person can approve as a card. It follows the
+	// [EventToolResult] of the resources_plan call that settled it.
+	EventPlan EventKind = "plan"
+	// EventPlanResult is how applying a plan went. It follows the
+	// [EventToolResult] of the resources_apply call.
+	EventPlanResult EventKind = "plan-result"
 )
 
 // Event is one streamed happening during a run. The A2A layer translates these
@@ -281,6 +294,12 @@ type Event struct {
 	ToolInput json.RawMessage
 	// ToolFailed marks an [EventToolResult] the tool reported as an error.
 	ToolFailed bool
+	// Choices is the question an [EventChoices] puts to the person.
+	Choices *Choices
+	// Plan is the plan of an [EventPlan].
+	Plan *Plan
+	// PlanResult is the outcome of an [EventPlanResult].
+	PlanResult *PlanResult
 }
 
 // UsageSummary is the run's aggregated token usage and metering outcome.
@@ -423,11 +442,16 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 			model = &approvedExecModel{inner: model, planToken: token}
 		}
 	}
+	if a := params.ApprovePlan; a != nil && a.Token != "" && len(a.Manifests) > 0 {
+		model = &approvedPlanModel{inner: model, approval: *a}
+	}
+	gatedTools = withChoiceTool(gatedTools, params.Surface)
 	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
 		Model:           model,
 		System:          system,
 		Messages:        messages,
 		Tools:           tracedTools(gatedTools, composed.Mutating, c.deps.Metrics),
+		EndsTurn:        endsTurnOn(params.Surface),
 		StepLimit:       c.deps.StepLimit,
 		MaxOutputTokens: maxOutputTokens,
 		Headers:         attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID),
@@ -689,7 +713,18 @@ type Stream struct {
 	invocations *[]capability.ProviderToolInvocation
 	invMu       *sync.Mutex
 
-	text      strings.Builder
+	text strings.Builder
+	// choices is the question this turn ended on, if any, and plans the
+	// plans it showed. Both are kept so the stored answer carries them (see
+	// recordHistory).
+	choices *Choices
+	plans   []Plan
+	// applyCalls maps a resources_apply call id to the plan it applies, so
+	// its result can be reported against that plan.
+	applyCalls map[string]string
+	// pending holds events produced alongside the one Recv just returned
+	// (a plan after its tool result), returned by the next Recv calls.
+	pending   []Event
 	total     agentcore.Usage
 	state     State
 	errMsg    string
@@ -701,6 +736,11 @@ type Stream struct {
 // complete. On io.EOF the run has been finalized (sessions closed, usage
 // metered) and [Stream.Result] is ready.
 func (s *Stream) Recv() (Event, error) {
+	if len(s.pending) > 0 {
+		ev := s.pending[0]
+		s.pending = s.pending[1:]
+		return ev, nil
+	}
 	for {
 		part, err := s.inner.Recv()
 		if err == io.EOF {
@@ -719,6 +759,25 @@ func (s *Stream) Recv() (Event, error) {
 			s.text.WriteString(part.Text)
 			return Event{Kind: EventText, Text: part.Text}, nil
 		case agentcore.StreamPartToolCall:
+			if part.ToolCall != nil && part.ToolCall.Name == AskChoiceToolName {
+				// Shown as buttons, not as a tool step. A call that fails the
+				// check shows nothing: the tool reports the same error to the
+				// model, which asks again.
+				c, err := parseChoices(part.ToolCall.ID, part.ToolCall.Input)
+				if err != nil {
+					continue
+				}
+				s.choices = &c
+				return Event{Kind: EventChoices, Choices: &c}, nil
+			}
+			if part.ToolCall != nil && part.ToolCall.Name == basetools.ResourcesApplyToolName && s.showsPlans() {
+				if token := applyTokenOf(part.ToolCall.Input); token != "" {
+					if s.applyCalls == nil {
+						s.applyCalls = map[string]string{}
+					}
+					s.applyCalls[part.ToolCall.ID] = planID(token)
+				}
+			}
 			if part.ToolCall != nil {
 				return Event{
 					Kind:       EventToolCall,
@@ -730,7 +789,9 @@ func (s *Stream) Recv() (Event, error) {
 		case agentcore.StreamPartToolResult:
 			// Surfaced so callers can close out the activity they showed for
 			// the matching tool call; the content itself stays internal.
-			if part.ToolResult != nil {
+			// ask_choice showed no activity, so there is nothing to close.
+			if part.ToolResult != nil && part.ToolResult.Name != AskChoiceToolName {
+				s.queuePlanEvents(*part.ToolResult)
 				return Event{
 					Kind:       EventToolResult,
 					ToolName:   part.ToolResult.Name,
@@ -837,6 +898,12 @@ func (s *Stream) recordHistory() {
 		return
 	}
 	answer := s.text.String()
+	for _, p := range s.plans {
+		answer = strings.TrimSpace(answer + "\n\n" + planText(p))
+	}
+	if s.choices != nil {
+		answer = strings.TrimSpace(answer + "\n\n" + choicesText(*s.choices))
+	}
 	if answer == "" {
 		return
 	}

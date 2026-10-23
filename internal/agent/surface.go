@@ -34,8 +34,8 @@ How to answer here:
 - Defaults: location us-central-1, 1 replica, instance type datumcloud-d1-standard-2, runtime class general-purpose for ordinary container images, and the network {network}. If they don't have an image yet, offer one of Datum's ready-made images, which run with runtime class unikernel: ghcr.io/datum-cloud/unikernel/nginx:1.30 or ghcr.io/datum-cloud/unikernel/caddy:2.11 (web servers on port 8080, published on a public HTTPS URL), or ghcr.io/datum-cloud/unikernel/redis:8.10 (port 6379) or ghcr.io/datum-cloud/unikernel/memcached:1.6 (port 11211), which stay private, reachable only from other workloads on the network.
 - Name locations by region (for example us-central-1), never by city.
 - The first time you use a Datum term (workload, network service, load balancer, connector), explain it in a few words.
-- When you offer choices, give at most three, as a short numbered list.
-- As soon as you have what you need, go straight to the plan.`
+- When the answer is one of a few options, ask with ask_choice instead of listing them: at most four options of a few words each. For example, whether they have their own image or want one of Datum's ready-made ones, or which of those ready-made images to run. Ask in prose when the answer is open, such as an image name or a port.
+- As soon as you have what you need, go straight to the plan. Here a plan from resources_plan is shown to the person as a card: each resource with your summary, its YAML and differences, and buttons to approve it or change something. That card is how you show them the exact change, so pass summaries with one short plain-language sentence per manifest, write at most one sentence before planning, and don't repeat the manifests or differences in your text. Your reply ends when the card is shown. If they approve it, the plan is applied for them and you will see the result: say in a sentence or two what was created and what happens next.`
 
 // surfaceRulesStillApply closes every surface section. A surface only shapes
 // tone and pacing; this line keeps "go straight to the plan" from being read

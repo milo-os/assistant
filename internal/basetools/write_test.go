@@ -208,6 +208,41 @@ func TestPlanOrdersAManifestAfterWhatItRefersTo(t *testing.T) {
 	}
 }
 
+// A summary follows its manifest when the plan reorders them, so each line
+// stays beside the resource it describes. Summaries are not covered by the
+// token, so a plan without them is the same plan.
+func TestPlanEchoesEachSummaryBesideItsManifest(t *testing.T) {
+	p := newPlatform(t).
+		route("/apis/compute.datumapis.com/v1alpha1",
+			ok(`{"resources":[{"name":"workloads","kind":"Workload","namespaced":true},
+				{"name":"networks","kind":"Network","namespaced":true}]}`)).
+		routeFor(http.MethodGet, "/workloads/api", status(404, "not found")).
+		routeFor(http.MethodGet, "/networks/default", status(404, "not found")).
+		routeFor(http.MethodPost, "/workloads", ok(`{"metadata":{"name":"api"}}`)).
+		routeFor(http.MethodPost, "/networks", ok(`{"metadata":{"name":"default"}}`))
+	tools := p.writeTools(t, "demo", "tok")
+
+	raw, _ := json.Marshal(map[string]any{
+		"manifests": []string{workloadManifest, networkManifest},
+		"summaries": []string{"Runs   your\ncontainer", strings.Repeat("n", 250)},
+	})
+	out := decodeInto[basetools.PlanOutput](t, call(t, tools, basetools.ResourcesPlanToolName, string(raw)))
+
+	if out.Results[0].Kind != "Network" || out.Results[1].Kind != "Workload" {
+		t.Fatalf("order = %q, %q", out.Results[0].Kind, out.Results[1].Kind)
+	}
+	if got := out.Results[1].Summary; got != "Runs your container" {
+		t.Fatalf("workload summary = %q, want it folded to one line", got)
+	}
+	if got := len([]rune(out.Results[0].Summary)); got != 200 {
+		t.Fatalf("network summary is %d runes, want it cut to 200", got)
+	}
+	plain := planOf(t, tools, workloadManifest, networkManifest)
+	if plain.PlanToken != out.PlanToken {
+		t.Fatal("summaries must not change what the token covers")
+	}
+}
+
 // Nothing referring to anything else keeps the order it was given in.
 func TestPlanKeepsTheGivenOrderWhenNothingRefersToAnything(t *testing.T) {
 	p := newPlatform(t).

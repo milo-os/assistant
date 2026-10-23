@@ -406,3 +406,96 @@ func TestChatStream_Surface(t *testing.T) {
 		})
 	}
 }
+
+func newRecordingChatServer(t *testing.T, runner assistanta2a.AgentRunner) *httptest.Server {
+	t.Helper()
+	authn, authz := testAuth()
+	srv := httptest.NewServer(New(Deps{
+		Config: testConfig(t), Logger: logger.Silent(),
+		Authenticator: authn, Authorizer: authz, Runner: runner,
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestChatStream_PlanApprovalReachesTheRunner(t *testing.T) {
+	recorder := &mentionRecordingRunner{}
+	srv := newRecordingChatServer(t, recorder)
+
+	res := postChatStream(t, srv, goodToken, "c1", project, map[string]any{
+		"text":        "Approve the plan",
+		"approvePlan": map[string]any{"token": "tok-1", "manifests": []string{"kind: Workload\n"}},
+	})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	_ = readChatFrames(t, res)
+	got := recorder.lastReq.ApprovePlan
+	if got == nil || got.Token != "tok-1" || len(got.Manifests) != 1 {
+		t.Fatalf("approvePlan = %+v", got)
+	}
+
+	res = postChatStream(t, srv, goodToken, "c1", project, map[string]any{"text": "hi"})
+	_ = readChatFrames(t, res)
+	if recorder.lastReq.ApprovePlan != nil {
+		t.Fatal("an ordinary message must carry no approval")
+	}
+}
+
+func TestChatStream_400MalformedPlanApproval(t *testing.T) {
+	srv := newRecordingChatServer(t, &mentionRecordingRunner{})
+	for name, approval := range map[string]map[string]any{
+		"no token":     {"manifests": []string{"kind: Workload\n"}},
+		"no manifests": {"token": "tok-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := postChatStream(t, srv, goodToken, "c1", project, map[string]any{"text": "Approve", "approvePlan": approval})
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", res.StatusCode)
+			}
+		})
+	}
+}
+
+// planRunner streams one question, one plan and one apply result.
+type planRunner struct{}
+
+func (planRunner) Run(_ context.Context, _ assistanta2a.RunRequest, sink assistanta2a.RunSink) assistanta2a.RunResult {
+	sink.OnChoices(assistanta2a.Choices{ID: "q1", Question: "Which?", Options: []assistanta2a.ChoiceOption{
+		{ID: "1", Label: "A", Icon: "globe"}, {ID: "2", Label: "B"}}})
+	sink.OnPlan(assistanta2a.Plan{ID: "plan-1", Token: "tok-1", ExpiresAt: "2026-10-23T12:15:00Z",
+		Resources: []assistanta2a.PlanResource{{Kind: "Workload", Name: "api", Action: "create", Summary: "Runs it", Manifest: "kind: Workload\n"}}})
+	sink.OnPlanResult(assistanta2a.PlanResult{PlanID: "plan-1", OK: true,
+		Applied: []assistanta2a.AppliedResource{{Action: "create", Kind: "Workload", Name: "api"}}})
+	sink.OnPlanResult(assistanta2a.PlanResult{PlanID: "plan-1", Error: "nothing was changed"})
+	return assistanta2a.RunResult{State: assistanta2a.RunCompleted}
+}
+
+func TestChatStream_ChoicePlanAndResultFrames(t *testing.T) {
+	srv := newRecordingChatServer(t, planRunner{})
+	res := postChatStream(t, srv, goodToken, "c1", project, map[string]any{"text": "hi"})
+	defer res.Body.Close()
+
+	var frames []string
+	scanner := bufio.NewScanner(res.Body)
+	for scanner.Scan() {
+		if payload, ok := strings.CutPrefix(scanner.Text(), "data: "); ok {
+			frames = append(frames, payload)
+		}
+	}
+	want := []string{
+		`{"id":"q1","options":[{"icon":"globe","id":"1","label":"A"},{"id":"2","label":"B"}],"question":"Which?","type":"options"}`,
+		`{"expiresAt":"2026-10-23T12:15:00Z","id":"plan-1","resources":[{"action":"create","kind":"Workload","manifest":"kind: Workload\n","name":"api","summary":"Runs it"}],"token":"tok-1","type":"plan"}`,
+		`{"applied":[{"action":"create","kind":"Workload","name":"api"}],"id":"plan-1","ok":true,"type":"plan_result"}`,
+		`{"applied":[],"error":"nothing was changed","id":"plan-1","ok":false,"type":"plan_result"}`,
+	}
+	if len(frames) < len(want) {
+		t.Fatalf("frames = %v", frames)
+	}
+	for i, w := range want {
+		if frames[i] != w {
+			t.Errorf("frame %d =\n%s\nwant\n%s", i, frames[i], w)
+		}
+	}
+}

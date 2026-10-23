@@ -89,11 +89,15 @@ type recordingSink struct {
 	text    []string
 	started []assistanta2a.ToolActivity
 	done    []assistanta2a.ToolActivity
+	choices []assistanta2a.Choices
 }
 
 func (s *recordingSink) OnTextDelta(t string)                     { s.text = append(s.text, t) }
 func (s *recordingSink) OnToolStart(a assistanta2a.ToolActivity)  { s.started = append(s.started, a) }
 func (s *recordingSink) OnToolFinish(a assistanta2a.ToolActivity) { s.done = append(s.done, a) }
+func (s *recordingSink) OnChoices(c assistanta2a.Choices)         { s.choices = append(s.choices, c) }
+func (s *recordingSink) OnPlan(assistanta2a.Plan)                 {}
+func (s *recordingSink) OnPlanResult(assistanta2a.PlanResult)     {}
 
 func TestToolActivityTracker_PairsCallsWithResults(t *testing.T) {
 	sink := &recordingSink{}

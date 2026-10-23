@@ -34,8 +34,12 @@ vi.mock('@datum-cloud/datum-ui/assistant', () => ({
       {props.footer}
     </div>
   ),
-  PromptCard: (props: { isReady: boolean }) => (
-    <div data-testid="composer" data-ready={String(props.isReady)} />
+  PromptCard: (props: { isReady: boolean; density?: string }) => (
+    <div
+      data-testid="composer"
+      data-ready={String(props.isReady)}
+      data-density={props.density ?? 'default'}
+    />
   ),
   AssistantWorkspace: (props: {
     orientation?: string;
@@ -403,6 +407,7 @@ describe('ChatDock placement', () => {
     await act(async () => turns[0]!.finish('hi'));
     await waitFor(() => expect(shownMessages()).toEqual(['user:hello', 'assistant:hi']));
     expect(screen.getByTestId('conversation').dataset.density).toBe('compact');
+    expect(screen.getByTestId('composer').dataset.density).toBe('compact');
   });
 
   it('loads a handed chatId inline and reports it', async () => {

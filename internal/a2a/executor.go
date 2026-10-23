@@ -176,6 +176,18 @@ func (s *streamSink) OnToolFinish(act ToolActivity) {
 	})
 }
 
+// OnChoices renders the question as text: an A2A client has no buttons to
+// draw, and a numbered list answers the same way.
+func (s *streamSink) OnChoices(c Choices) {
+	s.OnTextDelta("\n\n" + ChoicesText(c))
+}
+
+// OnPlan and OnPlanResult do nothing here: plans are only drawn as cards on
+// the portal's home page, which streams through the chat endpoint, and the
+// model describes every plan and its outcome in text for any other client.
+func (s *streamSink) OnPlan(Plan)             {}
+func (s *streamSink) OnPlanResult(PlanResult) {}
+
 func (s *streamSink) emitActivity(data toolActivityData) {
 	if s.stopped || data.Name == "" {
 		return
