@@ -27,7 +27,7 @@ func TestSurfaceSection(t *testing.T) {
 				surfaceHeading,
 				"Their project's network is prod-net.",
 				"runtime class general-purpose for ordinary container images, and the network prod-net.",
-				"ghcr.io/datum-labs/compute-network-demo:main",
+				"ghcr.io/datum-cloud/unikernel/nginx:1.30",
 				surfaceRulesStillApply,
 			},
 			wantAbsent: []string{networkPlaceholder},

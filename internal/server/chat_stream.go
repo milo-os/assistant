@@ -22,6 +22,9 @@ type chatStreamRequestBody struct {
 	// project home page during first-run setup). It is validated before it
 	// goes anywhere; see [assistanta2a.ValidateSurface].
 	Surface *assistanta2a.Surface `json:"surface,omitempty"`
+	// ApprovePlan is the person clicking Approve on a plan card. See
+	// [assistanta2a.PlanApproval].
+	ApprovePlan *assistanta2a.PlanApproval `json:"approvePlan,omitempty"`
 }
 
 // chatStreamKeepAlive is the heartbeat interval for chatStreamHandler's
@@ -85,6 +88,11 @@ func chatStreamHandler(runner assistanta2a.AgentRunner, authenticator auth.Authe
 			return
 		}
 
+		if err := assistanta2a.ValidatePlanApproval(body.ApprovePlan); err != nil {
+			writeAuthError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		surface, note := assistanta2a.ValidateSurface(body.Surface)
 		if note != "" {
 			logger.Debug("http.chatstream.surface_ignored", "contextId", contextID, "reason", note)
@@ -135,6 +143,7 @@ func chatStreamHandler(runner assistanta2a.AgentRunner, authenticator auth.Authe
 			TaskID:       newRequestID(),
 			Mentions:     body.Mentions,
 			Surface:      surface,
+			ApprovePlan:  body.ApprovePlan,
 		}, sink)
 		stopKeepAlive()
 		if sink.aborted {
@@ -192,6 +201,83 @@ func (s *chatStreamSink) OnToolFinish(act assistanta2a.ToolActivity) {
 		"type": "tool_finish", "id": act.ID, "name": act.Name,
 		"ok": act.OK, "elapsedMs": act.Elapsed.Milliseconds(),
 	})
+}
+
+func (s *chatStreamSink) OnChoices(c assistanta2a.Choices) {
+	if s.aborted {
+		return
+	}
+	s.write(map[string]any{"type": "options", "id": c.ID, "question": c.Question, "options": choiceOptionsJSON(c.Options)})
+}
+
+func (s *chatStreamSink) OnPlan(p assistanta2a.Plan) {
+	if s.aborted {
+		return
+	}
+	s.write(planFrame(p))
+}
+
+func (s *chatStreamSink) OnPlanResult(r assistanta2a.PlanResult) {
+	if s.aborted {
+		return
+	}
+	s.write(planResultFrame(r))
+}
+
+// planFrame is the wire shape of a plan card:
+//
+//	{"type":"plan","id":"...","token":"...","expiresAt":"...","resources":[
+//	  {"kind":"Workload","name":"api","action":"create","summary":"...","diff":[...],"manifest":"..."}]}
+func planFrame(p assistanta2a.Plan) map[string]any {
+	resources := make([]map[string]any, 0, len(p.Resources))
+	for _, r := range p.Resources {
+		m := map[string]any{"kind": r.Kind, "name": r.Name, "action": r.Action, "manifest": r.Manifest}
+		if r.Namespace != "" {
+			m["namespace"] = r.Namespace
+		}
+		if r.Summary != "" {
+			m["summary"] = r.Summary
+		}
+		if len(r.Diff) > 0 {
+			m["diff"] = r.Diff
+		}
+		resources = append(resources, m)
+	}
+	return map[string]any{"type": "plan", "id": p.ID, "token": p.Token, "expiresAt": p.ExpiresAt, "resources": resources}
+}
+
+// planResultFrame is the wire shape of an applied plan:
+//
+//	{"type":"plan_result","id":"...","ok":true,"applied":[{"action":"create","kind":"Workload","name":"api"}]}
+//	{"type":"plan_result","id":"...","ok":false,"error":"..."}
+func planResultFrame(r assistanta2a.PlanResult) map[string]any {
+	applied := make([]map[string]string, 0, len(r.Applied))
+	for _, a := range r.Applied {
+		m := map[string]string{"action": a.Action, "kind": a.Kind, "name": a.Name}
+		if a.Namespace != "" {
+			m["namespace"] = a.Namespace
+		}
+		applied = append(applied, m)
+	}
+	frame := map[string]any{"type": "plan_result", "id": r.PlanID, "ok": r.OK, "applied": applied}
+	if r.Error != "" {
+		frame["error"] = r.Error
+	}
+	return frame
+}
+
+// choiceOptionsJSON is the wire shape of a question's options, shared with
+// the apiserver's stream.
+func choiceOptionsJSON(opts []assistanta2a.ChoiceOption) []map[string]string {
+	out := make([]map[string]string, 0, len(opts))
+	for _, o := range opts {
+		m := map[string]string{"id": o.ID, "label": o.Label}
+		if o.Icon != "" {
+			m["icon"] = o.Icon
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // writeDone emits the terminal frame. text is the final answer (completed

@@ -58,6 +58,16 @@ type LoopOptions struct {
 	// RetryMaxDelay caps a single backoff wait (a server Retry-After is still
 	// honored verbatim). Zero means [DefaultRetryMaxDelay].
 	RetryMaxDelay time.Duration
+	// EndsTurn, if set, is asked about every tool result. When it reports
+	// true for any result of a step, the loop finishes with [FinishStop]
+	// once that step's results are emitted, instead of asking the model
+	// again. For a tool that hands the turn to the person, such as one that
+	// puts a question to them. It sees the result rather than only the tool
+	// name, so a call that failed, or one whose output says nothing was
+	// done, can go back to the model instead. A function rather than a
+	// method on [Tool] because wrappers (tracing, gating) would hide such a
+	// method. Optional.
+	EndsTurn func(ToolResult) bool
 }
 
 // Run drives opts.Model through the tool-use loop and returns a
@@ -84,6 +94,8 @@ type LoopOptions struct {
 //     result fed back to the model — never a loop abort.
 //  6. It emits the unified [StreamPart] kinds (text delta, tool call, tool
 //     result, step finish, finish, error).
+//  7. A result EndsTurn accepts finishes the run with [FinishStop] once its
+//     step's results are emitted.
 func Run(ctx context.Context, opts LoopOptions) StreamReader {
 	ctx, cancel := context.WithCancel(ctx)
 	return StreamFunc(
@@ -158,6 +170,11 @@ func (r *run) drive() {
 
 		results, ok := r.executeTools(toolCalls)
 		if !ok {
+			return
+		}
+		// Rule 7: a turn-ending tool hands the turn to the person.
+		if r.endsTurn(results) {
+			r.emit(StreamPart{Kind: StreamPartFinish, FinishReason: FinishStop, TotalUsage: r.total})
 			return
 		}
 		// Rule 2: every tool result from this step goes back in ONE message.
@@ -297,6 +314,20 @@ func (r *run) executeTools(toolCalls []ToolCall) ([]ContentPart, bool) {
 		}
 	}
 	return results, true
+}
+
+// endsTurn reports whether [LoopOptions].EndsTurn accepts any of a step's
+// results.
+func (r *run) endsTurn(results []ContentPart) bool {
+	if r.opts.EndsTurn == nil {
+		return false
+	}
+	for _, res := range results {
+		if res.ToolResult != nil && r.opts.EndsTurn(*res.ToolResult) {
+			return true
+		}
+	}
+	return false
 }
 
 // executeTool runs a single tool call, translating an unknown tool or an

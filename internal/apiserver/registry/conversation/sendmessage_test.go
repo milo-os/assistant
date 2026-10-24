@@ -24,6 +24,7 @@ type fakeRunner struct {
 	textDeltas []string
 	toolStarts []a2a.ToolActivity
 	toolFinish []a2a.ToolActivity
+	choices    []a2a.Choices
 	result     a2a.RunResult
 
 	lastReq a2a.RunRequest
@@ -39,6 +40,9 @@ func (f *fakeRunner) Run(_ context.Context, req a2a.RunRequest, sink a2a.RunSink
 	}
 	for _, act := range f.toolFinish {
 		sink.OnToolFinish(act)
+	}
+	for _, c := range f.choices {
+		sink.OnChoices(c)
 	}
 	return f.result
 }
@@ -117,6 +121,30 @@ func TestSendMessageConnect_CompletedRun(t *testing.T) {
 	}
 	if runner.lastReq.TaskID == "" {
 		t.Error("TaskID was not generated")
+	}
+}
+
+func TestSendMessageConnect_OptionsFrame(t *testing.T) {
+	runner := &fakeRunner{
+		textDeltas: []string{"Let's get you deployed."},
+		choices: []a2a.Choices{{ID: "call-1", Question: "What do you want to deploy?", Options: []a2a.ChoiceOption{
+			{ID: "1", Label: "My own image", Icon: "container"},
+			{ID: "2", Label: "Try the nginx demo"},
+		}}},
+		result: a2a.RunResult{State: a2a.RunCompleted, Text: "Let's get you deployed."},
+	}
+	_, events := doConnect(t, NewSendMessageREST(runner), request.WithNamespace(context.Background(), "demo"), "ctx-1", `{"text":"hi"}`)
+
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(events), events)
+	}
+	got, _ := json.Marshal(events[1])
+	want := `{"id":"call-1","options":[{"icon":"container","id":"1","label":"My own image"},{"id":"2","label":"Try the nginx demo"}],"question":"What do you want to deploy?","type":"options"}`
+	if string(got) != want {
+		t.Fatalf("options frame =\n%s\nwant\n%s", got, want)
+	}
+	if events[2]["type"] != "done" {
+		t.Fatalf("the options frame must come before done, got %+v", events[2])
 	}
 }
 

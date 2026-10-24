@@ -3,6 +3,8 @@ package a2a
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -36,6 +38,9 @@ type RunRequest struct {
 	// Surface says where the conversation is happening. Nil when the caller
 	// sent none; otherwise already passed through [ValidateSurface].
 	Surface *Surface
+	// ApprovePlan is set when the message is the person approving a plan
+	// card; already passed through [ValidatePlanApproval].
+	ApprovePlan *PlanApproval
 }
 
 // RunResult is the terminal outcome of [AgentRunner.Run].
@@ -78,6 +83,40 @@ type RunSink interface {
 	// OnToolFinish is called once the call has run, with its outcome and
 	// elapsed time.
 	OnToolFinish(act ToolActivity)
+	// OnChoices is called when the turn ends on a pick-one question for the
+	// person. A sink whose client cannot draw buttons renders it as text.
+	OnChoices(c Choices)
+	// OnPlan is called with a plan the person can approve as a card. It is
+	// only produced on a surface whose client draws cards.
+	OnPlan(p Plan)
+	// OnPlanResult is called with how applying a plan went.
+	OnPlanResult(r PlanResult)
+}
+
+// Choices is a pick-one question put to the person. ID tells two questions
+// in one conversation apart.
+type Choices struct {
+	ID       string
+	Question string
+	Options  []ChoiceOption
+}
+
+// ChoiceOption is one answer. Label is what the button says and what is sent
+// back as the person's reply; Icon is an optional icon name.
+type ChoiceOption struct {
+	ID    string
+	Label string
+	Icon  string
+}
+
+// ChoicesText renders c as plain text, for a client that draws no buttons.
+func ChoicesText(c Choices) string {
+	var b strings.Builder
+	b.WriteString(c.Question)
+	for i, o := range c.Options {
+		fmt.Fprintf(&b, "\n%d. %s", i+1, o.Label)
+	}
+	return b.String()
 }
 
 // AgentRunner drives one conversation turn: it composes capabilities, runs the

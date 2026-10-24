@@ -100,6 +100,20 @@ type (
 		OK        bool   `json:"ok"`
 		ElapsedMs int64  `json:"elapsedMs"`
 	}
+	// optionsEvent puts a pick-one question to the person; the turn ends after
+	// it, and the chosen label comes back as the next message.
+	//   {"type":"options","id":"...","question":"...","options":[{"id":"1","label":"...","icon":"..."}]}
+	optionsEvent struct {
+		Type     string        `json:"type"`
+		ID       string        `json:"id,omitempty"`
+		Question string        `json:"question"`
+		Options  []optionEntry `json:"options"`
+	}
+	optionEntry struct {
+		ID    string `json:"id"`
+		Label string `json:"label"`
+		Icon  string `json:"icon,omitempty"`
+	}
 	// doneEvent is the final frame; the stream closes immediately after it.
 	//   {"type":"done","state":"completed|failed|canceled","text":"...","error":"..."}
 	doneEvent struct {
@@ -194,6 +208,21 @@ func (s *sseSink) OnToolStart(act a2a.ToolActivity) {
 func (s *sseSink) OnToolFinish(act a2a.ToolActivity) {
 	s.writeEvent(toolFinishEvent{Type: "tool_finish", ID: act.ID, Name: act.Name, OK: act.OK, ElapsedMs: act.Elapsed.Milliseconds()})
 }
+
+func (s *sseSink) OnChoices(c a2a.Choices) {
+	opts := make([]optionEntry, 0, len(c.Options))
+	for _, o := range c.Options {
+		opts = append(opts, optionEntry{ID: o.ID, Label: o.Label, Icon: o.Icon})
+	}
+	s.writeEvent(optionsEvent{Type: "options", ID: c.ID, Question: c.Question, Options: opts})
+}
+
+// OnPlan and OnPlanResult do nothing on this endpoint: plan cards are drawn
+// only by the portal's home page, which streams through the assistant's own
+// chat endpoint (see internal/server/chat_stream.go), and this endpoint takes
+// no approvals.
+func (s *sseSink) OnPlan(a2a.Plan)             {}
+func (s *sseSink) OnPlanResult(a2a.PlanResult) {}
 
 // writeEvent marshals v (always one of the event structs above) and writes it
 // as one SSE frame. A marshal failure here would be a bug in one of those

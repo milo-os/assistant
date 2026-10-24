@@ -48,6 +48,10 @@ const (
 	// maxDiffLines bounds what one change reports. Past it the person reads a
 	// wall rather than a change.
 	maxDiffLines = 60
+
+	// maxSummaryLen bounds a plan summary, in runes: one line beside a
+	// resource, not a description of it.
+	maxSummaryLen = 200
 )
 
 // MutatingToolNames are the base tools on the change path.
@@ -99,6 +103,9 @@ type ManifestResult struct {
 	// Manifest is the canonical form. Present in a plan, where it is what the
 	// token covers and what apply must be handed back.
 	Manifest string `json:"manifest,omitempty"`
+	// Summary is the plain-language line the caller gave for this manifest,
+	// echoed so a client can show it beside the resource. Plan only.
+	Summary string `json:"summary,omitempty"`
 }
 
 // ValidateOutput is the platform's verdict on each manifest.
@@ -202,14 +209,13 @@ func resourcesPlan(opts Options) *tool {
 			"earlier manifests is refused, and applying it because it was close is exactly what this "+
 			"prevents. Tokens are good for "+plantoken.TTL.String()+". Planning by itself creates and "+
 			"changes nothing.",
-		object(manifestsProperty(
-			"The manifests to plan, as YAML or JSON, one resource per entry. Several may be planned "+
-				"together when they belong to one change; they are ordered for you."), "manifests"),
+		object(planProperties(), "manifests"),
 		func(ctx context.Context, input json.RawMessage) (string, error) {
 			manifests, err := readManifestsArg(ResourcesPlanToolName, input)
 			if err != nil {
 				return "", err
 			}
+			summaries := readSummariesArg(input)
 			items, err := prepare(ctx, opts, manifests)
 			if err != nil {
 				return "", err
@@ -242,7 +248,11 @@ func resourcesPlan(opts Options) *tool {
 				}
 				binding.Manifests = append(binding.Manifests, canonical)
 				binding.ResourceVersions = append(binding.ResourceVersions, item.resourceVersion)
-				out.Results = append(out.Results, item.result(true))
+				res := item.result(true)
+				if item.index < len(summaries) {
+					res.Summary = summaries[item.index]
+				}
+				out.Results = append(out.Results, res)
 			}
 
 			expiry := opts.now().Add(plantoken.TTL)
@@ -255,6 +265,43 @@ func resourcesPlan(opts Options) *tool {
 			return result(out)
 		},
 	)
+}
+
+// planProperties is resources_plan's input: the manifests, and an optional
+// line per manifest saying what it is for.
+func planProperties() map[string]any {
+	properties := manifestsProperty(
+		"The manifests to plan, as YAML or JSON, one resource per entry. Several may be planned " +
+			"together when they belong to one change; they are ordered for you.")
+	properties["summaries"] = map[string]any{
+		"type":  "array",
+		"items": map[string]any{"type": "string"},
+		"description": "Optional. One short plain-language sentence per manifest, in the same order, " +
+			"saying what it does for the person (for example \"Runs your container in us-central-1\"). " +
+			"Shown beside each resource where the client draws the plan.",
+	}
+	return properties
+}
+
+// readSummariesArg reads resources_plan's optional summaries, one line each,
+// cut to maxSummaryLen. Bad or missing input is no summaries: they are a
+// caption, not part of what the token covers.
+func readSummariesArg(input json.RawMessage) []string {
+	var args struct {
+		Summaries []string `json:"summaries"`
+	}
+	if json.Unmarshal(input, &args) != nil {
+		return nil
+	}
+	out := make([]string, len(args.Summaries))
+	for i, s := range args.Summaries {
+		r := []rune(strings.Join(strings.Fields(s), " "))
+		if len(r) > maxSummaryLen {
+			r = r[:maxSummaryLen]
+		}
+		out[i] = string(r)
+	}
+	return out
 }
 
 func resourcesApply(opts Options) *tool {

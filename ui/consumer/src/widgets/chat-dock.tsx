@@ -234,6 +234,7 @@ export default function ChatDock({
         isListening={workspace.micListening}
         frequencyData={workspace.micFrequencyData}
         onMicToggle={workspace.onMicToggle}
+        density="compact"
       />
     );
     return (
@@ -242,7 +243,7 @@ export default function ChatDock({
           {workspace.messages.length > 0 ? (
             // `Conversation` owns the only scroll area and pins `footer`
             // under it, the same wiring the workspace uses. Compact density
-            // (avatar beside Patch's turns, narrower column, smaller text)
+            // (full width, avatar beside Patch's turns, one-line composer)
             // so it reads as part of the page rather than a full chat app.
             <Conversation
               density="compact"
@@ -254,6 +255,9 @@ export default function ChatDock({
               bottomRef={workspace.bottomRef}
               userScrolledUpRef={workspace.userScrolledUpRef}
               footer={promptCard}
+              onChoose={workspace.onChoose}
+              onApprovePlan={workspace.onApprovePlan}
+              onChangePlan={workspace.onChangePlan}
             />
           ) : (
             <>
@@ -266,12 +270,9 @@ export default function ChatDock({
                   <p>Ask Patch anything about this project.</p>
                 )}
               </div>
-              {/* Same footer padding and width as compact `Conversation`
-                  (42rem), so the composer doesn't move when the first
-                  message lands. */}
-              <div style={{ flexShrink: 0, padding: '0 1rem 1rem' }}>
-                <div style={{ maxWidth: '42rem', margin: '0 auto', width: '100%' }}>{promptCard}</div>
-              </div>
+              {/* Same footer padding as compact `Conversation`, so the
+                  composer doesn't move when the first message lands. */}
+              <div style={{ flexShrink: 0, padding: '0 1.75rem 1.5rem' }}>{promptCard}</div>
             </>
           )}
         </AssistantConfigProvider>
@@ -323,6 +324,9 @@ export default function ChatDock({
         // Delete is a hard, irreversible server delete — always confirm.
         confirmDelete
         onSuggestion={workspace.onSuggestion}
+        onChoose={workspace.onChoose}
+        onApprovePlan={workspace.onApprovePlan}
+        onChangePlan={workspace.onChangePlan}
         modelId={workspace.modelId}
         effortId={workspace.effortId}
         onModelChange={workspace.onModelChange}
@@ -350,27 +354,24 @@ export default function ChatDock({
   );
 }
 
-/** Fills the host's fixed-height flex box; `Conversation` scrolls inside it. */
+/**
+ * Sizes to the conversation inside the host's flex column, so the section
+ * grows as the chat does. Once the host's max height is reached it shrinks
+ * instead, and `Conversation` scrolls inside it.
+ */
 const INLINE_ROOT_STYLE: CSSProperties = {
   position: 'relative',
   display: 'flex',
   flexDirection: 'column',
-  height: '100%',
+  flex: '1 1 auto',
   width: '100%',
   minHeight: 0,
   overflow: 'hidden',
 };
 
-/** The blank chat's one-line placeholder, filling the space above the composer. */
+/** The blank chat's one-line placeholder above the composer, in the turns' column. */
 const INLINE_EMPTY_STYLE: CSSProperties = {
-  flex: 1,
-  minHeight: 0,
-  overflowY: 'auto',
-  display: 'flex',
-  alignItems: 'flex-end',
-  justifyContent: 'center',
-  padding: '1rem',
+  padding: '1rem 1.75rem 0.75rem',
   fontSize: '0.875rem',
-  textAlign: 'center',
   color: 'var(--muted-foreground)',
 };

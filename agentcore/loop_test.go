@@ -191,6 +191,55 @@ func TestRule2_AllToolResultsInSingleMessage(t *testing.T) {
 	}
 }
 
+// ── Rule 7: a turn-ending tool finishes the run ───────────────
+
+func TestRule7_EndsTurnFinishesAfterItsStepsResults(t *testing.T) {
+	ask := funcTool{name: "ask", fn: func(context.Context, json.RawMessage) (string, error) { return "shown", nil }}
+	m := &scriptedModel{turns: [][]StreamPart{
+		{textDelta("Which one?"), toolCallPart("c1", "ask", `{}`), stepFinish(Usage{Input: 3, Output: 2}, FinishToolCalls)},
+		{textDelta("should never be asked"), stepFinish(Usage{}, FinishStop)},
+	}}
+	parts := collect(t, Run(context.Background(), LoopOptions{
+		Model: m, Messages: []Message{UserMessage("go")}, Tools: ToolSet{"ask": ask},
+		EndsTurn: func(r ToolResult) bool { return r.Name == "ask" && !r.IsError },
+	}))
+
+	if m.call != 1 {
+		t.Fatalf("the model must not be asked again after a turn-ending tool, got %d calls", m.call)
+	}
+	want := []StreamPartKind{StreamPartTextDelta, StreamPartToolCall, StreamPartStepFinish, StreamPartToolResult, StreamPartFinish}
+	got := kinds(parts)
+	if len(got) != len(want) {
+		t.Fatalf("parts = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("parts = %v, want %v", got, want)
+		}
+	}
+	fin := terminal(t, parts)
+	if fin.FinishReason != FinishStop || fin.TotalUsage.Input != 3 {
+		t.Fatalf("finish = %+v, want stop carrying the step's usage", fin)
+	}
+}
+
+func TestRule7_RejectedResultGoesBackToTheModel(t *testing.T) {
+	ask := funcTool{name: "ask", fn: func(context.Context, json.RawMessage) (string, error) {
+		return "", errors.New("question is required")
+	}}
+	m := &scriptedModel{turns: [][]StreamPart{
+		{toolCallPart("c1", "ask", `{}`), stepFinish(Usage{}, FinishToolCalls)},
+		{textDelta("fixed"), stepFinish(Usage{}, FinishStop)},
+	}}
+	collect(t, Run(context.Background(), LoopOptions{
+		Model: m, Messages: []Message{UserMessage("go")}, Tools: ToolSet{"ask": ask},
+		EndsTurn: func(r ToolResult) bool { return r.Name == "ask" && !r.IsError },
+	}))
+	if m.call != 2 {
+		t.Fatalf("a failed turn-ending call must go back to the model, got %d calls", m.call)
+	}
+}
+
 // ── Rule 3: step limit ends gracefully ────────────────────────
 
 func TestRule3_StepLimitEndsGracefully(t *testing.T) {
