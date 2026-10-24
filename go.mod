@@ -126,7 +126,7 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	github.com/yuin/goldmark v1.7.13 // indirect
+	github.com/yuin/goldmark v1.7.17 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	go.etcd.io/etcd/api/v3 v3.6.8 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.6.8 // indirect
@@ -158,7 +158,7 @@ require (
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
-	k8s.io/client-go v0.35.3 // indirect
+	k8s.io/client-go v0.35.3
 	k8s.io/kms v0.35.3 // indirect
 	k8s.io/utils v0.0.0-20260319190234-28399d86e0b5 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.34.0 // indirect
