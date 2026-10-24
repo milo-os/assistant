@@ -38,6 +38,7 @@ curl -s localhost:7820/a2a \
 | `GET` | `/healthz` | none | `{"status":"ok"}` |
 | `GET` | `/.well-known/agent-card.json` | none | A2A v1.0 agent card — generic, no project detail (also at `/.well-known/agent.json`) |
 | `POST` | `/a2a` | bearer | JSON-RPC 2.0 endpoint |
+| `POST` | `/chat/conversations/{contextId}/sendmessage?projectId=` | bearer | One turn as a flat SSE stream; what the portal's assistant plugin uses |
 
 ### JSON-RPC methods (`POST /a2a`)
 
@@ -115,6 +116,59 @@ Deviations (intentional, documented):
 - **Project** comes from `message.metadata.projectName`. The task runs
   against that project and all usage is subject-scoped to
   `projects/<projectName>`.
+
+### Chat stream (`POST /chat/conversations/{contextId}/sendmessage`)
+
+The same runner as `/a2a`, for a client that wants flat events instead of
+JSON-RPC framing. The project is the `projectId` query parameter, checked
+against the caller's token.
+
+Request body:
+
+```jsonc
+{
+  "text": "deploy nginx",
+  "mentions": [{ "kind": "Workload", "name": "api", "apiGroup": "compute.datumapis.com" }],
+  // Where the conversation is happening. Only home-first-run is known.
+  "surface": { "name": "home-first-run", "network": "default" },
+  // Set only when the person clicks Approve on a plan card: the card's
+  // token and manifests, unchanged. See "Plan cards" below.
+  "approvePlan": { "token": "...", "manifests": ["apiVersion: ..."] }
+}
+```
+
+Each SSE frame is one JSON object on a `data:` line:
+
+| `type` | Fields | When |
+| --- | --- | --- |
+| `text_delta` | `text` | A chunk of the answer |
+| `tool_start` | `id`, `name`, `summary` | The model called a tool |
+| `tool_finish` | `id`, `name`, `ok`, `elapsedMs` | That call finished |
+| `options` | `id`, `question`, `options[]` (`id`, `label`, `icon`) | A pick-one question; the turn ends on it |
+| `plan` | `id`, `token`, `expiresAt`, `resources[]` (`kind`, `name`, `namespace`, `action`, `summary`, `diff`, `manifest`) | A plan the person can approve; the turn ends on it |
+| `plan_result` | `id`, `ok`, `applied[]`, `error` | How applying a plan went |
+| `done` | `state`, `text`, `error` | Always last |
+
+`options` and `plan` are only sent on the `home-first-run` surface, whose
+client draws buttons and cards. Elsewhere the model asks and shows plans in
+prose, as before. The chosen option's `label` is sent back as the next
+message's `text`.
+
+#### Plan cards
+
+A turn that sends a `plan` frame ends there. To approve, the client sends
+the next message with `approvePlan` set to the frame's `token` and the
+`manifest` of each resource, in order. The server then calls
+`resources_apply` with exactly those, before the model runs, and sends a
+`plan_result` frame with the outcome. The model then gets one step to
+report it.
+
+Nothing in `approvePlan` is trusted. `resources_apply` re-derives the
+token from the manifests and refuses a mismatch, so an edited manifest
+changes nothing. A plan that was already applied no longer matches the
+resource versions it would replace, so a second approval is refused too.
+A malformed `approvePlan` (no token, no manifests, or more than 20) is a
+400.
 
 ## Consumers — the `patch` CLI
 

@@ -125,7 +125,8 @@ func choicesText(c Choices) string {
 
 // askChoiceTool is the model-facing half of [AskChoiceToolName]. Running it
 // only checks the input: the stream is what shows the buttons, and the loop
-// ends the turn after it (see [agentcore.LoopOptions].EndTurnTools).
+// ends the turn after it (see [agentcore.LoopOptions].EndsTurn and
+// endsTurnOn).
 type askChoiceTool struct{}
 
 func (askChoiceTool) Definition() agentcore.ToolDefinition {
