@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -444,5 +446,174 @@ func TestClassifyPassesThroughCancellation(t *testing.T) {
 	// A wrapped cancellation is also recognized (SDKs wrap the context error).
 	if _, isModelErr := classify(fmt.Errorf("do request: %w", context.Canceled)).(*agentcore.ModelError); isModelErr {
 		t.Fatal("a wrapped cancellation must not be classified as a retryable ModelError")
+	}
+}
+
+// The gateway token is a projected ServiceAccount token the kubelet rewrites in
+// place, so the second request must carry a token written after construction.
+func TestStreamGatewayModeTokenFileRereadPerRequest(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("first-token\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	var cap capturedRequest
+	srv := fakeServer(t, textStreamSSE(), &cap)
+	defer srv.Close()
+
+	m := New(Options{ModelID: "claude-test", BaseURL: srv.URL, TokenFile: tokenPath})
+
+	drain(t, mustStream(t, m, agentcore.Request{Messages: []agentcore.Message{agentcore.UserMessage("hello")}}))
+	if got := cap.headers.Get("Authorization"); got != "Bearer first-token" {
+		t.Fatalf("first request Authorization=%q, want %q", got, "Bearer first-token")
+	}
+	if got := cap.headers.Get("x-api-key"); got != "" {
+		t.Fatalf("a gateway token is not a model credential, got x-api-key=%q", got)
+	}
+
+	if err := os.WriteFile(tokenPath, []byte("second-token\n"), 0o600); err != nil {
+		t.Fatalf("rotate token: %v", err)
+	}
+
+	drain(t, mustStream(t, m, agentcore.Request{Messages: []agentcore.Message{agentcore.UserMessage("again")}}))
+	if got := cap.headers.Get("Authorization"); got != "Bearer second-token" {
+		t.Fatalf("after rotation Authorization=%q, want %q", got, "Bearer second-token")
+	}
+}
+
+func TestStreamGatewayModeTokenFileUnreadable(t *testing.T) {
+	var cap capturedRequest
+	srv := fakeServer(t, textStreamSSE(), &cap)
+	defer srv.Close()
+
+	m := New(Options{ModelID: "claude-test", BaseURL: srv.URL, TokenFile: filepath.Join(t.TempDir(), "absent")})
+
+	parts := drain(t, mustStream(t, m, agentcore.Request{Messages: []agentcore.Message{agentcore.UserMessage("hello")}}))
+	if len(parts) == 0 {
+		t.Fatal("want a terminal error part, got no parts")
+	}
+	last := parts[len(parts)-1]
+	if last.Kind != agentcore.StreamPartError || last.Err == nil {
+		t.Fatalf("last part = %+v, want a StreamPartError carrying an error", last)
+	}
+	if !strings.Contains(last.Err.Error(), "reading gateway token") {
+		t.Fatalf("err = %v, want it to name the unreadable token file", last.Err)
+	}
+	if cap.headers != nil {
+		t.Error("no request should have been sent without a token")
+	}
+}
+
+func cacheMarked(v any) bool {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	cc, ok := m["cache_control"].(map[string]any)
+	return ok && cc["type"] == "ephemeral"
+}
+
+func lastBlock(t *testing.T, list any) any {
+	t.Helper()
+	items, ok := list.([]any)
+	if !ok || len(items) == 0 {
+		t.Fatalf("want a non-empty list, got %#v", list)
+	}
+	return items[len(items)-1]
+}
+
+func countMarked(list any) int {
+	items, _ := list.([]any)
+	n := 0
+	for _, item := range items {
+		if cacheMarked(item) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestStreamMarksCacheBreakpoints(t *testing.T) {
+	var cap capturedRequest
+	srv := fakeServer(t, textStreamSSE(), &cap)
+	defer srv.Close()
+
+	schema := json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}}}`)
+	m := New(Options{ModelID: "claude-test", BaseURL: srv.URL})
+	drain(t, mustStream(t, m, agentcore.Request{
+		System: "sys",
+		Tools: []agentcore.ToolDefinition{
+			{Name: "first", InputSchema: schema},
+			{Name: "second", InputSchema: schema},
+		},
+		Messages: []agentcore.Message{
+			agentcore.UserMessage("diagnose p-1"),
+			{Role: agentcore.RoleAssistant, Content: []agentcore.ContentPart{
+				agentcore.TextPart("checking"),
+				{Kind: agentcore.ContentToolCall, ToolCall: &agentcore.ToolCall{ID: "tc-1", Name: "first", Input: json.RawMessage(`{"id":"p-1"}`)}},
+			}},
+			{Role: agentcore.RoleTool, Content: []agentcore.ContentPart{
+				{Kind: agentcore.ContentToolResult, ToolResult: &agentcore.ToolResult{ToolCallID: "tc-1", Name: "first", Content: "lagging"}},
+			}},
+		},
+	}))
+
+	tools := cap.body["tools"]
+	if !cacheMarked(lastBlock(t, tools)) || countMarked(tools) != 1 {
+		t.Errorf("want only the last tool marked, got %v", tools)
+	}
+	if !cacheMarked(lastBlock(t, cap.body["system"])) {
+		t.Errorf("want the system prompt marked, got %v", cap.body["system"])
+	}
+
+	messages, _ := cap.body["messages"].([]any)
+	for i, msg := range messages {
+		content := msg.(map[string]any)["content"]
+		want := 0
+		if i == len(messages)-1 {
+			want = 1
+			if !cacheMarked(lastBlock(t, content)) {
+				t.Errorf("want the final block of the last message marked, got %v", content)
+			}
+		}
+		if got := countMarked(content); got != want {
+			t.Errorf("message %d: %d marked blocks, want %d", i, got, want)
+		}
+	}
+}
+
+func TestStreamCachesWithoutToolsOrSystem(t *testing.T) {
+	var cap capturedRequest
+	srv := fakeServer(t, textStreamSSE(), &cap)
+	defer srv.Close()
+
+	m := New(Options{ModelID: "claude-test", BaseURL: srv.URL})
+	drain(t, mustStream(t, m, agentcore.Request{Messages: []agentcore.Message{agentcore.UserMessage("hi")}}))
+
+	if _, ok := cap.body["tools"]; ok {
+		t.Errorf("no tools were given, got %v", cap.body["tools"])
+	}
+	if _, ok := cap.body["system"]; ok {
+		t.Errorf("no system prompt was given, got %v", cap.body["system"])
+	}
+	messages, _ := cap.body["messages"].([]any)
+	if !cacheMarked(lastBlock(t, lastBlock(t, messages).(map[string]any)["content"])) {
+		t.Errorf("want the only message marked, got %v", messages)
+	}
+}
+
+// The API refuses cache_control on an empty text block, so a marker there would
+// turn a request about empty input into a confusing cache error.
+func TestStreamSkipsCacheMarkOnEmptyText(t *testing.T) {
+	var cap capturedRequest
+	srv := fakeServer(t, textStreamSSE(), &cap)
+	defer srv.Close()
+
+	m := New(Options{ModelID: "claude-test", BaseURL: srv.URL})
+	drain(t, mustStream(t, m, agentcore.Request{Messages: []agentcore.Message{agentcore.UserMessage("")}}))
+
+	messages, _ := cap.body["messages"].([]any)
+	if countMarked(lastBlock(t, messages).(map[string]any)["content"]) != 0 {
+		t.Errorf("an empty text block must not be marked, got %v", messages)
 	}
 }

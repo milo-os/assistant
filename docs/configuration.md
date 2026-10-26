@@ -31,6 +31,7 @@ Environment variables, model backends, and the authentication/authorization seam
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Anthropic model id |
 | `GATEWAY_URL` | — | Required when `MODEL_MODE=gateway`; Envoy AI Gateway (OpenAI-compatible) base URL |
 | `GATEWAY_MODEL` | `patch-stub-v1` | Model name the gateway routes to the upstream |
+| `GATEWAY_SCHEMA` | `openai` | API spoken to the gateway in `MODEL_MODE=gateway`: `openai` (Chat Completions) or `anthropic` (Messages). Only `anthropic` gets prompt caching from an Anthropic upstream; see [Gateway mode](#gateway-mode). Setting it under another mode is an error |
 | `GATEWAY_TOKEN_FILE` | — | Path to a bearer token proving which workload is calling the gateway. Re-read per request, so a rotated token keeps working. Not a model credential — the gateway still injects that |
 | `GATEWAY_CA_CERT` | — | Optional CA PEM path for a self-signed gateway TLS cert |
 | `GATEWAY_TLS_INSECURE` | `false` | Skip gateway TLS verification (local only) |
@@ -149,7 +150,8 @@ per-step usage aggregation, and adapters). Modes:
 ### Gateway mode
 
 `MODEL_MODE=gateway` points the model client at the Envoy AI Gateway's
-OpenAI-compatible endpoint (`GATEWAY_URL`) with model `GATEWAY_MODEL`. It
+endpoint (`GATEWAY_URL`) with model `GATEWAY_MODEL`, speaking the API that
+`GATEWAY_SCHEMA` names. It
 exercises the production metering/policy path: token usage is counted **at
 the gateway** (`llmRequestCosts`) and upstream credentials are injected
 **by the gateway** (`BackendSecurityPolicy`).
@@ -167,6 +169,19 @@ Two properties this mode guarantees from the service side:
 
 For local TLS, use plain `http://` or set `GATEWAY_CA_CERT` /
 `GATEWAY_TLS_INSECURE`.
+
+The schema decides whether prompts are cached:
+
+| `GATEWAY_SCHEMA` | Wire | Prompt caching against Anthropic |
+| --- | --- | --- |
+| `openai` (default) | `/v1/chat/completions` | None. Anthropic serves this through its OpenAI compatibility layer, which does not cache and reports no cache tokens |
+| `anthropic` | `/v1/messages` | Cache breakpoints after the tools, the system prompt and the latest message, so each loop step reads the previous step's prefix at the cached rate |
+
+Under `anthropic`, `GATEWAY_MODEL` is a native model id such as
+`claude-sonnet-5`, and a trailing `/v1` on `GATEWAY_URL` is dropped because the
+client adds `/v1/messages` itself. The gateway must route that model to an
+Anthropic-schema backend. `MODEL_MODE=anthropic` uses the same adapter, so it
+caches too.
 
 ### Mock model caveat
 

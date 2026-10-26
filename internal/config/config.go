@@ -39,6 +39,20 @@ const (
 	ModelModeGateway ModelMode = "gateway"
 )
 
+// GatewaySchema selects the API the service speaks to the AI gateway.
+type GatewaySchema string
+
+const (
+	// GatewaySchemaOpenAI speaks Chat Completions. Vendor-neutral, but the
+	// Anthropic upstream serves it through a compatibility layer that does no
+	// prompt caching.
+	GatewaySchemaOpenAI GatewaySchema = "openai"
+	// GatewaySchemaAnthropic speaks the Anthropic Messages API, which the
+	// gateway passes through unchanged, so prompt caching works and its token
+	// counts are metered.
+	GatewaySchemaAnthropic GatewaySchema = "anthropic"
+)
+
 // CapabilitySourceMode selects which [capability.Source] implementation serves
 // the assistant's capability configuration.
 //
@@ -133,6 +147,8 @@ type ModelConfig struct {
 	GatewayURL string
 	// GatewayModel is the model name the gateway routes upstream.
 	GatewayModel string
+	// GatewaySchema is the API spoken to the gateway (GATEWAY_SCHEMA).
+	GatewaySchema GatewaySchema
 	// GatewayTokenFile is an optional path to a bearer token presented to the
 	// gateway (GATEWAY_TOKEN_FILE). This authenticates the SERVICE to the
 	// gateway; it is not a model credential, which the gateway still injects
@@ -402,6 +418,17 @@ func Load(getenv func(string) string) (*Config, error) {
 	if modelMode == ModelModeGateway && gatewayURL == "" {
 		errs = append(errs, FieldError{"GATEWAY_URL", "MODEL_MODE=gateway requires GATEWAY_URL (the Envoy AI Gateway endpoint)"})
 	}
+	gatewaySchema := GatewaySchemaOpenAI
+	switch raw := env("GATEWAY_SCHEMA"); {
+	case raw == "":
+	case modelMode != ModelModeGateway:
+		errs = append(errs, FieldError{"GATEWAY_SCHEMA", "only applies to MODEL_MODE=gateway"})
+	case raw == string(GatewaySchemaOpenAI), raw == string(GatewaySchemaAnthropic):
+		gatewaySchema = GatewaySchema(raw)
+	default:
+		errs = append(errs, FieldError{"GATEWAY_SCHEMA",
+			fmt.Sprintf(`must be "openai" or "anthropic", got %q`, raw)})
+	}
 
 	// ── Capability source ─────────────────────────────────────
 	// One explicit mode, then per-mode validation. A companion variable set for
@@ -484,6 +511,7 @@ func Load(getenv func(string) string) (*Config, error) {
 			AnthropicModel:     anthropicModel,
 			GatewayURL:         gatewayURL,
 			GatewayModel:       gatewayModel,
+			GatewaySchema:      gatewaySchema,
 			GatewayTokenFile:   env("GATEWAY_TOKEN_FILE"),
 			GatewayCACert:      env("GATEWAY_CA_CERT"),
 			GatewayTLSInsecure: isTruthy(env("GATEWAY_TLS_INSECURE")),
