@@ -78,6 +78,11 @@ from the infra repo
 (`apps/patch-assistant/base/milo-services.yaml`), the same way
 `apps/cloud-portal/base/milo-services.yaml` used to.
 
+Prices are not here. Staging's `ServicePricing`s live in
+`config/components/service-catalog-staging/`, which infra applies in
+staging only (`apps/patch-assistant/overlays/staging/milo-pricing.yaml`),
+so they are never promoted to production with this component.
+
 To preview the bundle locally:
 
 ```sh

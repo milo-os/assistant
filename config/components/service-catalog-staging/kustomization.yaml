@@ -1,0 +1,12 @@
+# Staging-only ServicePricings for the assistant's token meters.
+#
+# Kept apart from components/service-catalog, which is promoted to
+# production: nothing is priced there yet. infra applies this directory in
+# staging only, through its own Flux Kustomization
+# (apps/patch-assistant/overlays/staging/milo-pricing.yaml), so the prices
+# land regardless of the state of patch-assistant-milo-services.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - service-pricing.yaml
