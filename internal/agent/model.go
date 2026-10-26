@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/agentcore/anthropic"
@@ -18,8 +19,9 @@ import (
 // ResolveModel builds the concrete [agentcore.Model] for a model configuration:
 //
 //   - mock:      the scripted in-process model (no secrets, no network).
-//   - gateway:   the OpenAI-compatible adapter pointed at the Envoy AI Gateway,
-//     with NO model credential (the gateway injects it). It may still
+//   - gateway:   the adapter for GatewaySchema (OpenAI-compatible by default,
+//     or Anthropic Messages) pointed at the Envoy AI Gateway, with NO
+//     model credential (the gateway injects it). It may still
 //     present GatewayTokenFile to prove which workload is calling,
 //     where the gateway requires that. Custom CA / insecure TLS from
 //     config is honored via the HTTP client.
@@ -42,7 +44,15 @@ func ResolveModel(cfg config.ModelConfig, logger *slog.Logger) (agentcore.Model,
 		if err != nil {
 			return nil, err
 		}
-		logger.Info("model.resolved", "mode", "gateway", "modelId", cfg.GatewayModel, "baseURL", cfg.GatewayURL)
+		logger.Info("model.resolved", "mode", "gateway", "schema", cfg.GatewaySchema, "modelId", cfg.GatewayModel, "baseURL", cfg.GatewayURL)
+		if cfg.GatewaySchema == config.GatewaySchemaAnthropic {
+			return anthropic.New(anthropic.Options{
+				ModelID:    cfg.GatewayModel,
+				BaseURL:    anthropicBaseURL(cfg.GatewayURL),
+				TokenFile:  cfg.GatewayTokenFile,
+				HTTPClient: httpClient,
+			}), nil
+		}
 		return openaicompat.New(openaicompat.Options{
 			ModelID:    cfg.GatewayModel,
 			BaseURL:    cfg.GatewayURL,
@@ -57,6 +67,12 @@ func ResolveModel(cfg config.ModelConfig, logger *slog.Logger) (agentcore.Model,
 			APIKey:  cfg.AnthropicAPIKey,
 		}), nil
 	}
+}
+
+// anthropicBaseURL drops the trailing /v1 that GATEWAY_URL carries for the
+// OpenAI client, because the Anthropic client adds /v1/messages itself.
+func anthropicBaseURL(gatewayURL string) string {
+	return strings.TrimSuffix(strings.TrimRight(gatewayURL, "/"), "/v1")
 }
 
 // gatewayHTTPClient builds an HTTP client for the gateway only when a custom CA

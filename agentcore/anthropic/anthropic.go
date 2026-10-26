@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -30,7 +31,8 @@ const DefaultMaxTokens = 4096
 // Options configures a [Model]. ModelID is required. APIKey enables the
 // standard Anthropic endpoint; leave it empty (and set BaseURL) to route
 // through a gateway that injects the upstream credential itself, in which
-// case no Authorization header is sent.
+// case no model credential is sent. TokenFile then optionally proves which
+// workload is calling that gateway.
 type Options struct {
 	// ModelID is the Anthropic model id (e.g. "claude-sonnet-4-6").
 	ModelID string
@@ -38,6 +40,10 @@ type Options struct {
 	APIKey string
 	// BaseURL overrides the API base URL. Empty uses the SDK default.
 	BaseURL string
+	// TokenFile names a file holding a bearer token to present to the
+	// gateway, re-read on every request so a rotated projected
+	// ServiceAccount token keeps working. Ignored when APIKey is set.
+	TokenFile string
 	// HTTPClient overrides the HTTP client (custom CA, TLS settings). Nil
 	// uses the SDK default.
 	HTTPClient *http.Client
@@ -56,9 +62,12 @@ func New(opts Options) *Model {
 	// and is bounded by the per-turn deadline. Leaving the SDK's default (2)
 	// enabled would compound with ours and multiply the attempt count.
 	reqOpts := []option.RequestOption{option.WithMaxRetries(0)}
-	if opts.APIKey != "" {
+	switch {
+	case opts.APIKey != "":
 		reqOpts = append(reqOpts, option.WithAPIKey(opts.APIKey))
-	} else {
+	case opts.TokenFile != "":
+		reqOpts = append(reqOpts, option.WithAPIKey(""), option.WithMiddleware(bearerFromFile(opts.TokenFile)))
+	default:
 		// Keyless (gateway) posture: explicitly clear any environment-derived
 		// key and install a passthrough middleware. The SDK otherwise refuses
 		// to send a credential-less request; with the key cleared and an extra
@@ -73,6 +82,24 @@ func New(opts Options) *Model {
 		reqOpts = append(reqOpts, option.WithHTTPClient(opts.HTTPClient))
 	}
 	return &Model{client: anthropic.NewClient(reqOpts...), modelID: opts.ModelID}
+}
+
+// bearerFromFile returns middleware that sets Authorization from path on every
+// request. A read failure is returned rather than sent as an empty header, so
+// the cause appears as a missing token instead of a bare 401 from the gateway.
+func bearerFromFile(path string) option.Middleware {
+	return func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+		token, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading gateway token %s: %w", path, err)
+		}
+		trimmed := strings.TrimSpace(string(token))
+		if trimmed == "" {
+			return nil, fmt.Errorf("gateway token %s is empty", path)
+		}
+		req.Header.Set("Authorization", "Bearer "+trimmed)
+		return next(req)
+	}
 }
 
 // passthroughMiddleware forwards the request unchanged. It exists only to
@@ -288,7 +315,36 @@ func buildParams(modelID string, req agentcore.Request) (anthropic.MessageNewPar
 	for _, msg := range req.Messages {
 		params.Messages = append(params.Messages, messageParam(msg))
 	}
+	markCacheBreakpoints(&params)
 	return params, nil
+}
+
+// markCacheBreakpoints places up to three of the four permitted cache
+// breakpoints: after the tools, after the system prompt, and on the final block
+// of the conversation. The agent loop resends the whole history on every step,
+// so the final breakpoint lets each step read the previous step's prefix from
+// the cache instead of paying full price for it again.
+func markCacheBreakpoints(params *anthropic.MessageNewParams) {
+	if n := len(params.Tools); n > 0 {
+		if cc := params.Tools[n-1].GetCacheControl(); cc != nil {
+			*cc = anthropic.NewCacheControlEphemeralParam()
+		}
+	}
+	if n := len(params.System); n > 0 {
+		params.System[n-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
+	}
+	for i := len(params.Messages) - 1; i >= 0; i-- {
+		if n := len(params.Messages[i].Content); n > 0 {
+			last := params.Messages[i].Content[n-1]
+			if last.OfText != nil && last.OfText.Text == "" {
+				return
+			}
+			if cc := last.GetCacheControl(); cc != nil {
+				*cc = anthropic.NewCacheControlEphemeralParam()
+			}
+			return
+		}
+	}
 }
 
 // messageParam converts one [agentcore.Message] into an Anthropic

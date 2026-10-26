@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"encoding/json"
+	"sort"
 )
 
 // Role identifies the author of a [Message] in the conversation sent to a
@@ -109,7 +110,9 @@ type Tool interface {
 type ToolSet map[string]Tool
 
 // Definitions returns the model-facing definitions of every tool in the
-// set. Order is unspecified.
+// set, sorted by name. The order is fixed because tools lead the prompt: a
+// list that reshuffled between turns would change the cached prefix and
+// defeat prompt caching for everything after it.
 func (ts ToolSet) Definitions() []ToolDefinition {
 	if len(ts) == 0 {
 		return nil
@@ -118,6 +121,7 @@ func (ts ToolSet) Definitions() []ToolDefinition {
 	for _, t := range ts {
 		defs = append(defs, t.Definition())
 	}
+	sort.Slice(defs, func(i, j int) bool { return defs[i].Name < defs[j].Name })
 	return defs
 }
 

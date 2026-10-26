@@ -34,6 +34,13 @@ out of the service:
 Because the gateway speaks an OpenAI-compatible API, changing model vendor is a
 gateway route change rather than a service change.
 
+That neutrality costs prompt caching when the vendor is Anthropic: its
+OpenAI-compatible endpoint does not cache. `GATEWAY_SCHEMA=anthropic` speaks the
+native Messages API to the gateway instead, which passes it through unchanged,
+caches, and meters the cache tokens. The trade is that a vendor change becomes a
+configuration change in the service as well as a route change. See
+[Gateway mode](../configuration.md#gateway-mode).
+
 ## Resilience
 
 Model calls are the least reliable part of a turn, so the loop expects failure.

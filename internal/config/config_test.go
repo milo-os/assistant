@@ -285,11 +285,38 @@ func TestLoad_GatewayTLSInsecureTruthy(t *testing.T) {
 	}
 }
 
+func TestLoad_GatewaySchema(t *testing.T) {
+	cases := map[string]GatewaySchema{
+		"":          GatewaySchemaOpenAI,
+		"openai":    GatewaySchemaOpenAI,
+		"anthropic": GatewaySchemaAnthropic,
+	}
+	for raw, want := range cases {
+		cfg, err := load(t, map[string]string{
+			"MODEL_MODE": "gateway", "GATEWAY_URL": "https://gw", "GATEWAY_SCHEMA": raw,
+		})
+		if err != nil {
+			t.Fatalf("GATEWAY_SCHEMA=%q: %v", raw, err)
+		}
+		if cfg.Model.GatewaySchema != want {
+			t.Errorf("GATEWAY_SCHEMA=%q: got %q, want %q", raw, cfg.Model.GatewaySchema, want)
+		}
+	}
+}
+
+func TestLoad_GatewaySchemaOutsideGatewayModeIsAnError(t *testing.T) {
+	_, err := load(t, map[string]string{"MODEL_MODE": "mock", "GATEWAY_SCHEMA": "anthropic"})
+	if !hasFieldError(t, err, "GATEWAY_SCHEMA") {
+		t.Fatalf("GATEWAY_SCHEMA without MODEL_MODE=gateway must be refused, got %v", err)
+	}
+}
+
 func TestLoad_Errors(t *testing.T) {
 	cases := map[string]map[string]string{
 		"anthropic mode requires key": {"MODEL_MODE": "anthropic"},
 		"gateway mode requires url":   {"MODEL_MODE": "gateway"},
 		"invalid model mode":          {"MODEL_MODE": "bogus"},
+		"invalid gateway schema":      {"MODEL_MODE": "gateway", "GATEWAY_URL": "https://gw", "GATEWAY_SCHEMA": "bedrock"},
 		"invalid port":                {"PORT": "99999"},
 	}
 	for name, env := range cases {
