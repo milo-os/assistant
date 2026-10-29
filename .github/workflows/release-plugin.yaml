@@ -72,7 +72,7 @@ jobs:
           repositories: datumctl-plugins
 
       - name: Open the catalog PR
-        uses: datum-cloud/actions/update-plugin-index@v1.18.0
+        uses: datum-cloud/actions/update-plugin-index@v1.24.0
         with:
           index-repo: datum-cloud/datumctl-plugins
           plugin-name: assistant
