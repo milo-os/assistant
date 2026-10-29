@@ -11,7 +11,7 @@
 # Build + load into kind (done by up.sh):
 #   docker build -t patch-e2e-backends:local -f e2e/gateway/streamco/Dockerfile e2e/streamco
 #   kind load docker-image patch-e2e-backends:local --name test-infra
-FROM node:22-slim
+FROM node:26-slim
 
 WORKDIR /app
 COPY . .

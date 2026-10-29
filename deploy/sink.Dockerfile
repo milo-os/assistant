@@ -7,7 +7,7 @@
 #
 # CAPTURE_FILE points at an in-container writable path (an emptyDir is mounted
 # there by the Deployment); GET /events reads it back for the P6 assertion.
-FROM node:22-slim
+FROM node:26-slim
 WORKDIR /app
 COPY sink.mjs ./
 ENV SINK_HOST=0.0.0.0 \
