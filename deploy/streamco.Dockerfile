@@ -9,7 +9,7 @@
 # (@modelcontextprotocol/sdk, zod) are pure JS, so copying them in is
 # arch-independent. Served on 7810; the gateway MCPRoute fronts it and enforces
 # the reviewed tool allow-list (streams_delete excluded).
-FROM node:22-slim
+FROM node:26-slim
 WORKDIR /app
 COPY . .
 ENV STREAMCO_HOST=0.0.0.0 \
