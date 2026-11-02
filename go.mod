@@ -2,6 +2,8 @@ module github.com/milo-os/assistant
 
 go 1.26.0
 
+toolchain go1.27.3
+
 require (
 	charm.land/bubbles/v2 v2.1.1
 	charm.land/bubbletea/v2 v2.0.8
