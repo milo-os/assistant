@@ -127,7 +127,7 @@ func New(deps Deps) http.Handler {
 		authorizer:    deps.Authorizer,
 		taskStore:     store,
 		logger:        logger,
-		next:          jsonrpc,
+		next:          defaultProtocolVersion(jsonrpc),
 	}
 
 	mux := http.NewServeMux()
@@ -218,4 +218,13 @@ func readyHandler(check func(context.Context) error, metrics *metrics, logger *s
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	}
+}
+
+func defaultProtocolVersion(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(a2a.SvcParamVersion) == "" && r.URL.Query().Get(a2a.SvcParamVersion) == "" {
+			r.Header.Set(a2a.SvcParamVersion, string(a2a.Version))
+		}
+		next.ServeHTTP(w, r)
+	})
 }

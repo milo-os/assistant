@@ -204,7 +204,7 @@ func classify(err error) error {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
 		retryAfter := agentcore.RetryAfterFromHeader(headerOf(apiErr.Response))
-		class := agentcore.ClassifyStatus(apiErr.StatusCode, looksLikeContextLength(err.Error()))
+		class := agentcore.ClassifyStatus(apiErr.StatusCode, looksLikeContextLength(apiErr.Code+" "+apiErr.Message))
 		if class == agentcore.ErrClassContextLength {
 			return agentcore.NewModelError(class, retryAfter,
 				fmt.Errorf("openaicompat: request exceeds the model context window (HTTP %d) — trim the conversation history: %w", apiErr.StatusCode, err))
