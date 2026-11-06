@@ -55,7 +55,7 @@ func TestReviewPostsToProjectPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	reviewer, err := newHTTPReviewer(SARConfig{APIURL: srv.URL})
+	reviewer, err := newHTTPReviewer(SARConfig{APIURL: srv.URL, AllowInsecureCredentialForwarding: true})
 	if err != nil {
 		t.Fatalf("newHTTPReviewer: %v", err)
 	}

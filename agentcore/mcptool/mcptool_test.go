@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -109,3 +110,34 @@ func TestSessionListsAndCallsTools(t *testing.T) {
 		t.Fatalf("server calls = %v", calls)
 	}
 }
+
+// The last mile: even a redirect that downgrades to http must not receive the
+// session's credential headers unless the dev escape hatch is on.
+func TestHeaderRoundTripperRefusesPlaintext(t *testing.T) {
+	called := false
+	rt := &headerRoundTripper{
+		next:    roundTripFunc(func(*http.Request) (*http.Response, error) { called = true; return nil, nil }),
+		host:    "gateway.example",
+		headers: map[string]string{"Authorization": "Bearer secret"},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://gateway.example/mcp", nil)
+	if _, err := rt.RoundTrip(req); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("plaintext request should be refused, got %v", err)
+	}
+	if called {
+		t.Fatal("refused request reached the transport")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "https://gateway.example/mcp", nil)
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatalf("https request should be allowed: %v", err)
+	}
+	if !called {
+		t.Fatal("https request did not reach the transport")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

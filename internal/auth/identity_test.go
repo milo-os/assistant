@@ -27,7 +27,7 @@ func TestSARCarriesFullIdentity(t *testing.T) {
 	defer srv.Close()
 
 	az, err := NewSubjectAccessReviewAuthorizer(SARConfig{
-		APIURL:   srv.URL,
+		APIURL: srv.URL, AllowInsecureCredentialForwarding: true,
 		Group:    DefaultSARGroup,
 		Resource: DefaultSARResource,
 		Verb:     DefaultSARVerb,
@@ -73,7 +73,7 @@ func TestAuthorizationCacheKeyedOnUID(t *testing.T) {
 	defer srv.Close()
 
 	az, err := NewSubjectAccessReviewAuthorizer(SARConfig{
-		APIURL: srv.URL, Group: DefaultSARGroup,
+		APIURL: srv.URL, AllowInsecureCredentialForwarding: true, Group: DefaultSARGroup,
 		Resource: DefaultSARResource, Verb: DefaultSARVerb,
 	})
 	if err != nil {

@@ -60,11 +60,13 @@ func NewAuthenticator(_ context.Context, cfg *config.Config, logger *slog.Logger
 	}
 	logger.Info("auth.tokenreview", "apiUrl", cfg.Auth.TokenReviewAPIURL, "clientCert", clientCert != nil)
 	return NewTokenReviewAuthenticator(TokenReviewConfig{
-		APIURL:      cfg.Auth.TokenReviewAPIURL,
-		BearerToken: token,
-		CACert:      caCert,
-		ClientCert:  clientCert,
-		ClientKey:   clientKey,
+		APIURL:                            cfg.Auth.TokenReviewAPIURL,
+		BearerToken:                       token,
+		CACert:                            caCert,
+		ClientCert:                        clientCert,
+		ClientKey:                         clientKey,
+		AllowInsecureCredentialForwarding: cfg.AllowInsecureCredentialForwarding,
+		Logger:                            logger,
 	})
 }
 
@@ -79,15 +81,16 @@ func NewAuthorizer(cfg *config.Config, logger *slog.Logger) (Authorizer, error) 
 	}
 	logger.Info("authz.sar", "apiUrl", cfg.Auth.SARAPIURL, "clientCert", clientCert != nil)
 	return NewSubjectAccessReviewAuthorizer(SARConfig{
-		APIURL:      cfg.Auth.SARAPIURL,
-		BearerToken: token,
-		CACert:      caCert,
-		ClientCert:  clientCert,
-		ClientKey:   clientKey,
-		Logger:      logger,
-		Group:       cfg.Auth.SARGroup,
-		Resource:    cfg.Auth.SARResource,
-		Verb:        cfg.Auth.SARVerb,
+		APIURL:                            cfg.Auth.SARAPIURL,
+		BearerToken:                       token,
+		CACert:                            caCert,
+		ClientCert:                        clientCert,
+		ClientKey:                         clientKey,
+		AllowInsecureCredentialForwarding: cfg.AllowInsecureCredentialForwarding,
+		Logger:                            logger,
+		Group:                             cfg.Auth.SARGroup,
+		Resource:                          cfg.Auth.SARResource,
+		Verb:                              cfg.Auth.SARVerb,
 	})
 }
 

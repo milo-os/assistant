@@ -250,7 +250,7 @@ func TestSAR_HTTPReviewer_Allow(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	az := newSAR(t, SARConfig{APIURL: srv.URL, BearerToken: "svc-token"})
+	az := newSAR(t, SARConfig{APIURL: srv.URL, BearerToken: "svc-token", AllowInsecureCredentialForwarding: true})
 	if err := az.AuthorizeProject(context.Background(), Principal{Subject: "alice"}, "projA"); err != nil {
 		t.Fatalf("HTTP allow should permit: %v", err)
 	}
@@ -265,6 +265,28 @@ func TestSAR_HTTPReviewer_Allow(t *testing.T) {
 	}
 }
 
+// A plaintext control plane is refused before the SAR is sent: the assistant's
+// own credential must not travel over http, and the caller gets a fail-closed
+// 403.
+func TestSAR_HTTPReviewer_RefusesPlaintextWithoutEscapeHatch(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	az := newSAR(t, SARConfig{APIURL: srv.URL, BearerToken: "svc-token"})
+	err := az.AuthorizeProject(context.Background(), Principal{Subject: "alice"}, "projA")
+	assertStatus(t, err, 403)
+	if !strings.Contains(err.Error(), "https") {
+		t.Fatalf("refusal should name the https requirement: %v", err)
+	}
+	if called {
+		t.Fatal("a refused SAR still reached the control plane")
+	}
+}
+
 // A non-2xx from the apiserver fails closed (deny).
 func TestSAR_HTTPReviewer_NonOKFailsClosed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +294,7 @@ func TestSAR_HTTPReviewer_NonOKFailsClosed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	az := newSAR(t, SARConfig{APIURL: srv.URL})
+	az := newSAR(t, SARConfig{APIURL: srv.URL, AllowInsecureCredentialForwarding: true})
 	assertStatus(t, az.AuthorizeProject(context.Background(), Principal{Subject: "alice"}, "projA"), 403)
 }
 
@@ -288,7 +310,7 @@ func TestSAR_HTTPReviewer_Deny(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	az := newSAR(t, SARConfig{APIURL: srv.URL})
+	az := newSAR(t, SARConfig{APIURL: srv.URL, AllowInsecureCredentialForwarding: true})
 	assertStatus(t, az.AuthorizeProject(context.Background(), Principal{Subject: "alice"}, "projA"), 403)
 }
 

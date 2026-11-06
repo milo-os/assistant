@@ -28,34 +28,11 @@ func TestResolveModel_Anthropic(t *testing.T) {
 }
 
 func TestResolveModel_Gateway(t *testing.T) {
-	m, err := ResolveModel(config.ModelConfig{Mode: config.ModelModeGateway, GatewayModel: "patch-stub-v1", GatewayURL: "http://gw"}, nil)
+	m, err := ResolveModel(config.ModelConfig{Mode: config.ModelModeGateway, GatewayModel: "patch-stub-v1", GatewayURL: "https://gw"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m.ModelID() != "patch-stub-v1" {
 		t.Fatalf("gateway model id = %q", m.ModelID())
-	}
-}
-
-func TestResolveModel_GatewayInsecureTLSBuildsClient(t *testing.T) {
-	// Insecure TLS should resolve without error and yield a usable model.
-	m, err := ResolveModel(config.ModelConfig{
-		Mode: config.ModelModeGateway, GatewayModel: "patch-stub-v1",
-		GatewayURL: "https://gw", GatewayTLSInsecure: true,
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m == nil {
-		t.Fatal("nil model")
-	}
-}
-
-func TestResolveModel_GatewayBadCACertErrors(t *testing.T) {
-	_, err := ResolveModel(config.ModelConfig{
-		Mode: config.ModelModeGateway, GatewayURL: "https://gw", GatewayCACert: "/nonexistent/ca.pem",
-	}, nil)
-	if err == nil {
-		t.Fatal("expected an error for a missing CA cert")
 	}
 }

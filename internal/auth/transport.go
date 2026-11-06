@@ -37,7 +37,14 @@ func newControlPlaneTransport(caCert, clientCert, clientKey []byte) (*http.Trans
 	configured := false
 
 	if len(caCert) > 0 {
-		pool := x509.NewCertPool()
+		// Start from the system pool so a platform-injected SSL_CERT_FILE /
+		// SSL_CERT_DIR trust bundle is honored, then add the explicitly mounted
+		// control-plane CA for the kind/e2e path where that CA is not in the
+		// host's store. This never disables verification.
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
 		if !pool.AppendCertsFromPEM(caCert) {
 			return nil, errors.New("auth: CACert is not valid PEM")
 		}

@@ -141,6 +141,12 @@ type ComposeOptions struct {
 	// and in-cluster (private) IPs, which the guard blocks by default. It MUST
 	// stay false in production. Default false = guard on (safe).
 	AllowPrivateNetworks bool
+	// AllowInsecureCredentialForwarding permits the caller's credential to be
+	// sent to a plaintext http MCP endpoint. It is the SAME dev-only opt-in as
+	// config's ALLOW_INSECURE_CREDENTIAL_FORWARDING, threaded here so the
+	// default is fail-closed. False means a sanctioned endpoint over http is
+	// refused rather than silently connected without identity.
+	AllowInsecureCredentialForwarding bool
 	// AllowedHosts and AllowedCIDRs, when either is non-empty, switch the SSRF
 	// guard from its default "block private" IP-policy into an allow-list posture
 	// for UNTRUSTED providers: a capability-document URL (knowledge source, skill
@@ -620,6 +626,17 @@ func validateHostAllowList(knob string, entries []string) error {
 	return nil
 }
 
+// endpointHostname returns the hostname of an endpoint, or "" when it cannot be
+// parsed. It is used only for logging refusals, so it never includes a port or
+// any credential-bearing part of the URL.
+func endpointHostname(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
 // sanctionedEndpointHost reports whether endpoint may be dialed under the
 // operator's MCP endpoint allow-list, and if not, why — the reason is logged so
 // an operator reading it sees the offending host without having to go find the
@@ -698,7 +715,7 @@ func notifyComposed(fn func(CapabilityDocument, error), doc CapabilityDocument, 
 func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, sanctioned, dialable *hostAllowList, logger *slog.Logger) (agentcore.ToolSet, []mcpSession, []error) {
 	connect := opts.connect
 	if connect == nil {
-		connect = guardedConnector(defaultConnector(), guard)
+		connect = guardedConnector(defaultConnector(opts.AllowInsecureCredentialForwarding), guard)
 	}
 	timeout := opts.MCPConnectTimeout
 	if timeout <= 0 {
@@ -734,7 +751,16 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 				continue
 			}
 
-			headers := identityHeaders(server.Endpoint, opts.Caller, opts.ExpectedProject, sanctioned)
+			headers, identityErr := identityHeaders(server.Endpoint, opts.Caller, opts.ExpectedProject, sanctioned, opts.AllowInsecureCredentialForwarding)
+			if identityErr != nil {
+				// Log the host, never the token: the refusal must be actionable
+				// ("this endpoint is http") without writing a credential.
+				logger.Warn("capability.mcp.credential_plaintext_refused",
+					"service", serviceName, "server", server.Name,
+					"host", endpointHostname(server.Endpoint), "error", identityErr.Error())
+				failures = append(failures, fmt.Errorf("mcp server %q: %w", server.Name, identityErr))
+				continue
+			}
 			session, err := connectWithTimeout(ctx, connect, server.Endpoint, headers, timeout)
 			if err != nil {
 				logger.Warn("capability.mcp.connect_failed",
@@ -861,12 +887,13 @@ func guardedConnector(inner mcpConnector, guard *ipGuard) mcpConnector {
 }
 
 // defaultConnector opens real MCP sessions via the mcptool client.
-func defaultConnector() mcpConnector {
+func defaultConnector(allowInsecure bool) mcpConnector {
 	return func(ctx context.Context, endpoint string, headers map[string]string) (mcpSession, error) {
 		return mcptool.Connect(ctx, mcptool.Options{
-			Endpoint:   endpoint,
-			ClientName: defaultMCPClientName,
-			Headers:    headers,
+			Endpoint:                          endpoint,
+			ClientName:                        defaultMCPClientName,
+			Headers:                           headers,
+			AllowInsecureCredentialForwarding: allowInsecure,
 		})
 	}
 }

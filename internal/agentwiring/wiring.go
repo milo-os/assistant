@@ -154,10 +154,11 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	}
 
 	emitter := usage.NewEmitter(usage.EmitterConfig{
-		GatewayURL: cfg.Usage.GatewayURL,
-		APIKey:     cfg.Usage.GatewayAPIKey,
-		Source:     cfg.PublicBaseURL + "/a2a",
-		Logger:     log,
+		GatewayURL:                        cfg.Usage.GatewayURL,
+		APIKey:                            cfg.Usage.GatewayAPIKey,
+		AllowInsecureCredentialForwarding: cfg.AllowInsecureCredentialForwarding,
+		Source:                            cfg.PublicBaseURL + "/a2a",
+		Logger:                            log,
 	})
 	// Emit's no-op path logs at Debug per turn, so at the default level an
 	// unset collector is otherwise invisible: turns complete and nothing is
@@ -295,24 +296,25 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	}
 
 	conv := agent.New(agent.Deps{
-		Model:                          model,
-		ModelMode:                      string(cfg.Model.Mode),
-		Source:                         source,
-		Persona:                        persona,
-		Emitter:                        emitter,
-		History:                        store,
-		Memory:                         mem,
-		GapReports:                     gaps,
-		PlatformAPI:                    platformAPI,
-		PlanTokenKey:                   planTokenKey,
-		ExecApprovalKey:                execApprovalKey,
-		ExecApprovals:                  execApprovals,
-		AllowPrivateCapabilityNetworks: cfg.AllowPrivateCapabilityNetworks,
-		CapabilityIdentityForwardHosts: cfg.CapabilityIdentityForwardHosts,
-		CapabilityMCPEndpointHosts:     cfg.CapabilityMCPEndpointHosts,
-		ObserveComposedBinding:         observeComposed,
-		Logger:                         log,
-		Metrics:                        metrics,
+		Model:                             model,
+		ModelMode:                         string(cfg.Model.Mode),
+		Source:                            source,
+		Persona:                           persona,
+		Emitter:                           emitter,
+		History:                           store,
+		Memory:                            mem,
+		GapReports:                        gaps,
+		PlatformAPI:                       platformAPI,
+		PlanTokenKey:                      planTokenKey,
+		ExecApprovalKey:                   execApprovalKey,
+		ExecApprovals:                     execApprovals,
+		AllowPrivateCapabilityNetworks:    cfg.AllowPrivateCapabilityNetworks,
+		AllowInsecureCredentialForwarding: cfg.AllowInsecureCredentialForwarding,
+		CapabilityIdentityForwardHosts:    cfg.CapabilityIdentityForwardHosts,
+		CapabilityMCPEndpointHosts:        cfg.CapabilityMCPEndpointHosts,
+		ObserveComposedBinding:            observeComposed,
+		Logger:                            log,
+		Metrics:                           metrics,
 	})
 	return conversationRunner{conv: conv}, store, cleanup, nil
 }
@@ -339,10 +341,9 @@ func resolveExecApprovalKey(encoded string, planTokenKey []byte) ([]byte, error)
 // case the base tools are simply not composed and a conversation runs on
 // provider capabilities alone.
 //
-// The CA bundle is read best-effort, matching the auth package's posture: an
-// absent file leaves the client on the system roots, which either works or
-// fails at the first request with a TLS error that says so, rather than
-// crash-looping a pod whose certificate mounts a moment late.
+// The client verifies the platform with Go's system root pool, so the platform
+// CA the namespace injects via SSL_CERT_FILE / SSL_CERT_DIR is honored. It holds
+// no CA of its own and never disables verification.
 func newPlatformAPI(cfg *config.Config, log *slog.Logger) (*projectapi.Client, error) {
 	if cfg.PlatformAPIURL == "" {
 		log.Warn("agent.platform_api",
@@ -350,12 +351,15 @@ func newPlatformAPI(cfg *config.Config, log *slog.Logger) (*projectapi.Client, e
 			"reason", "PLATFORM_API_URL is unset and no control-plane endpoint could be derived — the base platform tools will not be available")
 		return nil, nil
 	}
-	caCert, _ := os.ReadFile(cfg.PlatformAPICACertPath)
-	client, err := projectapi.New(projectapi.Config{BaseURL: cfg.PlatformAPIURL, CACert: caCert})
+	client, err := projectapi.New(projectapi.Config{
+		BaseURL:                           cfg.PlatformAPIURL,
+		AllowInsecureCredentialForwarding: cfg.AllowInsecureCredentialForwarding,
+		Logger:                            log,
+	})
 	if err != nil {
 		return nil, err
 	}
-	log.Info("agent.platform_api", "url", cfg.PlatformAPIURL, "caCert", len(caCert) > 0)
+	log.Info("agent.platform_api", "url", cfg.PlatformAPIURL, "tls", "system roots")
 	return client, nil
 }
 

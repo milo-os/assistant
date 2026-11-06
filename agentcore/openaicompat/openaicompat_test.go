@@ -420,7 +420,7 @@ func TestStreamGatewayModeTokenFileRereadPerRequest(t *testing.T) {
 	srv := server(t, textSSE(), &cap)
 	defer srv.Close()
 
-	m := New(Options{ModelID: "patch-stub-v1", BaseURL: srv.URL, TokenFile: tokenPath})
+	m := New(Options{ModelID: "patch-stub-v1", BaseURL: srv.URL, TokenFile: tokenPath, AllowInsecureCredentialForwarding: true})
 
 	drain(t, stream(t, m, agentcore.Request{Messages: []agentcore.Message{agentcore.UserMessage("hello")}}))
 	if got := cap.headers.Get("Authorization"); got != "Bearer first-token" {
@@ -436,6 +436,41 @@ func TestStreamGatewayModeTokenFileRereadPerRequest(t *testing.T) {
 	if got := cap.headers.Get("Authorization"); got != "Bearer second-token" {
 		t.Fatalf("after rotation Authorization=%q, want %q — a token read once at startup would still send the first",
 			got, "Bearer second-token")
+	}
+}
+
+// A plaintext gateway is refused before the Authorization header is set. The
+// adapter reports it as a terminal error part, and no request reaches the
+// server.
+func TestStreamGatewayModeTokenFileRefusesPlaintext(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("secret-token\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	var cap capture
+	srv := server(t, textSSE(), &cap)
+	defer srv.Close()
+
+	m := New(Options{ModelID: "patch-stub-v1", BaseURL: srv.URL, TokenFile: tokenPath})
+	parts := drain(t, stream(t, m, agentcore.Request{
+		Messages: []agentcore.Message{agentcore.UserMessage("hello")},
+	}))
+	if len(parts) == 0 {
+		t.Fatal("want a terminal error part, got no parts")
+	}
+	last := parts[len(parts)-1]
+	if last.Kind != agentcore.StreamPartError || last.Err == nil {
+		t.Fatalf("last part = %+v, want a StreamPartError carrying an error", last)
+	}
+	if !strings.Contains(last.Err.Error(), "https") {
+		t.Fatalf("err = %v, want an https refusal", last.Err)
+	}
+	if strings.Contains(last.Err.Error(), "secret-token") {
+		t.Fatalf("refusal leaked the token: %v", last.Err)
+	}
+	if cap.headers != nil {
+		t.Fatal("a refused request still reached the gateway")
 	}
 }
 

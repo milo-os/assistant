@@ -180,7 +180,10 @@ var testPlanKey = []byte("a-test-key-long-enough-to-be-one")
 
 func (p *platform) view(t *testing.T, project, token string) *projectapi.Project {
 	t.Helper()
-	client, err := projectapi.New(projectapi.Config{BaseURL: p.server.URL})
+	client, err := projectapi.New(projectapi.Config{
+		BaseURL:                           p.server.URL,
+		AllowInsecureCredentialForwarding: true, // httptest is plain http
+	})
 	if err != nil {
 		t.Fatalf("projectapi.New: %v", err)
 	}
