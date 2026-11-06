@@ -21,18 +21,19 @@ package projectapi
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/milo-os/assistant/internal/credentialpolicy"
 )
 
 // projectPrefix is the path a project's own API is served under. Everything
@@ -58,24 +59,32 @@ type Object = map[string]any
 type Config struct {
 	// BaseURL is the platform API this project's resources are served from.
 	BaseURL string
-	// CACert verifies the server. Empty uses the system roots.
-	CACert []byte
 	// Timeout overrides [DefaultTimeout] when > 0.
 	Timeout time.Duration
-	// Transport is the test seam. Nil builds one from CACert.
+	// Transport is the test seam. Nil uses a clone of http.DefaultTransport,
+	// which verifies the server with Go's system root pool (including any
+	// SSL_CERT_FILE / SSL_CERT_DIR the platform injects).
 	Transport http.RoundTripper
+	// AllowInsecureCredentialForwarding is the dev-only escape hatch: it
+	// permits the caller's token to travel to a plaintext http BaseURL. False
+	// (the default) means https only.
+	AllowInsecureCredentialForwarding bool
+	// Logger records refusals. Nil discards them.
+	Logger *slog.Logger
 }
 
 // Client reaches the platform API. It is safe for concurrent use and holds no
 // credential: see [Client.As].
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL       string
+	http          *http.Client
+	allowInsecure bool
+	logger        *slog.Logger
 }
 
 // New builds a [Client]. It fails only on a configuration that could never
-// work — no base URL, or a CA bundle that is not PEM — so a deployment mistake
-// surfaces at boot rather than as an unexplained failure mid-conversation.
+// work — no base URL — so a deployment mistake surfaces at boot rather than as
+// an unexplained failure mid-conversation.
 func New(cfg Config) (*Client, error) {
 	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	if base == "" {
@@ -90,22 +99,23 @@ func New(cfg Config) (*Client, error) {
 
 	transport := cfg.Transport
 	if transport == nil {
-		t := http.DefaultTransport.(*http.Transport).Clone()
-		if len(cfg.CACert) > 0 {
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(cfg.CACert) {
-				return nil, errors.New("projectapi: CACert is not valid PEM")
-			}
-			t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
-		}
-		transport = t
+		transport = http.DefaultTransport.(*http.Transport).Clone()
 	}
 
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	return &Client{baseURL: base, http: &http.Client{Transport: transport, Timeout: timeout}}, nil
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	return &Client{
+		baseURL:       base,
+		http:          &http.Client{Transport: transport, Timeout: timeout},
+		allowInsecure: cfg.AllowInsecureCredentialForwarding,
+		logger:        logger,
+	}, nil
 }
 
 // As returns a view of one project that acts as the holder of bearerToken.
@@ -411,8 +421,14 @@ func (p *Project) do(ctx context.Context, method, path string, query url.Values,
 		return nil, fmt.Errorf("building the request: %w", err)
 	}
 	// The caller's own credential, and nothing else. There is no service
-	// credential on this path to fall back to.
+	// credential on this path to fall back to. Never attach it to a plaintext
+	// request: fail the call closed and name only the host.
 	if p.token != "" {
+		if err := (credentialpolicy.Policy{AllowInsecure: p.client.allowInsecure}).CheckURL(endpoint); err != nil {
+			p.client.logger.Warn("projectapi.credential_plaintext_refused",
+				"host", hostOf(endpoint), "error", err.Error())
+			return nil, err
+		}
 		req.Header.Set("Authorization", "Bearer "+p.token)
 	}
 	req.Header.Set("Accept", "application/json")
@@ -420,7 +436,17 @@ func (p *Project) do(ctx context.Context, method, path string, query url.Values,
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := p.client.http.Do(req)
+	client := p.client.http
+	if p.token != "" && !p.client.allowInsecure {
+		// http.Client follows redirects itself, so the initial-URL check above
+		// is not enough: refuse a hop that downgrades to plaintext rather than
+		// letting the client forward the Authorization header to it.
+		scoped := *p.client.http
+		scoped.CheckRedirect = httpsOnlyRedirect
+		client = &scoped
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("the platform could not be reached: %w", err)
 	}
@@ -434,6 +460,28 @@ func (p *Project) do(ctx context.Context, method, path string, query url.Values,
 		return nil, newAPIError(resp.StatusCode, raw)
 	}
 	return raw, nil
+}
+
+// hostOf returns the hostname of rawURL, or "" when it cannot be parsed.
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// httpsOnlyRedirect is installed on a credential-bearing request so a redirect
+// cannot downgrade it to plaintext. It preserves Go's default ten-hop cap.
+func httpsOnlyRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if !strings.EqualFold(req.URL.Scheme, "https") {
+		return fmt.Errorf("refusing to follow a credential-bearing redirect to %s over %s",
+			req.URL.Hostname(), req.URL.Scheme)
+	}
+	return nil
 }
 
 func newAPIError(code int, raw []byte) *APIError {

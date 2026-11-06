@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/milo-os/assistant/internal/credentialpolicy"
 )
 
 // Defaults for [TokenReviewConfig], mirroring the SAR side.
@@ -104,6 +108,13 @@ type TokenReviewConfig struct {
 	// CacheTTL bounds how long a successful resolution is reused. Zero uses the
 	// default; a negative value disables the cache (every request round-trips).
 	CacheTTL time.Duration
+
+	// AllowInsecureCredentialForwarding is the dev-only escape hatch. The
+	// TokenReview body carries the CALLER's token, so a plaintext APIURL is
+	// refused before the request is built unless this is true.
+	AllowInsecureCredentialForwarding bool
+	// Logger records refusals. Optional.
+	Logger *slog.Logger
 
 	// Reviewer overrides the default HTTP reviewer — tests inject a fake.
 	Reviewer TokenReviewer
@@ -216,9 +227,11 @@ func (a *tokenReviewAuthenticator) Authenticate(ctx context.Context, bearerToken
 // httpTokenReviewer POSTs the TokenReview to the apiserver's tokenreviews
 // endpoint (mirrors sar.go's httpReviewer).
 type httpTokenReviewer struct {
-	endpoint string
-	token    string
-	client   *http.Client
+	endpoint      string
+	token         string
+	client        *http.Client
+	allowInsecure bool
+	logger        *slog.Logger
 }
 
 // newHTTPTokenReviewer builds the reviewer from cfg's control-plane coordinates.
@@ -231,10 +244,16 @@ func newHTTPTokenReviewer(cfg TokenReviewConfig) (*httpTokenReviewer, error) {
 	if timeout <= 0 {
 		timeout = DefaultTokenReviewTimeout
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &httpTokenReviewer{
-		endpoint: strings.TrimRight(cfg.APIURL, "/") + tokenReviewPath,
-		token:    cfg.BearerToken,
-		client:   &http.Client{Transport: transport, Timeout: timeout},
+		endpoint:      strings.TrimRight(cfg.APIURL, "/") + tokenReviewPath,
+		token:         cfg.BearerToken,
+		client:        &http.Client{Transport: transport, Timeout: timeout},
+		allowInsecure: cfg.AllowInsecureCredentialForwarding,
+		logger:        logger,
 	}, nil
 }
 
@@ -242,6 +261,11 @@ func newHTTPTokenReviewer(cfg TokenReviewConfig) (*httpTokenReviewer, error) {
 // error, non-2xx status, or undecodable body is returned as an error so the
 // caller fails closed.
 func (r *httpTokenReviewer) Review(ctx context.Context, review *TokenReview) (*TokenReviewStatus, error) {
+	if err := (credentialpolicy.Policy{AllowInsecure: r.allowInsecure}).CheckURL(r.endpoint); err != nil {
+		r.logger.Warn("auth.tokenreview.credential_plaintext_refused",
+			"host", requestHost(r.endpoint), "error", err.Error())
+		return nil, err
+	}
 	body, err := json.Marshal(review)
 	if err != nil {
 		return nil, fmt.Errorf("marshal TokenReview: %w", err)
@@ -278,6 +302,16 @@ func (r *httpTokenReviewer) Review(ctx context.Context, review *TokenReview) (*T
 		return nil, errors.New("TokenReview response carried no status")
 	}
 	return out.Status, nil
+}
+
+// requestHost returns the hostname of rawURL, or "" when it cannot be parsed.
+// Refusal logs name the host, never the URL (which could carry a credential).
+func requestHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // ── Principal cache ───────────────────────────────────────────

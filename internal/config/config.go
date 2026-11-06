@@ -13,9 +13,10 @@ package config
 import (
 	"fmt"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/milo-os/assistant/internal/credentialpolicy"
 )
 
 // Standard in-cluster service-account mount paths: the default token/CA source
@@ -139,10 +140,10 @@ type ModelConfig struct {
 	// itself. On the Datum platform it is a projected ServiceAccount token with
 	// audience "ai-gateway", which the gateway validates as a JWT.
 	GatewayTokenFile string
-	// GatewayCACert is an optional CA PEM path for a self-signed gateway TLS cert.
-	GatewayCACert string
-	// GatewayTLSInsecure skips gateway TLS verification (local convenience only).
-	GatewayTLSInsecure bool
+	// AllowInsecureCredentialForwarding is the dev-only escape hatch mirrored
+	// from [Config.AllowInsecureCredentialForwarding] for the model client's
+	// per-request token middleware.
+	AllowInsecureCredentialForwarding bool
 }
 
 // UsageConfig holds the usage-metering collector settings.
@@ -211,13 +212,19 @@ type Config struct {
 	//
 	// The service holds no credential for this endpoint. Every request over it
 	// carries the calling user's own bearer token (see internal/projectapi),
-	// which is why there is no token path here to go with it.
+	// which is why there is no token path here to go with it. The URL must be
+	// https; the client verifies it with Go's system roots (so SSL_CERT_FILE /
+	// SSL_CERT_DIR from the platform work).
 	PlatformAPIURL string
 
-	// PlatformAPICACertPath verifies the platform API's certificate (env
-	// PLATFORM_API_CA_CERT_PATH). Unset defaults to the SubjectAccessReview CA
-	// bundle, which is the same server.
-	PlatformAPICACertPath string
+	// AllowInsecureCredentialForwarding is the ONE dev-only opt-in that permits
+	// a credential to travel to a plaintext http endpoint
+	// (ALLOW_INSECURE_CREDENTIAL_FORWARDING). It defaults false. Local kind
+	// playgrounds and e2e have no TLS on the gateway, so those overlays set it;
+	// config/base and production overlays must not. When true the loader adds a
+	// startup warning, and every credential-attaching call site checks this
+	// same flag.
+	AllowInsecureCredentialForwarding bool
 
 	// PlanTokenKey binds plans for the base tools' change path (env
 	// PLAN_TOKEN_KEY; base64 or a raw string of at least 16 bytes). Setting it
@@ -371,10 +378,14 @@ func Load(getenv func(string) string) (*Config, error) {
 	if platformAPIURL == "" {
 		platformAPIURL = sarAPIURL
 	}
-	platformAPICACertPath := env("PLATFORM_API_CA_CERT_PATH")
-	if platformAPICACertPath == "" {
-		platformAPICACertPath = sarCACertPath
+
+	allowInsecureCredentialForwarding := isTruthy(env(credentialpolicy.AllowInsecureEnv))
+	if allowInsecureCredentialForwarding {
+		warnings = append(warnings, credentialpolicy.AllowInsecureEnv+" is set — credentials may travel to plaintext http endpoints. This is a dev/e2e escape hatch; never set it in production.")
 	}
+
+	usageGatewayURL := env("USAGE_GATEWAY_URL")
+	usageGatewayAPIKey := env("USAGE_GATEWAY_API_KEY")
 
 	// ── Model ─────────────────────────────────────────────────
 	anthropicKey := env("ANTHROPIC_API_KEY")
@@ -425,11 +436,12 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 
 	// ── Production-posture invariants ─────────────────────────
-	// Refuse to boot on a configuration that silently runs dev-grade security on
-	// an internet-facing deployment. These are narrow enough that every existing
-	// dev/e2e config (loopback / plaintext-http / .test hosts) still boots; they
-	// only fire on the specific unsafe combinations below.
-	errs = append(errs, productionInvariants(publicBaseURL, gatewayURL, modelMode)...)
+	// Refuse to boot on a configuration that silently forwards a credential over
+	// plaintext http. The only exception is the explicit dev escape hatch above,
+	// which local playgrounds and e2e set.
+	errs = append(errs, credentialTransportInvariants(allowInsecureCredentialForwarding,
+		modelMode, gatewayURL, platformAPIURL, tokenReviewAPIURL, sarAPIURL,
+		usageGatewayURL, usageGatewayAPIKey)...)
 
 	if len(errs) > 0 {
 		return nil, &Error{Errors: errs}
@@ -465,32 +477,31 @@ func Load(getenv func(string) string) (*Config, error) {
 			TokenReviewClientCertPath: tokenReviewClientCertPath,
 			TokenReviewClientKeyPath:  tokenReviewClientKeyPath,
 		},
-		PlatformAPIURL:                 platformAPIURL,
-		PlanTokenKey:                   env("PLAN_TOKEN_KEY"),
-		AssistantExecKey:               env("ASSISTANT_EXEC_KEY"),
-		PlatformAPICACertPath:          platformAPICACertPath,
-		CapabilitySource:               capabilitySource,
-		CapabilityDocsFixture:          capabilityDocsFixture,
-		CapabilityProviderURL:          capabilityProviderURL,
-		PersonaPromptFile:              env("PERSONA_PROMPT_FILE"),
-		ConversationStoreURL:           conversationStoreURL,
-		AllowPrivateCapabilityNetworks: isTruthy(env("CAPABILITY_ALLOW_PRIVATE_NETWORKS")),
-		CapabilityIdentityForwardHosts: splitList(env("CAPABILITY_IDENTITY_FORWARD_HOSTS")),
-		CapabilityMCPEndpointHosts:     splitList(env("CAPABILITY_MCP_ENDPOINT_HOSTS")),
-		Warnings:                       warnings,
+		PlatformAPIURL:                    platformAPIURL,
+		PlanTokenKey:                      env("PLAN_TOKEN_KEY"),
+		AssistantExecKey:                  env("ASSISTANT_EXEC_KEY"),
+		AllowInsecureCredentialForwarding: allowInsecureCredentialForwarding,
+		CapabilitySource:                  capabilitySource,
+		CapabilityDocsFixture:             capabilityDocsFixture,
+		CapabilityProviderURL:             capabilityProviderURL,
+		PersonaPromptFile:                 env("PERSONA_PROMPT_FILE"),
+		ConversationStoreURL:              conversationStoreURL,
+		AllowPrivateCapabilityNetworks:    isTruthy(env("CAPABILITY_ALLOW_PRIVATE_NETWORKS")),
+		CapabilityIdentityForwardHosts:    splitList(env("CAPABILITY_IDENTITY_FORWARD_HOSTS")),
+		CapabilityMCPEndpointHosts:        splitList(env("CAPABILITY_MCP_ENDPOINT_HOSTS")),
+		Warnings:                          warnings,
 		Model: ModelConfig{
-			Mode:               modelMode,
-			AnthropicAPIKey:    anthropicKey,
-			AnthropicModel:     anthropicModel,
-			GatewayURL:         gatewayURL,
-			GatewayModel:       gatewayModel,
-			GatewayTokenFile:   env("GATEWAY_TOKEN_FILE"),
-			GatewayCACert:      env("GATEWAY_CA_CERT"),
-			GatewayTLSInsecure: isTruthy(env("GATEWAY_TLS_INSECURE")),
+			Mode:                              modelMode,
+			AnthropicAPIKey:                   anthropicKey,
+			AnthropicModel:                    anthropicModel,
+			GatewayURL:                        gatewayURL,
+			GatewayModel:                      gatewayModel,
+			GatewayTokenFile:                  env("GATEWAY_TOKEN_FILE"),
+			AllowInsecureCredentialForwarding: allowInsecureCredentialForwarding,
 		},
 		Usage: UsageConfig{
-			GatewayURL:    env("USAGE_GATEWAY_URL"),
-			GatewayAPIKey: env("USAGE_GATEWAY_API_KEY"),
+			GatewayURL:    usageGatewayURL,
+			GatewayAPIKey: usageGatewayAPIKey,
 		},
 	}, nil
 }
@@ -500,69 +511,42 @@ func MapGetenv(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
-// productionInvariants enforces the "refuse to boot on an unsafe production
-// posture" rules. It no longer needs to police credential handling: identity
-// and access are decided by the control plane in every deployment, so there is
-// no dev-grade auth setting left to leak into production. What remains targets
-// transport exposure, and none of it fires for a loopback/internal-host
-// deployment, so the dev and e2e configs still boot.
-func productionInvariants(publicBaseURL, gatewayURL string, modelMode ModelMode) []FieldError {
+// credentialTransportInvariants refuses to boot when a configured endpoint
+// that will receive a credential is not https. The escape hatch is the single
+// exception, checked once here so no endpoint can silently opt out on its own.
+//
+// GATEWAY_URL is included because the gateway is where caller identity is
+// forwarded for MCP traffic and where the service's own gateway token travels;
+// PLATFORM_API_URL and AUTHN_TOKENREVIEW_API_URL both carry the calling user's
+// bearer token; AUTHZ_SAR_API_URL carries the assistant's own credential; and
+// USAGE_GATEWAY_URL carries the collector api key when one is configured.
+// CAPABILITY_IDENTITY_FORWARD_HOSTS names hosts only (no scheme), so the MCP
+// endpoint check lives at the dial site in internal/capability.
+func credentialTransportInvariants(allowInsecure bool, modelMode ModelMode, gatewayURL, platformAPIURL, tokenReviewAPIURL, sarAPIURL, usageGatewayURL, usageGatewayAPIKey string) []FieldError {
+	policy := credentialpolicy.Policy{AllowInsecure: allowInsecure}
+	type endpoint struct{ variable, url string }
+	endpoints := []endpoint{
+		{"PLATFORM_API_URL", platformAPIURL},
+		{"AUTHN_TOKENREVIEW_API_URL", tokenReviewAPIURL},
+		{"AUTHZ_SAR_API_URL", sarAPIURL},
+	}
+	// The usage collector receives the service's api key only when one is
+	// configured. Dev points it at a keyless sink over http, which is not a
+	// credential at all and must keep working.
+	if usageGatewayAPIKey != "" {
+		endpoints = append(endpoints, endpoint{"USAGE_GATEWAY_URL", usageGatewayURL})
+	}
+	if modelMode == ModelModeGateway {
+		endpoints = append([]endpoint{{"GATEWAY_URL", gatewayURL}}, endpoints...)
+	}
+
 	var errs []FieldError
-
-	// Plaintext model gateway to an external host. Gateway mode carries the
-	//    prompt (and the gateway injects the upstream key), so a plaintext http
-	//    hop to a host outside the cluster/loopback exposes it in transit.
-	//    In-cluster (ClusterIP / *.svc.cluster.local) and loopback gateways over
-	//    http are the intended dev/deployed posture and stay allowed.
-	if modelMode == ModelModeGateway && schemeOf(gatewayURL) == "http" && !isInternalHost(hostOf(gatewayURL)) {
-		errs = append(errs, FieldError{"GATEWAY_URL",
-			"MODEL_MODE=gateway over plaintext http:// to an external host exposes prompts in transit; use https or an in-cluster/loopback endpoint"})
-	}
-
-	return errs
-}
-
-// schemeOf returns the lowercased URL scheme, or "" when unparseable.
-func schemeOf(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return ""
-	}
-	return strings.ToLower(u.Scheme)
-}
-
-// hostOf returns the hostname (no port) of rawURL, or "".
-func hostOf(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return ""
-	}
-	return u.Hostname()
-}
-
-// isInternalHost reports whether host is loopback, a private/link-local IP, or a
-// cluster-internal DNS name (a single label, or an internal suffix like
-// .svc.cluster.local / .internal / .local). Public IP literals and registered
-// public domains are NOT internal. An empty host is treated as internal (there
-// is nothing external to protect).
-func isInternalHost(host string) bool {
-	host = strings.TrimSpace(strings.ToLower(host))
-	if host == "" || host == "localhost" {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
-	}
-	// A bare single-label name (e.g. a Kubernetes Service name) is in-cluster.
-	if !strings.Contains(host, ".") {
-		return true
-	}
-	for _, suffix := range []string{".svc.cluster.local", ".svc", ".cluster.local", ".internal", ".local"} {
-		if strings.HasSuffix(host, suffix) {
-			return true
+	for _, e := range endpoints {
+		if err := policy.CheckConfigured(e.variable, e.url); err != nil {
+			errs = append(errs, FieldError{e.variable, err.Error()})
 		}
 	}
-	return false
+	return errs
 }
 
 func oneOf(value string, allowed []string, fallback string) string {

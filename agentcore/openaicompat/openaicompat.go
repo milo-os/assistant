@@ -48,6 +48,10 @@ type Options struct {
 	// captured at startup works until the first rotation and then 401s for
 	// good. Ignored when APIKey is set.
 	TokenFile string
+	// AllowInsecureCredentialForwarding is the dev-only escape hatch: it allows
+	// TokenFile's credential to be sent to a plaintext http BaseURL. False (the
+	// default) refuses the request before the Authorization header is set.
+	AllowInsecureCredentialForwarding bool
 	// HTTPClient overrides the HTTP client (custom CA, TLS settings). Nil
 	// uses the default.
 	HTTPClient *http.Client
@@ -76,7 +80,7 @@ func New(opts Options) *Model {
 		reqOpts = append(reqOpts,
 			option.WithAPIKey(""),
 			option.WithHeaderDel("Authorization"),
-			option.WithMiddleware(bearerFromFile(opts.TokenFile)))
+			option.WithMiddleware(bearerFromFile(opts.TokenFile, opts.AllowInsecureCredentialForwarding)))
 	default:
 		// Gateway posture: clear any environment-derived key and strip the
 		// Authorization header outright so the service sends no upstream
@@ -85,6 +89,10 @@ func New(opts Options) *Model {
 	}
 	if opts.HTTPClient != nil {
 		reqOpts = append(reqOpts, option.WithHTTPClient(opts.HTTPClient))
+	} else if opts.TokenFile != "" && !opts.AllowInsecureCredentialForwarding {
+		// http.Client follows redirects itself; a credential-bearing request
+		// must not be redirected down to plaintext.
+		reqOpts = append(reqOpts, option.WithHTTPClient(&http.Client{CheckRedirect: httpsOnlyRedirect}))
 	}
 	return &Model{client: openai.NewClient(reqOpts...), modelID: opts.ModelID}
 }
@@ -98,8 +106,10 @@ func New(opts Options) *Model {
 // fail permanently, with nothing in this process changing to explain it.
 //
 // A read failure is returned rather than sent as an empty header, so the cause
-// appears as a missing token instead of a bare 401 from the gateway.
-func bearerFromFile(path string) option.Middleware {
+// appears as a missing token instead of a bare 401 from the gateway. A plaintext
+// destination is refused before the header is set unless the dev escape hatch is
+// on, so the credential never travels over http by accident.
+func bearerFromFile(path string, allowInsecure bool) option.Middleware {
 	return func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
 		token, err := os.ReadFile(path)
 		if err != nil {
@@ -109,9 +119,31 @@ func bearerFromFile(path string) option.Middleware {
 		if trimmed == "" {
 			return nil, fmt.Errorf("gateway token %s is empty", path)
 		}
+		if !allowInsecure && !strings.EqualFold(req.URL.Scheme, "https") {
+			scheme := req.URL.Scheme
+			if scheme == "" {
+				scheme = "no scheme"
+			}
+			return nil, fmt.Errorf("refusing to send the gateway token to %s over %s: credentials require https",
+				req.URL.Hostname(), scheme)
+		}
 		req.Header.Set("Authorization", "Bearer "+trimmed)
 		return next(req)
 	}
+}
+
+// ModelID implements [agentcore.Model].
+// httpsOnlyRedirect refuses a credential-bearing redirect that downgrades to
+// plaintext, preserving Go's default ten-hop cap.
+func httpsOnlyRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if !strings.EqualFold(req.URL.Scheme, "https") {
+		return fmt.Errorf("refusing to follow a credential-bearing redirect to %s over %s",
+			req.URL.Hostname(), req.URL.Scheme)
+	}
+	return nil
 }
 
 // ModelID implements [agentcore.Model].

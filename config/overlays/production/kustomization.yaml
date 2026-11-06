@@ -69,7 +69,7 @@ patches:
           - name: MODEL_MODE
             value: "gateway"
           - name: GATEWAY_URL
-            value: "http://REPLACE_WITH_AI_GATEWAY_HOST/v1"
+            value: "https://REPLACE_WITH_AI_GATEWAY_HOST/v1"
           - name: GATEWAY_MODEL
             value: "REPLACE_WITH_PRODUCTION_MODEL"
           # ── AuthN: TokenReview against the Milo control plane, not dev ──

@@ -16,8 +16,9 @@ import (
 func loadCfg(t *testing.T, env map[string]string) *config.Config {
 	t.Helper()
 	full := map[string]string{
-		"AUTHN_TOKENREVIEW_API_URL": "https://control-plane.test",
-		"AUTHZ_SAR_API_URL":         "https://control-plane.test",
+		"AUTHN_TOKENREVIEW_API_URL":            "https://control-plane.test",
+		"AUTHZ_SAR_API_URL":                    "https://control-plane.test",
+		"ALLOW_INSECURE_CREDENTIAL_FORWARDING": "true", // readiness tests use a loopback http gateway
 	}
 	for k, v := range env {
 		full[k] = v

@@ -270,21 +270,6 @@ func TestLoad_CapabilityMCPEndpointHostsDefaultEmpty(t *testing.T) {
 	}
 }
 
-func TestLoad_GatewayTLSInsecureTruthy(t *testing.T) {
-	for _, v := range []string{"1", "true", "TRUE", "yes"} {
-		cfg, err := load(t, map[string]string{
-			"MODEL_MODE":  "gateway",
-			"GATEWAY_URL": "https://gw", "GATEWAY_TLS_INSECURE": v,
-		})
-		if err != nil {
-			t.Fatalf("%q: %v", v, err)
-		}
-		if !cfg.Model.GatewayTLSInsecure {
-			t.Errorf("GATEWAY_TLS_INSECURE=%q should be truthy", v)
-		}
-	}
-}
-
 func TestLoad_Errors(t *testing.T) {
 	cases := map[string]map[string]string{
 		"anthropic mode requires key": {"MODEL_MODE": "anthropic"},
@@ -324,32 +309,107 @@ func hasFieldError(t *testing.T, err error, field string) bool {
 	return false
 }
 
-func TestLoad_RefusesPlaintextExternalGateway(t *testing.T) {
-	_, err := load(t, map[string]string{
-		"MODEL_MODE":  "gateway",
-		"GATEWAY_URL": "http://gateway.public.example.com/v1",
-	})
-	if !hasFieldError(t, err, "GATEWAY_URL") {
-		t.Fatalf("plaintext external gateway must be refused, got %v", err)
+func TestLoad_RefusesPlaintextGateway(t *testing.T) {
+	// Any http gateway carries credentials (caller identity to the gateway's
+	// MCP route, and the service's own gateway token), so none of these may
+	// boot without the explicit escape hatch — internal or not.
+	for _, gw := range []string{
+		"http://gateway.public.example.com/v1",
+		"http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local:80/v1",
+		"http://localhost:1975/v1",
+	} {
+		_, err := load(t, map[string]string{
+			"MODEL_MODE": "gateway", "GATEWAY_URL": gw,
+		})
+		if !hasFieldError(t, err, "GATEWAY_URL") {
+			t.Fatalf("plaintext gateway %q must be refused, got %v", gw, err)
+		}
 	}
 }
 
-func TestLoad_AllowsPlaintextInternalGateway(t *testing.T) {
-	// Both the deployed (ClusterIP DNS) and e2e (loopback) gateway postures.
-	for _, gw := range []string{
-		"http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local:80/v1",
-		"http://localhost:1975/v1",
-		"http://10.0.0.5:80/v1",
-	} {
-		cfg, err := load(t, map[string]string{
-			"MODEL_MODE": "gateway", "GATEWAY_URL": gw,
+func TestLoad_AllowsPlaintextGatewayOnlyWithTheEscapeHatch(t *testing.T) {
+	const gw = "http://localhost:1975/v1"
+	cfg, err := load(t, map[string]string{
+		"MODEL_MODE": "gateway", "GATEWAY_URL": gw,
+		"ALLOW_INSECURE_CREDENTIAL_FORWARDING": "true",
+	})
+	if err != nil {
+		t.Fatalf("escape hatch must allow the dev gateway: %v", err)
+	}
+	if cfg.Model.GatewayURL != gw {
+		t.Errorf("gateway url = %q", cfg.Model.GatewayURL)
+	}
+	if !cfg.AllowInsecureCredentialForwarding {
+		t.Error("escape hatch should be recorded on the config")
+	}
+}
+
+func TestLoad_RefusesPlaintextCredentialEndpoints(t *testing.T) {
+	cases := []struct {
+		name  string
+		field string
+		env   map[string]string
+	}{
+		{"platform api", "PLATFORM_API_URL", map[string]string{"PLATFORM_API_URL": "http://platform.test"}},
+		{"token review", "AUTHN_TOKENREVIEW_API_URL", map[string]string{"AUTHN_TOKENREVIEW_API_URL": "http://control-plane.test"}},
+		{"subject access review", "AUTHZ_SAR_API_URL", map[string]string{"AUTHZ_SAR_API_URL": "http://control-plane.test"}},
+		{"usage with api key", "USAGE_GATEWAY_URL", map[string]string{
+			"USAGE_GATEWAY_URL": "http://collector.test", "USAGE_GATEWAY_API_KEY": "secret",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := load(t, tc.env)
+			if err == nil {
+				t.Fatal("plaintext credential endpoint must be refused")
+			}
+			var cfgErr *Error
+			if !errors.As(err, &cfgErr) {
+				t.Fatalf("want *config.Error, got %v", err)
+			}
+			if len(cfgErr.Errors) == 0 {
+				t.Fatal("expected a field error naming the variable")
+			}
+			if !hasFieldError(t, err, tc.field) {
+				t.Fatalf("error should name %s: %v", tc.field, err)
+			}
 		})
-		if err != nil {
-			t.Fatalf("internal gateway %q must boot: %v", gw, err)
+	}
+}
+
+// A keyless collector over http is not a credential and must keep working (dev
+// points it at a plaintext in-cluster sink).
+func TestLoad_AllowsPlaintextUsageCollectorWithoutAPIKey(t *testing.T) {
+	cfg, err := load(t, map[string]string{"USAGE_GATEWAY_URL": "http://sink.test"})
+	if err != nil {
+		t.Fatalf("keyless http collector must boot: %v", err)
+	}
+	if cfg.Usage.GatewayURL != "http://sink.test" {
+		t.Errorf("usage gateway = %q", cfg.Usage.GatewayURL)
+	}
+}
+
+func TestLoad_AllowInsecureDefaultsOffAndWarnsWhenOn(t *testing.T) {
+	cfg, err := load(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AllowInsecureCredentialForwarding {
+		t.Error("escape hatch must default off")
+	}
+
+	cfg, err = load(t, map[string]string{"ALLOW_INSECURE_CREDENTIAL_FORWARDING": "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "ALLOW_INSECURE_CREDENTIAL_FORWARDING") {
+			found = true
 		}
-		if cfg.Model.GatewayURL != gw {
-			t.Errorf("gateway url = %q", cfg.Model.GatewayURL)
-		}
+	}
+	if !found {
+		t.Fatalf("startup warning missing; warnings=%v", cfg.Warnings)
 	}
 }
 
@@ -447,24 +507,17 @@ func TestLoad_PlatformAPIDefaultsToTheAuthorizationEndpoint(t *testing.T) {
 	if cfg.PlatformAPIURL != cfg.Auth.SARAPIURL {
 		t.Errorf("platform api url = %q, want the SAR endpoint %q", cfg.PlatformAPIURL, cfg.Auth.SARAPIURL)
 	}
-	if cfg.PlatformAPICACertPath != cfg.Auth.SARCACertPath {
-		t.Errorf("platform api CA = %q, want the SAR CA %q", cfg.PlatformAPICACertPath, cfg.Auth.SARCACertPath)
-	}
 }
 
 func TestLoad_PlatformAPICanBeNamedSeparately(t *testing.T) {
 	cfg, err := load(t, map[string]string{
-		"PLATFORM_API_URL":          "https://api.datum.test/",
-		"PLATFORM_API_CA_CERT_PATH": "/etc/platform/ca.crt",
+		"PLATFORM_API_URL": "https://api.datum.test/",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.PlatformAPIURL != "https://api.datum.test" {
 		t.Errorf("platform api url = %q, want the trailing slash trimmed", cfg.PlatformAPIURL)
-	}
-	if cfg.PlatformAPICACertPath != "/etc/platform/ca.crt" {
-		t.Errorf("platform api CA = %q", cfg.PlatformAPICACertPath)
 	}
 }
 
