@@ -47,6 +47,10 @@ type Options struct {
 	// credential meant for it. Which headers an endpoint deserves is
 	// internal/capability's policy, not this package's.
 	Headers map[string]string
+	// AllowInsecureCredentialForwarding permits [Headers] to be stamped on a
+	// plaintext http request (the dev/e2e escape hatch). False refuses such a
+	// request, including a redirect that downgrades https to http.
+	AllowInsecureCredentialForwarding bool
 	// EnableStandaloneSSE opts into the server-initiated SSE stream. It is off
 	// by default because the per-request, request/response usage here needs no
 	// server-initiated notifications, and some stateless servers reject the
@@ -95,7 +99,12 @@ func Connect(ctx context.Context, opts Options) (*Session, error) {
 			next = http.DefaultTransport
 		}
 		scoped := *httpClient
-		scoped.Transport = &headerRoundTripper{next: next, host: host, headers: maps.Clone(opts.Headers)}
+		scoped.Transport = &headerRoundTripper{
+			next:          next,
+			host:          host,
+			headers:       maps.Clone(opts.Headers),
+			allowInsecure: opts.AllowInsecureCredentialForwarding,
+		}
 		httpClient = &scoped
 	}
 
@@ -210,14 +219,19 @@ func (rt *acceptRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 // endpoint host: a round-tripper runs per redirect hop, so without the host
 // check a hostile redirect would harvest the credential.
 type headerRoundTripper struct {
-	next    http.RoundTripper
-	host    string
-	headers map[string]string
+	next          http.RoundTripper
+	host          string
+	headers       map[string]string
+	allowInsecure bool
 }
 
 func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !strings.EqualFold(req.URL.Host, rt.host) {
 		return rt.next.RoundTrip(req)
+	}
+	if !rt.allowInsecure && !strings.EqualFold(req.URL.Scheme, "https") {
+		return nil, fmt.Errorf("mcptool: refusing to send credential headers to %s over %s: credentials require https",
+			req.URL.Hostname(), req.URL.Scheme)
 	}
 	req = req.Clone(req.Context())
 	for k, v := range rt.headers {

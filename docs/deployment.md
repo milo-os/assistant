@@ -56,9 +56,10 @@ What the production overlay establishes, at a glance:
   default-deny NetworkPolicy; TLS terminated at a Gateway-API Gateway, with only
   `/a2a` and `/.well-known` exposed publicly (`/metrics` and probes stay
   internal).
-- **Config safety**: the service refuses to boot on an unsafe posture (dev auth
-  with a public HTTPS URL, dev tokens left set in a non-dev auth mode, a
-  plaintext gateway to an external host).
+- **Config safety**: the service refuses to boot on an unsafe posture (a
+  plaintext credential endpoint — `GATEWAY_URL`, `PLATFORM_API_URL`,
+  `AUTHN_TOKENREVIEW_API_URL`, `AUTHZ_SAR_API_URL`, or a keyed
+  `USAGE_GATEWAY_URL`).
 
 ### Capability source, and the `crd` cutover
 

@@ -43,3 +43,9 @@ patches:
                     value: http
                   - name: CAPABILITY_PROVIDER_URL
                     value: http://capability-provider.agent-framework-playground.svc.cluster.local:8080
+                  # Dev gateway is plaintext http; the escape hatch is the
+                  # explicit opt-in that permits the caller's token over it.
+                  - name: GATEWAY_URL
+                    value: "http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local:80/v1"
+                  - name: ALLOW_INSECURE_CREDENTIAL_FORWARDING
+                    value: "true"

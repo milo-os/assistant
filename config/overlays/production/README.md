@@ -43,7 +43,9 @@ kubectl kustomize config/overlays/production   # render + review, then apply via
 
 ## Placeholders to substitute (search `REPLACE_WITH_`)
 
-- `kustomization.yaml`: `PUBLIC_BASE_URL`, `GATEWAY_URL`, `GATEWAY_MODEL`,
+- `kustomization.yaml`: `PUBLIC_BASE_URL`, `GATEWAY_URL` (**an `https://`
+  URL** — the service refuses to boot on plaintext because the gateway receives
+  caller identity and the service's gateway token), `GATEWAY_MODEL`,
   `CAPABILITY_PROVIDER_URL`, and the two AI-gateway host lists —
   `CAPABILITY_IDENTITY_FORWARD_HOSTS` (who may receive the caller's bearer
   token) and `CAPABILITY_MCP_ENDPOINT_HOSTS` (what may be dialed at all). They
@@ -56,6 +58,8 @@ kubectl kustomize config/overlays/production   # render + review, then apply via
   `.github/workflows/build.yaml` stamps the released tag before publishing the
   kustomize bundle. Do not add an `images:` block to this overlay — it would run
   after base's and overwrite the released tag.
+  `ALLOW_INSECURE_CREDENTIAL_FORWARDING` must **never** appear in this overlay;
+  the only deployments that set it are the local kind/e2e overlays.
 - `cnpg-cluster.yaml`: storage class, backup bucket / object-store provider.
 - `gateway-tls.yaml`: public hostname, `ClusterIssuer`, `GatewayClass`.
 - `networkpolicy.yaml`: the ingress namespace that fronts external traffic.

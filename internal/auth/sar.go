@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/milo-os/assistant/internal/credentialpolicy"
 )
 
 // Defaults for [SARConfig]. The resourceAttributes triple models the question
@@ -187,6 +189,11 @@ type SARConfig struct {
 	// a negative value disables the cache (every request round-trips).
 	CacheTTL time.Duration
 
+	// AllowInsecureCredentialForwarding is the dev-only escape hatch. The SAR
+	// call authenticates with the assistant's own credential, so a plaintext
+	// APIURL is refused before the request is sent unless this is true.
+	AllowInsecureCredentialForwarding bool
+
 	// Logger records refused reviews. Optional.
 	Logger *slog.Logger
 
@@ -334,10 +341,11 @@ func (a *sarAuthorizer) AuthorizeProject(ctx context.Context, principal Principa
 // baseURL, not a precomputed endpoint: the URL depends on the project under
 // review, so it is built per request from the review's own resourceAttributes.
 type httpReviewer struct {
-	baseURL string
-	token   string
-	client  *http.Client
-	logger  *slog.Logger
+	baseURL       string
+	token         string
+	client        *http.Client
+	logger        *slog.Logger
+	allowInsecure bool
 }
 
 // newHTTPReviewer builds the reviewer from cfg's control-plane coordinates.
@@ -350,11 +358,16 @@ func newHTTPReviewer(cfg SARConfig) (*httpReviewer, error) {
 	if timeout <= 0 {
 		timeout = DefaultSARTimeout
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &httpReviewer{
-		baseURL: cfg.APIURL,
-		token:   cfg.BearerToken,
-		client:  &http.Client{Transport: transport, Timeout: timeout},
-		logger:  cfg.Logger,
+		baseURL:       cfg.APIURL,
+		token:         cfg.BearerToken,
+		client:        &http.Client{Transport: transport, Timeout: timeout},
+		logger:        logger,
+		allowInsecure: cfg.AllowInsecureCredentialForwarding,
 	}, nil
 }
 
@@ -371,6 +384,11 @@ func (r *httpReviewer) Review(ctx context.Context, review *SubjectAccessReview) 
 		project = review.Spec.ResourceAttributes.Namespace
 	}
 	endpoint := sarEndpoint(r.baseURL, project)
+	if err := (credentialpolicy.Policy{AllowInsecure: r.allowInsecure}).CheckURL(endpoint); err != nil {
+		r.logger.Warn("authz.sar.credential_plaintext_refused",
+			"host", requestHost(endpoint), "error", err.Error())
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build SubjectAccessReview request: %w", err)

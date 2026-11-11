@@ -38,8 +38,10 @@ spec:
       #
       # The NAME is pinned so every consumer (the assistant's GATEWAY_URL, the
       # capability fixture's MCP endpoint) can reference a static FQDN —
-      # http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local — with
-      # no discovery/templating step. Without it EG autogenerates the name.
+      # http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local in dev —
+      # with no discovery/templating step. Without it EG autogenerates the name.
+      # The plaintext listener below is dev-only; a real environment adds an
+      # https listener and the assistant's GATEWAY_URL points at that.
       envoyService:
         type: ClusterIP
         name: patch-ai-gateway

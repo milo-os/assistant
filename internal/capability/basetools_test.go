@@ -25,7 +25,10 @@ func platformClient(t *testing.T) (*projectapi.Client, *[]string) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := projectapi.New(projectapi.Config{BaseURL: srv.URL})
+	client, err := projectapi.New(projectapi.Config{
+		BaseURL:                           srv.URL,
+		AllowInsecureCredentialForwarding: true, // httptest is plain http
+	})
 	if err != nil {
 		t.Fatalf("projectapi.New: %v", err)
 	}

@@ -187,6 +187,11 @@ type Deps struct {
 	// platform's capability endpoints are in-cluster private ClusterIPs, so real
 	// deployments set this true; it is threaded into capability.Compose.
 	AllowPrivateCapabilityNetworks bool
+	// AllowInsecureCredentialForwarding is the dev-only escape hatch for
+	// plaintext credential forwarding, threaded into capability.Compose. False
+	// (the default) refuses to attach the caller's token to an http MCP
+	// endpoint.
+	AllowInsecureCredentialForwarding bool
 	// StepLimit and MaxOutputTokens override the loop defaults when > 0.
 	// HistoryTokenBudget overrides DefaultHistoryTokenBudget when > 0.
 	StepLimit          int
@@ -378,17 +383,18 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	caller := capability.CallerIdentity{BearerToken: auth.BearerTokenFromContext(ctx)}
 
 	composed, _ := capability.Compose(ctx, docs, capability.ComposeOptions{
-		HTTPClient:           c.deps.HTTPClient,
-		AllowPrivateNetworks: c.deps.AllowPrivateCapabilityNetworks,
-		Caller:               caller,
-		IdentityForwardHosts: c.deps.CapabilityIdentityForwardHosts,
-		Memory:               c.deps.Memory,
-		PlatformAPI:          c.deps.PlatformAPI,
-		PlanTokenKey:         c.deps.PlanTokenKey,
-		ExpectedProject:      params.ProjectName,
-		GapReports:           c.deps.GapReports,
-		Metrics:              c.deps.Metrics,
-		ContextID:            params.ContextID,
+		HTTPClient:                        c.deps.HTTPClient,
+		AllowPrivateNetworks:              c.deps.AllowPrivateCapabilityNetworks,
+		AllowInsecureCredentialForwarding: c.deps.AllowInsecureCredentialForwarding,
+		Caller:                            caller,
+		IdentityForwardHosts:              c.deps.CapabilityIdentityForwardHosts,
+		Memory:                            c.deps.Memory,
+		PlatformAPI:                       c.deps.PlatformAPI,
+		PlanTokenKey:                      c.deps.PlanTokenKey,
+		ExpectedProject:                   params.ProjectName,
+		GapReports:                        c.deps.GapReports,
+		Metrics:                           c.deps.Metrics,
+		ContextID:                         params.ContextID,
 
 		AllowedMCPEndpointHosts: c.deps.CapabilityMCPEndpointHosts,
 		OnDocumentComposed:      c.composeObserver(params),

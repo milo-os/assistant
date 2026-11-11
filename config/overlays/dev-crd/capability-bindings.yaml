@@ -55,6 +55,9 @@ spec:
         # allow-list, go unmetered, and receive no caller identity (the raw host
         # is not in CAPABILITY_IDENTITY_FORWARD_HOSTS). CAPABILITY_MCP_ENDPOINT_HOSTS
         # in config/base/assistant.yaml refuses to dial anything else.
+        # Dev-only plaintext: the dev overlay sets
+        # ALLOW_INSECURE_CREDENTIAL_FORWARDING=true because this local gateway
+        # has no TLS. A real environment uses an https endpoint instead.
         endpoint: http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local:80/mcp
         toolSelector:
           include:

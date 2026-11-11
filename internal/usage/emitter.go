@@ -9,7 +9,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
+
+	"github.com/milo-os/assistant/internal/credentialpolicy"
 )
 
 const (
@@ -40,11 +43,12 @@ type EmitResult struct {
 // Vector provides Tier-1 disk durability and injects the gateway api-key, so
 // producers post plaintext with no auth.
 type Emitter struct {
-	gatewayURL string
-	apiKey     string
-	source     string
-	client     *http.Client
-	logger     *slog.Logger
+	gatewayURL    string
+	apiKey        string
+	source        string
+	client        *http.Client
+	logger        *slog.Logger
+	allowInsecure bool
 }
 
 // EmitterConfig configures [NewEmitter].
@@ -53,6 +57,10 @@ type EmitterConfig struct {
 	GatewayURL string
 	// APIKey is an optional collector api-key (env USAGE_GATEWAY_API_KEY).
 	APIKey string
+	// AllowInsecureCredentialForwarding is the dev-only escape hatch. When an
+	// API key is configured, a plaintext collector URL is refused unless this
+	// is true.
+	AllowInsecureCredentialForwarding bool
 	// Source is the CloudEvents source URI identifying this producer.
 	Source string
 	// HTTPClient is injectable for tests; nil uses a client with the emit timeout.
@@ -73,11 +81,12 @@ func NewEmitter(cfg EmitterConfig) *Emitter {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &Emitter{
-		gatewayURL: cfg.GatewayURL,
-		apiKey:     cfg.APIKey,
-		source:     cfg.Source,
-		client:     client,
-		logger:     logger,
+		gatewayURL:    cfg.GatewayURL,
+		apiKey:        cfg.APIKey,
+		source:        cfg.Source,
+		client:        client,
+		logger:        logger,
+		allowInsecure: cfg.AllowInsecureCredentialForwarding,
 	}
 }
 
@@ -116,6 +125,13 @@ func (e *Emitter) postBatch(ctx context.Context, batch []CloudEvent) (int, error
 	if err != nil {
 		return 0, err
 	}
+	if e.apiKey != "" {
+		if err := (credentialpolicy.Policy{AllowInsecure: e.allowInsecure}).CheckURL(target); err != nil {
+			e.logger.Warn("usage.emit.credential_plaintext_refused",
+				"host", requestHost(target), "error", err.Error())
+			return 0, err
+		}
+	}
 
 	// Match JavaScript's JSON.stringify: no HTML escaping of <, >, & (the wire
 	// the TS emitter produces and the sink golden records), and no trailing
@@ -140,7 +156,17 @@ func (e *Emitter) postBatch(ctx context.Context, batch []CloudEvent) (int, error
 		req.Header.Set("x-api-key", e.apiKey)
 	}
 
-	res, err := e.client.Do(req)
+	client := e.client
+	if e.apiKey != "" && !e.allowInsecure {
+		// The initial-URL check is not enough: http.Client follows redirects
+		// itself, so refuse a hop that downgrades to plaintext rather than
+		// letting it carry the api key.
+		scoped := *e.client
+		scoped.CheckRedirect = httpsOnlyRedirect
+		client = &scoped
+	}
+
+	res, err := client.Do(req)
 	if err != nil {
 		e.logger.Warn("usage.emit.failed", "eventCount", len(batch), "error", err.Error())
 		return 0, err
@@ -174,6 +200,29 @@ func batchURL(gateway string) (string, error) {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String(), nil
+}
+
+// requestHost returns the hostname of rawURL, or "" when it cannot be parsed.
+// Refusal logs name the host, never the URL (which could carry a credential).
+func requestHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// httpsOnlyRedirect is installed on a credential-bearing request so a redirect
+// cannot downgrade it to plaintext. It preserves Go's default ten-hop cap.
+func httpsOnlyRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	if !strings.EqualFold(req.URL.Scheme, "https") {
+		return fmt.Errorf("refusing to follow a credential-bearing redirect to %s over %s",
+			req.URL.Hostname(), req.URL.Scheme)
+	}
+	return nil
 }
 
 func readSnippet(r io.Reader) string {

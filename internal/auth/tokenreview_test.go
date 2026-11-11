@@ -226,7 +226,7 @@ func TestTR_HTTPReviewer_Authenticated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	an := newTR(t, TokenReviewConfig{APIURL: srv.URL, BearerToken: "svc-token"})
+	an := newTR(t, TokenReviewConfig{APIURL: srv.URL, BearerToken: "svc-token", AllowInsecureCredentialForwarding: true})
 	p, err := an.Authenticate(context.Background(), "tok-abc")
 	if err != nil {
 		t.Fatalf("HTTP authenticated should resolve: %v", err)
@@ -245,6 +245,27 @@ func TestTR_HTTPReviewer_Authenticated(t *testing.T) {
 	}
 }
 
+// The TokenReview body carries the caller's token, so a plaintext control plane
+// is refused before the request is sent: fail closed, 401, and no network call.
+func TestTR_HTTPReviewer_RefusesPlaintextWithoutEscapeHatch(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	an := newTR(t, TokenReviewConfig{APIURL: srv.URL})
+	_, err := an.Authenticate(context.Background(), "tok-abc")
+	assertStatus(t, err, 401)
+	if !strings.Contains(err.Error(), "https") {
+		t.Fatalf("refusal should name the https requirement: %v", err)
+	}
+	if called {
+		t.Fatal("a refused TokenReview still reached the control plane")
+	}
+}
+
 // A non-2xx from the apiserver fails closed (401).
 func TestTR_HTTPReviewer_NonOKFailsClosed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +273,7 @@ func TestTR_HTTPReviewer_NonOKFailsClosed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	an := newTR(t, TokenReviewConfig{APIURL: srv.URL})
+	an := newTR(t, TokenReviewConfig{APIURL: srv.URL, AllowInsecureCredentialForwarding: true})
 	_, err := an.Authenticate(context.Background(), "tok-abc")
 	assertStatus(t, err, 401)
 }

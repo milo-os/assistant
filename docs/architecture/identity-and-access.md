@@ -76,8 +76,15 @@ answers "may we connect at all"; this answers the much narrower "may we hand
 this endpoint the user's credential", and an endpoint can clear the first
 without clearing the second.
 
+The transport is part of the predicate: a sanctioned endpoint must also be
+`https://`. A plaintext endpoint is refused before the connection is made, and
+the refusal names the host without ever writing the token. The only exception is
+the dev-only `ALLOW_INSECURE_CREDENTIAL_FORWARDING` escape hatch, which local
+kind/e2e overlays set because their gateway has no TLS.
+
 The decision fails closed on every doubt — no token, no authorized project, no
-sanctioned list, an unparseable endpoint, a host outside the list — and the
+sanctioned list, an unparseable endpoint, a host outside the list, a non-https
+scheme — and the
 headers travel as a pair, since a server that cannot read as the caller has no
 use for the project name. Knowledge sources and skill bodies are excluded
 outright: they are static documents fetched with a plain GET, named by the same

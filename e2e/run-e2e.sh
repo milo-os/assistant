@@ -422,6 +422,7 @@ run_gateway() {
          CAPABILITY_DOCS_FIXTURE="${GW_FIXTURE}" CAPABILITY_ALLOW_PRIVATE_NETWORKS=true USAGE_GATEWAY_URL="${SINK_URL}" \
          PUBLIC_BASE_URL="${PUBLIC_BASE_URL}" \
          MODEL_MODE=gateway GATEWAY_URL="${GATEWAY_URL}" GATEWAY_MODEL="${GATEWAY_MODEL}" \
+         ALLOW_INSECURE_CREDENTIAL_FORWARDING=true \
          bash -c "${ASSISTANT_START_CMD}" ) >"${OUT}/assistant-gateway.log" 2>&1 &
   PIDS+=("$!"); BOOTED_PORTS+=("${ASSISTANT_PORT}"); disown
   wait_for_health "assistant(gateway)" "${ASSISTANT_URL}" 30

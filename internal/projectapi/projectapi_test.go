@@ -54,7 +54,10 @@ const workloadsDiscovery = `{"kind":"APIResourceList","resources":[
 
 func clientFor(t *testing.T, url string) *projectapi.Client {
 	t.Helper()
-	c, err := projectapi.New(projectapi.Config{BaseURL: url})
+	c, err := projectapi.New(projectapi.Config{
+		BaseURL:                           url,
+		AllowInsecureCredentialForwarding: true, // httptest is plain http
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -339,12 +342,106 @@ func TestListReturnsAnEmptySliceRatherThanNil(t *testing.T) {
 	}
 }
 
+// A credential-bearing request must not follow a redirect that downgrades to
+// plaintext: the Authorization header would otherwise travel over http.
+func TestRefusesPlaintextRedirectWithToken(t *testing.T) {
+	var gotAuth string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(workloadsDiscovery))
+	}))
+	t.Cleanup(target.Close)
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := projectapi.New(projectapi.Config{BaseURL: srv.URL, Transport: srv.Client().Transport})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = c.As("demo-project", "caller-token").Resolve(context.Background(), "compute.datumapis.com", "v1alpha1", "Workload")
+	if err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("want a redirect refusal, got %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("the plaintext redirect target received %q", gotAuth)
+	}
+}
+
 func TestNewRejectsAConfigurationThatCouldNeverWork(t *testing.T) {
 	if _, err := projectapi.New(projectapi.Config{}); err == nil {
 		t.Fatal("New with no BaseURL should fail")
 	}
-	if _, err := projectapi.New(projectapi.Config{BaseURL: "https://x.test", CACert: []byte("not pem")}); err == nil {
-		t.Fatal("New with a bad CA should fail")
+}
+
+// The caller's token must never be attached to a plaintext request: the call
+// fails closed before anything is sent.
+func TestRefusesCallerTokenOverPlaintextHTTP(t *testing.T) {
+	var rec recorder
+	srv := newServer(t, &rec, func(string) (int, string) { return 200, workloadsDiscovery })
+
+	c, err := projectapi.New(projectapi.Config{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = c.As("demo-project", "caller-token").Resolve(context.Background(), "compute.datumapis.com", "v1alpha1", "Workload")
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("want an https refusal, got %v", err)
+	}
+	if rec.method != "" {
+		t.Fatalf("a refused request still reached the server (%s %s)", rec.method, rec.path)
+	}
+	if strings.Contains(err.Error(), "caller-token") {
+		t.Fatalf("refusal leaked the token: %v", err)
+	}
+}
+
+// With the dev escape hatch on, the same plaintext request is allowed.
+func TestEscapeHatchAllowsCallerTokenOverPlaintextHTTP(t *testing.T) {
+	var rec recorder
+	srv := newServer(t, &rec, func(string) (int, string) { return 200, workloadsDiscovery })
+
+	c, err := projectapi.New(projectapi.Config{
+		BaseURL:                           srv.URL,
+		AllowInsecureCredentialForwarding: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.As("demo-project", "caller-token").Resolve(context.Background(), "compute.datumapis.com", "v1alpha1", "Workload"); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if rec.authorization != "Bearer caller-token" {
+		t.Fatalf("authorization = %q, want the caller's token", rec.authorization)
+	}
+}
+
+// An https platform receives the token, verified with the transport's own
+// (test) trust store rather than a client-held CA.
+func TestAllowsCallerTokenOverHTTPS(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(workloadsDiscovery))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := projectapi.New(projectapi.Config{
+		BaseURL:   srv.URL,
+		Transport: srv.Client().Transport,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.As("demo-project", "caller-token").Resolve(context.Background(), "compute.datumapis.com", "v1alpha1", "Workload"); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if gotAuth != "Bearer caller-token" {
+		t.Fatalf("authorization = %q, want the caller's token", gotAuth)
 	}
 }
 

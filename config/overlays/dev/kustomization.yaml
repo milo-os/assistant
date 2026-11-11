@@ -75,6 +75,13 @@ patches:
                     value: fixture
                   - name: CAPABILITY_DOCS_FIXTURE
                     value: /config/capability-documents.json
+                  # Local kind has no TLS on the gateway. Keep the dev URL on
+                  # plain http and turn on the ONE explicit escape hatch that
+                  # permits credentials over it. Production leaves both alone.
+                  - name: GATEWAY_URL
+                    value: "http://patch-ai-gateway.envoy-gateway-system.svc.cluster.local:80/v1"
+                  - name: ALLOW_INSECURE_CREDENTIAL_FORWARDING
+                    value: "true"
                 volumeMounts:
                   - name: capabilities
                     mountPath: /config

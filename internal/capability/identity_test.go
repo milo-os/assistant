@@ -42,7 +42,7 @@ func composeWithConnector(t *testing.T, doc CapabilityDocument, opts ComposeOpti
 }
 
 func TestIdentity_ForwardedToSanctionedEndpoint(t *testing.T) {
-	const endpoint = "http://gateway.svc.cluster.local/mcp"
+	const endpoint = "https://gateway.svc.cluster.local/mcp"
 	seen := composeWithConnector(t, gatewayDoc(endpoint), ComposeOptions{
 		Caller:               CallerIdentity{BearerToken: callerToken},
 		ExpectedProject:      "demo-project",
@@ -61,7 +61,7 @@ func TestIdentity_ForwardedToSanctionedEndpoint(t *testing.T) {
 // The project header comes from the authorized request, never from the
 // document — a document naming another tenant's project cannot re-aim a read.
 func TestIdentity_ProjectComesFromTheRequestNotTheDocument(t *testing.T) {
-	const endpoint = "http://gateway.svc.cluster.local/mcp"
+	const endpoint = "https://gateway.svc.cluster.local/mcp"
 	doc := gatewayDoc(endpoint)
 	doc.Metadata.Namespace = "" // no namespace ⇒ scopeDocuments keeps it
 	seen := composeWithConnector(t, doc, ComposeOptions{
@@ -106,7 +106,7 @@ func TestIdentity_NotForwardedToUnsanctionedEndpoint(t *testing.T) {
 // A sanctioned host still gets nothing when there is no identity to forward,
 // or no authorized project to name.
 func TestIdentity_NotForwardedWithoutTokenOrProject(t *testing.T) {
-	const endpoint = "http://gateway.example/mcp"
+	const endpoint = "https://gateway.example/mcp"
 	for _, tc := range []struct {
 		name string
 		opts ComposeOptions
@@ -128,7 +128,7 @@ func TestIdentity_NotForwardedWithoutTokenOrProject(t *testing.T) {
 // A sanctioned subdomain of a sanctioned domain is permitted, matching the
 // SSRF allow-list's own suffix rule.
 func TestIdentity_DomainSuffixMatch(t *testing.T) {
-	const endpoint = "http://mcp.gateway.example/mcp"
+	const endpoint = "https://mcp.gateway.example/mcp"
 	seen := composeWithConnector(t, gatewayDoc(endpoint), ComposeOptions{
 		Caller:               CallerIdentity{BearerToken: callerToken},
 		ExpectedProject:      "demo-project",
@@ -153,7 +153,7 @@ func TestIdentity_NotSentOnKnowledgeOrSkillFetches(t *testing.T) {
 	})}
 
 	doc := streamcoDoc(func(d *CapabilityDocument) {
-		d.Spec.Tools.MCPServers[0].Endpoint = "http://gateway.example/mcp"
+		d.Spec.Tools.MCPServers[0].Endpoint = "https://gateway.example/mcp"
 		d.Spec.Skills = []Skill{{Name: "triage", Description: "triage lag", Source: "http://provider/skill.md"}}
 	})
 	seen := map[string]map[string]string{}
@@ -184,7 +184,7 @@ func TestIdentity_NotSentOnKnowledgeOrSkillFetches(t *testing.T) {
 		}
 	}
 	// …while the sanctioned MCP endpoint still got them.
-	if seen["http://gateway.example/mcp"][AuthorizationHeader] == "" {
+	if seen["https://gateway.example/mcp"][AuthorizationHeader] == "" {
 		t.Fatal("MCP endpoint should still receive identity")
 	}
 }
@@ -208,7 +208,7 @@ func TestCallerIdentity_RedactsTheToken(t *testing.T) {
 // message the model (or the user) can read back.
 func TestIdentity_NotLeakedByComposeWarningsOrErrors(t *testing.T) {
 	var buf bytes.Buffer
-	doc := gatewayDoc("http://gateway.example/mcp")
+	doc := gatewayDoc("https://gateway.example/mcp")
 	composed, err := Compose(context.Background(), []CapabilityDocument{doc}, ComposeOptions{
 		Caller:               CallerIdentity{BearerToken: callerToken},
 		ExpectedProject:      "demo-project",
@@ -231,7 +231,7 @@ func TestIdentity_NotLeakedByComposeWarningsOrErrors(t *testing.T) {
 // Case, surrounding whitespace, a trailing dot, and blank entries must not
 // change who is sanctioned — an operator's list is read the way they wrote it.
 func TestIdentity_ForwardHostsAreNormalized(t *testing.T) {
-	const endpoint = "http://gateway.example/mcp"
+	const endpoint = "https://gateway.example/mcp"
 	seen := composeWithConnector(t, gatewayDoc(endpoint), ComposeOptions{
 		Caller:               CallerIdentity{BearerToken: callerToken},
 		ExpectedProject:      "demo-project",
@@ -239,6 +239,86 @@ func TestIdentity_ForwardHostsAreNormalized(t *testing.T) {
 	})
 	if seen[endpoint][AuthorizationHeader] == "" {
 		t.Fatal("case/whitespace/trailing-dot differences must not defeat the sanctioned list")
+	}
+}
+
+// A sanctioned endpoint over plaintext http would receive the caller's token,
+// so the call is refused before any request is sent. The refusal names the host
+// and never the token, and the binding is reported as degraded.
+func TestIdentity_RefusesPlaintextHTTPWithToken(t *testing.T) {
+	const endpoint = "http://gateway.example/mcp"
+	var (
+		buf         bytes.Buffer
+		dialed      []string
+		composedErr error
+	)
+	composed, err := Compose(context.Background(), []CapabilityDocument{gatewayDoc(endpoint)}, ComposeOptions{
+		Caller:               CallerIdentity{BearerToken: callerToken},
+		ExpectedProject:      "demo-project",
+		IdentityForwardHosts: []string{"gateway.example"},
+		Logger:               testLogger(&buf),
+		OnDocumentComposed: func(_ CapabilityDocument, err error) {
+			composedErr = err
+		},
+		connect: func(_ context.Context, ep string, _ map[string]string) (mcpSession, error) {
+			dialed = append(dialed, ep)
+			return newFakeSession("streams_list", "pipeline_diagnose"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	defer composed.Close()
+
+	if len(dialed) != 0 {
+		t.Fatalf("request was sent to %v despite a plaintext credential refusal", dialed)
+	}
+	if _, ok := composed.Tools[NamespaceToolName("streamco", "streams_list")]; ok {
+		t.Fatal("a refused endpoint must not contribute tools")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "capability.mcp.credential_plaintext_refused") {
+		t.Fatalf("refusal was not logged: %s", logged)
+	}
+	if !strings.Contains(logged, "gateway.example") {
+		t.Fatalf("refusal log does not name the host: %s", logged)
+	}
+	if strings.Contains(logged, callerToken) {
+		t.Fatalf("refusal leaked the token: %s", logged)
+	}
+	if composedErr == nil || !strings.Contains(composedErr.Error(), "https") {
+		t.Fatalf("binding verdict = %v, want an https refusal", composedErr)
+	}
+}
+
+// The dev escape hatch is the only way a caller's token travels over http, and
+// then the request is made normally.
+func TestIdentity_AllowsPlaintextHTTPWithEscapeHatch(t *testing.T) {
+	const endpoint = "http://gateway.example/mcp"
+	var dialed []string
+	doc := gatewayDoc(endpoint)
+	seen := map[string]map[string]string{}
+	composed, err := Compose(context.Background(), []CapabilityDocument{doc}, ComposeOptions{
+		Caller:                            CallerIdentity{BearerToken: callerToken},
+		ExpectedProject:                   "demo-project",
+		IdentityForwardHosts:              []string{"gateway.example"},
+		AllowInsecureCredentialForwarding: true,
+		connect: func(_ context.Context, ep string, headers map[string]string) (mcpSession, error) {
+			dialed = append(dialed, ep)
+			seen[ep] = headers
+			return newFakeSession("streams_list", "pipeline_diagnose"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	defer composed.Close()
+
+	if len(dialed) != 1 || dialed[0] != endpoint {
+		t.Fatalf("dialed = %v, want [%s]", dialed, endpoint)
+	}
+	if got := seen[endpoint][AuthorizationHeader]; got != "Bearer "+callerToken {
+		t.Fatalf("Authorization = %q, want the caller's bearer token", got)
 	}
 }
 

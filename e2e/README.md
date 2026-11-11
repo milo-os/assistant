@@ -60,6 +60,8 @@ generation is faked.
 | `PROJECT` | `demo-project` | project the chat runs under |
 | `AGENT_BINDINGS_FIXTURE` | `fixtures/agent-bindings.fixture.json` | bindings source |
 | `USAGE_GATEWAY_URL` | `http://127.0.0.1:7811` | sink (the service posts CloudEvents here) |
+| `GATEWAY_URL` | `http://localhost:1975/v1` | local plaintext AI gateway; the harness sets `ALLOW_INSECURE_CREDENTIAL_FORWARDING=true` alongside it |
+| `ALLOW_INSECURE_CREDENTIAL_FORWARDING` | `true` (in the gateway leg) | explicit dev-only opt-in for credential forwarding over the harness's plaintext gateway |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:7820` | the service builds the agent card `url` from this |
 | `MODEL_MODE` | `mock` | `anthropic` for a real pass |
 

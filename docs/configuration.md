@@ -16,26 +16,24 @@ Environment variables, model backends, and the authentication/authorization seam
 | `AUTHZ_SAR_CLIENT_CERT_PATH` / `AUTHZ_SAR_CLIENT_KEY_PATH` | — | Client certificate identifying the assistant to the control plane. Unset on a plain Kubernetes apiserver, which accepts the service-account token; **required against Milo**, which validates tokens only against its own issuer and 401s a workload-cluster token |
 | `AUTHN_TOKENREVIEW_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Assistant's own SA token for the TokenReview call |
 | `AUTHN_TOKENREVIEW_CA_CERT_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | Apiserver CA bundle for the TokenReview call |
-| `PLATFORM_API_URL` | `AUTHZ_SAR_API_URL` | Platform API the **base platform tools** read and write a project's own resources through. The platform that decides whether a caller may act on a project is the same one that serves that project's resources, so this normally needs no setting. Every request over it carries the **calling user's** own bearer token — the service holds no credential for it, which is why there is no token path beside it. Unset and underivable ⇒ the base tools are not composed |
-| `PLATFORM_API_CA_CERT_PATH` | `AUTHZ_SAR_CA_CERT_PATH` | CA bundle verifying the platform API's certificate (same server as the SAR endpoint by default) |
+| `PLATFORM_API_URL` | `AUTHZ_SAR_API_URL` | Platform API the **base platform tools** read and write a project's own resources through. The platform that decides whether a caller may act on a project is the same one that serves that project's resources, so this normally needs no setting. Every request over it carries the **calling user's** own bearer token — the service holds no credential for it, which is why there is no token path beside it. **Must be `https://`**: a plaintext URL is refused at boot. Unset and underivable ⇒ the base tools are not composed |
 | `PLAN_TOKEN_KEY` | generated per process | Secret that binds a plan to what the person was shown (base64, or a raw string of at least 16 bytes). Set it so one replica can apply a plan another made, and so plans survive a restart. Unset, Patch generates one per process **and warns at startup**: the guarantee still holds, but an outstanding plan is lost on restart or refused by another replica, and the person is asked to plan again |
 | `CAPABILITY_SOURCE` | — | Which capability source to build: `fixture` \| `http` \| `crd`. Unset ⇒ no provider capabilities (built-ins only), except for the one-release inference described in [Capability source](#capability-source) |
 | `CAPABILITY_DOCS_FIXTURE` | — | Path to a capability-documents JSON file. Required by, and only by, `CAPABILITY_SOURCE=fixture`; setting it under another mode is an error |
 | `CAPABILITY_PROVIDER_URL` | — | Base URL of the capability-provider HTTP API. Required by, and only by, `CAPABILITY_SOURCE=http`; setting it under another mode is an error |
 | `CONVERSATION_STORE_URL` | — | `postgres://` URL for durable conversation history. Unset ⇒ in-memory (process lifetime). Set but unreachable ⇒ boot fails (no silent fallback to amnesia) |
 | `CAPABILITY_ALLOW_PRIVATE_NETWORKS` | `false` | Relax the capability SSRF guard's loopback/RFC1918 block. In-cluster capability endpoints (the AI gateway, provider pods) are private ClusterIPs, so every real deployment sets this `true`; link-local/cloud-metadata stay blocked either way. Leave `false` only when all endpoints are public and providers untrusted |
-| `CAPABILITY_IDENTITY_FORWARD_HOSTS` | — | Comma-separated hosts whose MCP endpoints may receive the **calling user's** bearer token and the turn's project (`Authorization` + `X-Datum-Project`), so a provider that reads the customer's own resources can act as that user. An entry matches a host exactly and as a domain suffix (`datum.net` also permits `mcp.datum.net`). Unset ⇒ forwarded to nobody. A capability document is provider-controlled data, so naming an endpoint never grants it a credential — only this list does. See [Identity and access](architecture/identity-and-access.md#acting-as-the-caller) |
+| `ALLOW_INSECURE_CREDENTIAL_FORWARDING` | `false` | **Dangerous dev-only escape hatch.** Permits a credential (the caller's bearer token, the service's gateway token or collector api key, or the assistant's control-plane credential) to be attached to a plaintext `http://` URL. Every credential-carrying path refuses non-https without it, and startup validation fails on a plaintext `GATEWAY_URL`, `PLATFORM_API_URL`, `AUTHN_TOKENREVIEW_API_URL`, `AUTHZ_SAR_API_URL`, or a keyed `USAGE_GATEWAY_URL`. Set it only in local kind/e2e overlays; never in `config/base` or a production overlay. A startup warning is logged when it is on |
+| `CAPABILITY_IDENTITY_FORWARD_HOSTS` | — | Comma-separated hosts whose MCP endpoints may receive the **calling user's** bearer token and the turn's project (`Authorization` + `X-Datum-Project`), so a provider that reads the customer's own resources can act as that user. An entry matches a host exactly and as a domain suffix (`datum.net` also permits `mcp.datum.net`). Unset ⇒ forwarded to nobody. The endpoint must also be `https://`; a plaintext endpoint is refused at the dial site unless `ALLOW_INSECURE_CREDENTIAL_FORWARDING` is on. A capability document is provider-controlled data, so naming an endpoint never grants it a credential — only this list does. See [Identity and access](architecture/identity-and-access.md#acting-as-the-caller) |
 | `CAPABILITY_MCP_ENDPOINT_HOSTS` | — | Comma-separated hosts an MCP endpoint may be **dialed at**, matched exactly and as a domain suffix. An endpoint outside the list is skipped before any connection is opened, logged as `capability.mcp.endpoint_not_sanctioned`, and reported on the binding as `Composed=False`. Empty ⇒ the check is disabled and any endpoint may be dialed. Production sets it to the AI gateway. Deliberately **not** the same knob as `CAPABILITY_IDENTITY_FORWARD_HOSTS` — see [Two host lists, not one](#two-host-lists-not-one) |
 | `MODEL_MODE` | `anthropic` if key else `mock` | `anthropic` \| `mock` \| `gateway` |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_MODE=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Anthropic model id |
-| `GATEWAY_URL` | — | Required when `MODEL_MODE=gateway`; Envoy AI Gateway (OpenAI-compatible) base URL |
+| `GATEWAY_URL` | — | Required when `MODEL_MODE=gateway`; Envoy AI Gateway (OpenAI-compatible) base URL. **Must be `https://`**: this is where caller identity is forwarded for MCP traffic and where `GATEWAY_TOKEN_FILE` travels, so a plaintext URL is refused at boot |
 | `GATEWAY_MODEL` | `patch-stub-v1` | Model name the gateway routes to the upstream |
-| `GATEWAY_TOKEN_FILE` | — | Path to a bearer token proving which workload is calling the gateway. Re-read per request, so a rotated token keeps working. Not a model credential — the gateway still injects that |
-| `GATEWAY_CA_CERT` | — | Optional CA PEM path for a self-signed gateway TLS cert |
-| `GATEWAY_TLS_INSECURE` | `false` | Skip gateway TLS verification (local only) |
-| `USAGE_GATEWAY_URL` | — | Usage collector base URL; unset ⇒ emission is a no-op |
-| `USAGE_GATEWAY_API_KEY` | — | Optional `x-api-key` for the collector |
+| `GATEWAY_TOKEN_FILE` | — | Path to a bearer token proving which workload is calling the gateway. Re-read per request, so a rotated token keeps working. Not a model credential — the gateway still injects that. Refused on a non-https request unless `ALLOW_INSECURE_CREDENTIAL_FORWARDING` is on |
+| `USAGE_GATEWAY_URL` | — | Usage collector base URL; unset ⇒ emission is a no-op. Must be `https://` when `USAGE_GATEWAY_API_KEY` is set |
+| `USAGE_GATEWAY_API_KEY` | — | Optional `x-api-key` for the collector. A plaintext collector is refused at boot and at emit time unless `ALLOW_INSECURE_CREDENTIAL_FORWARDING` is on |
 
 > `GATEWAY_URL` (AI gateway, model traffic) is distinct from
 > `USAGE_GATEWAY_URL` (the metering collector) — different subsystems.
@@ -165,8 +163,22 @@ Two properties this mode guarantees from the service side:
   per consumer. (These are attached only in gateway mode — the service
   never leaks project/conversation ids to the real Anthropic API.)
 
-For local TLS, use plain `http://` or set `GATEWAY_CA_CERT` /
-`GATEWAY_TLS_INSECURE`.
+### Transport and trust
+
+Credentials travel only over `https`. The token middleware refuses a plaintext
+request before it sets `Authorization`, the MCP dial site refuses a sanctioned
+endpoint that is `http://`, the base-tools client refuses a plaintext
+`PLATFORM_API_URL`, and the TokenReview / SubjectAccessReview / usage-emitter
+paths refuse a plaintext endpoint before sending. The only exception is the
+explicit `ALLOW_INSECURE_CREDENTIAL_FORWARDING` dev escape hatch described above.
+
+The gateway and platform clients use Go's **default root pool**, so a CA the
+platform injects into the pod's trust store via `SSL_CERT_FILE` / `SSL_CERT_DIR`
+is honored. They set no custom `RootCAs` and never set `InsecureSkipVerify`.
+The control-plane transport starts from that same system pool and appends the
+explicitly mounted cluster CA, so kind/e2e still trust their local apiserver.
+There are no `GATEWAY_CA_CERT` / `GATEWAY_TLS_INSECURE` knobs any more: point the
+process at the platform trust bundle instead.
 
 ### Mock model caveat
 

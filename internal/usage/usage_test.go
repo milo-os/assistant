@@ -307,7 +307,7 @@ func TestEmitter_PostsCloudEventsWithAPIKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := NewEmitter(EmitterConfig{GatewayURL: srv.URL, APIKey: "secret-key", Source: "http://svc/a2a"})
+	e := NewEmitter(EmitterConfig{GatewayURL: srv.URL, APIKey: "secret-key", Source: "http://svc/a2a", AllowInsecureCredentialForwarding: true})
 	r := e.Emit(context.Background(), sampleEvents())
 
 	if !r.OK || r.Noop || r.Status != http.StatusAccepted {
@@ -332,6 +332,26 @@ func TestEmitter_PostsCloudEventsWithAPIKey(t *testing.T) {
 	}
 	if batch[0]["specversion"] != "1.0" || batch[0]["subject"] != "projects/demo-project" {
 		t.Errorf("first event = %v", batch[0])
+	}
+}
+
+// An api key is a credential too: a plaintext collector is refused before the
+// request is made, and the result reports the error.
+func TestEmitter_RefusesPlaintextAPIKeyWithoutEscapeHatch(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	e := NewEmitter(EmitterConfig{GatewayURL: srv.URL, APIKey: "secret-key", Source: "s"})
+	r := e.Emit(context.Background(), sampleEvents())
+	if r.OK || r.Error == "" || !strings.Contains(r.Error, "https") {
+		t.Fatalf("want an https refusal, got %+v", r)
+	}
+	if called {
+		t.Fatal("a refused emission still reached the collector")
 	}
 }
 
