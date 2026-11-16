@@ -50,6 +50,15 @@ const DefaultHistoryTokenBudget = 6000
 // distinct from a normal completion.
 const DefaultTurnTimeout = 120 * time.Second
 
+// DefaultCompactionTimeout bounds one history compaction — the summarize
+// model call plus the store rewrite — when [Deps].CompactionTimeout is unset.
+// The automatic path runs before the turn's own deadline starts (the summary
+// shapes the turn's prompt) and the /compact path has no turn at all, so
+// compaction carries its own bound rather than borrowing the turn's. A
+// compaction that runs out of time changes nothing: the summary is never
+// stored, or the store transaction rolls back.
+const DefaultCompactionTimeout = 60 * time.Second
+
 // SummaryBatchTurns is how many of a conversation's oldest turns one
 // compaction pass folds into a summary (a small fixed batch, not "everything
 // Truncate would otherwise drop" — see docs/conversation-summarization-design.md
@@ -129,6 +138,9 @@ type Deps struct {
 	// injected into their history (see
 	// docs/conversation-summarization-design.md "Still open").
 	SummarizationDisabled bool
+	// CompactionTimeout bounds one history compaction (summarize call plus
+	// store rewrite) when > 0; otherwise DefaultCompactionTimeout applies.
+	CompactionTimeout time.Duration
 	// Memory backs the memory_remember / memory_forget tools: durable,
 	// project-scoped facts that persist across conversations and users (unlike
 	// History, which is per-conversation and windowed). Nil disables the
@@ -551,7 +563,7 @@ func (c *Conversation) loadHistory(ctx context.Context, params Params) []history
 	if c.deps.History == nil || params.ContextID == "" {
 		return nil
 	}
-	turns, err := c.deps.History.Turns(ctx, params.ProjectName, params.ContextID)
+	window, err := c.deps.History.Window(ctx, params.ProjectName, params.ContextID)
 	if err != nil {
 		c.logger.Warn("agent.history.load_failed",
 			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
@@ -561,8 +573,9 @@ func (c *Conversation) loadHistory(ctx context.Context, params Params) []history
 	if budget <= 0 {
 		budget = DefaultHistoryTokenBudget
 	}
+	turns := window.Turns
 	if !c.deps.SummarizationDisabled {
-		turns = c.maybeCompact(ctx, params, turns, budget)
+		turns = c.maybeCompact(ctx, params, window, budget)
 	}
 	return history.Truncate(turns, budget)
 }
@@ -571,7 +584,8 @@ func (c *Conversation) loadHistory(ctx context.Context, params Params) []history
 // cost crosses CompactionThresholdRatio of budget; below the threshold it
 // returns turns unchanged. This is the automatic path — see [Conversation.Compact]
 // for the manual, threshold-free entry point used by the /compact command.
-func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []history.Turn, budget int) []history.Turn {
+func (c *Conversation) maybeCompact(ctx context.Context, params Params, window history.Window, budget int) []history.Turn {
+	turns := window.Turns
 	if len(turns) == 0 || budget <= 0 {
 		return turns
 	}
@@ -581,7 +595,7 @@ func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []
 	}
 	// Fail open: compactNow already logged and counted the failure, and
 	// returns turns unchanged, so the turn proceeds on plain Truncate.
-	compacted, _ := c.compactNow(ctx, params, turns)
+	compacted, _ := c.compactNow(ctx, params, window)
 	return compacted
 }
 
@@ -600,7 +614,22 @@ func (c *Conversation) maybeCompact(ctx context.Context, params Params, turns []
 // turn already at the head of turns (a conversation compacted before) is
 // folded into the new digest alongside the newly-aging raw turns — anchored
 // iterative summarization, not a one-shot summary that never updates again.
-func (c *Conversation) compactNow(ctx context.Context, params Params, turns []history.Turn) ([]history.Turn, error) {
+//
+// The summarize call and the store rewrite run under one deadline
+// (Deps.CompactionTimeout), with the turn's attribution headers, and the
+// call's tokens are metered like a turn's (see meterSummary). Running out of
+// time is a failure like any other and leaves history as it was.
+//
+// The store is told which turns the summary replaces by position (the last
+// of them sits just before the first kept turn), not handed a new list of
+// turns to store, so a turn another request appends while the summary is
+// being generated stays in history after keep. If another compaction of the
+// same conversation (another replica, a racing /compact) committed first, the
+// store refuses this one ([history.ErrCompactStale]) and nothing is written:
+// that is not a failure, the history is already compacted, so compactNow
+// reports success and carries on with the history as it now stands.
+func (c *Conversation) compactNow(ctx context.Context, params Params, window history.Window) ([]history.Turn, error) {
+	turns := window.Turns
 	if len(turns) == 0 {
 		return turns, nil
 	}
@@ -612,14 +641,28 @@ func (c *Conversation) compactNow(ctx context.Context, params Params, turns []hi
 	toSummarize := turns[:batchLen]
 	keep := turns[batchLen:]
 
-	summary, err := summarize(ctx, tracedModel(c.deps.Model, c.deps.Metrics), toSummarize)
+	timeout := c.deps.CompactionTimeout
+	if timeout <= 0 {
+		timeout = DefaultCompactionTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	summary, used, err := summarize(ctx, tracedModel(c.deps.Model, c.deps.Metrics), toSummarize,
+		attributionHeaders(c.deps.ModelMode, params.ProjectName, params.ContextID))
+	c.meterSummary(ctx, params, used)
 	if err != nil {
 		c.logger.Warn("agent.history.summarize_failed",
 			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
 		c.deps.Metrics.RecordCompaction("failed_open")
 		return turns, fmt.Errorf("agent: compact: summarize: %w", err)
 	}
-	if err := c.deps.History.Compact(ctx, params.ProjectName, params.ContextID, summary, keep); err != nil {
+	through := compactThrough(window, batchLen)
+	err = c.deps.History.Compact(ctx, params.ProjectName, params.ContextID, summary, through, window.Compactions)
+	if errors.Is(err, history.ErrCompactStale) {
+		return c.afterStaleCompaction(ctx, params, turns), nil
+	}
+	if err != nil {
 		c.logger.Warn("agent.history.compact_failed",
 			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
 		c.deps.Metrics.RecordCompaction("failed_open")
@@ -631,6 +674,36 @@ func (c *Conversation) compactNow(ctx context.Context, params Params, turns []hi
 	compacted = append(compacted, summary)
 	compacted = append(compacted, keep...)
 	return compacted, nil
+}
+
+// compactThrough is the position of the last turn a summary of
+// window.Turns[:batchLen] replaces: the turn just before the first kept one,
+// or the window's head when nothing is kept. It goes by the positions the
+// store returned rather than counting back from the head, since a window can
+// skip a turn and so cover a wider span of positions than it has turns.
+func compactThrough(window history.Window, batchLen int) int64 {
+	if batchLen < len(window.Positions) {
+		return window.Positions[batchLen] - 1
+	}
+	return window.Head
+}
+
+// afterStaleCompaction handles a Compact refused because another compaction
+// of the conversation committed after window was read: it counts the outcome
+// and re-reads the history that compaction left, falling back to the turns it
+// was given if that read fails (the automatic caller truncates them as it
+// would have without compaction).
+func (c *Conversation) afterStaleCompaction(ctx context.Context, params Params, turns []history.Turn) []history.Turn {
+	c.logger.Info("agent.history.compact_superseded",
+		"projectName", params.ProjectName, "contextId", params.ContextID)
+	c.deps.Metrics.RecordCompaction("superseded")
+	window, err := c.deps.History.Window(ctx, params.ProjectName, params.ContextID)
+	if err != nil {
+		c.logger.Warn("agent.history.load_failed",
+			"projectName", params.ProjectName, "contextId", params.ContextID, "error", err.Error())
+		return turns
+	}
+	return window.Turns
 }
 
 // ErrNothingToCompact is returned by [Conversation.Compact] when the
@@ -650,10 +723,11 @@ func (c *Conversation) Compact(ctx context.Context, params Params) error {
 	if c.deps.History == nil || params.ContextID == "" {
 		return ErrNothingToCompact
 	}
-	turns, err := c.deps.History.Turns(ctx, params.ProjectName, params.ContextID)
+	window, err := c.deps.History.Window(ctx, params.ProjectName, params.ContextID)
 	if err != nil {
 		return fmt.Errorf("agent: compact: load history: %w", err)
 	}
+	turns := window.Turns
 	if len(turns) == 0 {
 		return ErrNothingToCompact
 	}
@@ -664,7 +738,7 @@ func (c *Conversation) Compact(ctx context.Context, params Params) error {
 	// Report what compactNow actually did, not whether the digest came out
 	// smaller: a persisted rewrite that failed to shrink is still a success,
 	// and calling it a failure would misreport the state of the store.
-	_, err = c.compactNow(ctx, params, turns)
+	_, err = c.compactNow(ctx, params, window)
 	return err
 }
 
@@ -673,37 +747,80 @@ func (c *Conversation) Compact(ctx context.Context, params Params) error {
 // (no capability composition, no tool loop, nothing user-facing). turns is
 // rendered the same way history.Messages already renders replay context, plus
 // a fixed instruction to produce a compact digest rather than a transcript.
-func summarize(ctx context.Context, model agentcore.Model, turns []history.Turn) (history.Turn, error) {
+// headers are the gateway attribution headers the turn's own model calls
+// carry. It also returns the tokens the call used, including when it fails
+// after the model has already done (and billed) the work.
+func summarize(ctx context.Context, model agentcore.Model, turns []history.Turn, headers map[string]string) (history.Turn, agentcore.Usage, error) {
 	messages := append(history.Messages(turns), agentcore.UserMessage(summarizeUserPrompt))
 	stream, err := model.Stream(ctx, agentcore.Request{
 		System:          summarizeSystemPrompt,
 		Messages:        messages,
 		MaxOutputTokens: summarizeMaxOutputTokens,
+		Headers:         headers,
 	})
 	if err != nil {
-		return history.Turn{}, fmt.Errorf("agent: summarize: %w", err)
+		return history.Turn{}, agentcore.Usage{}, fmt.Errorf("agent: summarize: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
 
-	var text strings.Builder
+	var (
+		text strings.Builder
+		used agentcore.Usage
+	)
 	for {
 		part, err := stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return history.Turn{}, fmt.Errorf("agent: summarize: %w", err)
+			return history.Turn{}, used, fmt.Errorf("agent: summarize: %w", err)
 		}
-		if part.Kind == agentcore.StreamPartTextDelta {
+		switch part.Kind {
+		case agentcore.StreamPartTextDelta:
 			text.WriteString(part.Text)
+		case agentcore.StreamPartStepFinish:
+			used = used.Add(part.Usage)
 		}
 	}
 
 	digest := strings.TrimSpace(text.String())
 	if digest == "" {
-		return history.Turn{}, errors.New("agent: summarize: model produced an empty digest")
+		return history.Turn{}, used, errors.New("agent: summarize: model produced an empty digest")
 	}
-	return history.NewSummaryTurn(digest), nil
+	return history.NewSummaryTurn(digest), used, nil
+}
+
+// meterSummary emits the summarize call's token usage on the same meters and
+// emitter a turn uses, attributed to the conversation the summary is for.
+// The usage events carry no reason field to mark a summary apart from a
+// turn, so the one difference is the messages meter: a summary is not a
+// message the user exchanged, so it bills none. Like the turn's own
+// emission it runs uncanceled, so a summary cut off by its deadline still
+// bills the tokens the model already spent.
+func (c *Conversation) meterSummary(ctx context.Context, params Params, used agentcore.Usage) {
+	if params.ProjectName == "" || c.deps.Emitter == nil {
+		return
+	}
+	noMessages := int64(0)
+	events := usage.BuildUsageEvents(usage.BuildUsageInput{
+		ProjectName:    params.ProjectName,
+		ConversationID: params.ContextID,
+		Model:          c.deps.Model.ModelID(),
+		Tokens: usage.UsageTokens{
+			InputTokens:              used.Input,
+			OutputTokens:             used.Output,
+			CachedInputTokens:        used.CacheRead,
+			CacheCreationInputTokens: used.CacheWrite,
+			Messages:                 &noMessages,
+		},
+	})
+	if len(events) == 0 {
+		return
+	}
+	if res := c.deps.Emitter.Emit(context.WithoutCancel(ctx), events); !res.OK {
+		c.logger.Warn("agent.history.summary_usage_emit_failed",
+			"projectName", params.ProjectName, "contextId", params.ContextID, "error", res.Error)
+	}
 }
 
 // loadDocuments fetches the project's capability documents, degrading to none

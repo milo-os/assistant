@@ -19,15 +19,34 @@ type compactModel struct {
 	requests      []agentcore.Request
 	failSummarize bool
 	summaryText   string // defaults to "digest" when empty
+	// duringSummarize, when set, runs inside each summarize call, before the
+	// digest is returned — a stand-in for work that lands while it is in flight.
+	duringSummarize func()
+	// summaryUsage is reported on the summarize call's step finish.
+	summaryUsage agentcore.Usage
+	// blockSummarize makes each summarize call wait for its context to end
+	// and fail with the context's error, as a hung model would.
+	blockSummarize bool
+	// summarizeDeadline records whether the last summarize call's context
+	// carried a deadline.
+	summarizeDeadline bool
 }
 
 func (m *compactModel) ModelID() string { return "compact" }
 
-func (m *compactModel) Stream(_ context.Context, req agentcore.Request) (agentcore.StreamReader, error) {
+func (m *compactModel) Stream(ctx context.Context, req agentcore.Request) (agentcore.StreamReader, error) {
 	m.requests = append(m.requests, req)
 	if req.System == summarizeSystemPrompt {
+		_, m.summarizeDeadline = ctx.Deadline()
+		if m.blockSummarize {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
 		if m.failSummarize {
 			return nil, errors.New("summarize exploded")
+		}
+		if m.duringSummarize != nil {
+			m.duringSummarize()
 		}
 		text := m.summaryText
 		if text == "" {
@@ -35,7 +54,7 @@ func (m *compactModel) Stream(_ context.Context, req agentcore.Request) (agentco
 		}
 		return &partReader{parts: []agentcore.StreamPart{
 			{Kind: agentcore.StreamPartTextDelta, Text: text},
-			{Kind: agentcore.StreamPartStepFinish, FinishReason: agentcore.FinishStop},
+			{Kind: agentcore.StreamPartStepFinish, FinishReason: agentcore.FinishStop, Usage: m.summaryUsage},
 		}}, nil
 	}
 	return &partReader{parts: []agentcore.StreamPart{
@@ -64,7 +83,7 @@ type spyStore struct {
 	*history.MemoryStore
 	compactCalls int
 	lastSummary  history.Turn
-	lastKeep     []history.Turn
+	lastThrough  int64
 	failCompact  error // when set, Compact records the call and fails without writing
 }
 
@@ -72,14 +91,14 @@ func newSpyStore() *spyStore {
 	return &spyStore{MemoryStore: history.NewMemoryStore()}
 }
 
-func (s *spyStore) Compact(ctx context.Context, projectName, contextID string, summary history.Turn, keep []history.Turn) error {
+func (s *spyStore) Compact(ctx context.Context, projectName, contextID string, summary history.Turn, through, compactions int64) error {
 	s.compactCalls++
 	s.lastSummary = summary
-	s.lastKeep = append([]history.Turn(nil), keep...)
+	s.lastThrough = through
 	if s.failCompact != nil {
 		return s.failCompact
 	}
-	return s.MemoryStore.Compact(ctx, projectName, contextID, summary, keep)
+	return s.MemoryStore.Compact(ctx, projectName, contextID, summary, through, compactions)
 }
 
 // fillTurns runs n turns of a fixed size (~30 estimated tokens: 112-char user

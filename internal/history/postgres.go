@@ -84,6 +84,12 @@ var schema = []string{
 	// archived". A timestamp rather than a boolean because the API reports
 	// when, and a nullable column needs no backfill for rows that predate it.
 	`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS archived_at timestamptz`,
+	// How many times the conversation has been compacted (see
+	// [Window.Compactions]). Compact renumbers turn positions, so it checks
+	// this under its row lock and refuses a position read before another
+	// compaction. Rows that predate it start at 0, which is what they would
+	// have read anyway.
+	`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS compactions bigint NOT NULL DEFAULT 0`,
 	// The default listing (archived_at IS NULL) is served by
 	// conversations_by_project_activity above: it walks the project's rows
 	// newest first and skips archived ones, which stay a small minority, so
@@ -228,15 +234,33 @@ func (s *PostgresStore) Ping(ctx context.Context) error { return s.pool.Ping(ctx
 // DefaultMaxRecentTurns), oldest first, reconstructed from the message rows
 // by seq arithmetic. An incomplete pair at the window's old edge is dropped.
 func (s *PostgresStore) Turns(ctx context.Context, projectName, contextID string) ([]Turn, error) {
+	w, err := s.Window(ctx, projectName, contextID)
+	return w.Turns, err
+}
+
+// Window implements [Store]: [PostgresStore.Turns] plus each turn's position,
+// which is its turn number (seq 2k is turn k's assistant row), and the
+// conversation's compaction count. The count is read before the messages, in
+// its own statement: a compaction landing between the two reads makes the
+// count stale rather than the positions, so the worst case is a Compact
+// refused with [ErrCompactStale], never one applied to the wrong turns.
+func (s *PostgresStore) Window(ctx context.Context, projectName, contextID string) (Window, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
 	defer cancel()
+	var compactions int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT compactions FROM conversations WHERE project_name = $1 AND context_id = $2`,
+		projectName, contextID).Scan(&compactions)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return Window{}, fmt.Errorf("conversation store: load compaction count: %w", err)
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT seq, role, content FROM messages
 		 WHERE project_name = $1 AND context_id = $2
 		 ORDER BY seq DESC LIMIT $3`,
 		projectName, contextID, s.maxRecentTurns*2)
 	if err != nil {
-		return nil, fmt.Errorf("conversation store: load turns: %w", err)
+		return Window{}, fmt.Errorf("conversation store: load turns: %w", err)
 	}
 	defer rows.Close()
 
@@ -248,7 +272,7 @@ func (s *PostgresStore) Turns(ctx context.Context, projectName, contextID string
 			role, content string
 		)
 		if err := rows.Scan(&seq, &role, &content); err != nil {
-			return nil, fmt.Errorf("conversation store: scan message: %w", err)
+			return Window{}, fmt.Errorf("conversation store: scan message: %w", err)
 		}
 		turnNo := (seq + 1) / 2
 		t, seen := byTurn[turnNo]
@@ -264,22 +288,26 @@ func (s *PostgresStore) Turns(ctx context.Context, projectName, contextID string
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("conversation store: load turns: %w", err)
+		return Window{}, fmt.Errorf("conversation store: load turns: %w", err)
 	}
 
-	// order is newest-first; emit oldest-first, skipping any half pair.
+	// order is newest-first; emit oldest-first, skipping a turn with no text.
+	// A skipped turn leaves a gap in Positions, which is why they are
+	// returned rather than left to be derived from Head.
 	turns := make([]Turn, 0, len(order))
+	positions := make([]int64, 0, len(order))
 	for i := len(order) - 1; i >= 0; i-- {
 		t := byTurn[order[i]]
 		if t.UserText == "" && t.AssistantText == "" {
 			continue
 		}
 		turns = append(turns, *t)
+		positions = append(positions, order[i])
 	}
 	if len(turns) == 0 {
-		return nil, nil
+		return Window{Compactions: compactions}, nil
 	}
-	return turns, nil
+	return Window{Turns: turns, Positions: positions, Head: positions[len(positions)-1], Compactions: compactions}, nil
 }
 
 // GetConversation implements [Reader]: one conversation's metadata by
@@ -445,25 +473,25 @@ func (s *PostgresStore) Append(ctx context.Context, projectName, contextID strin
 	return nil
 }
 
-// Compact implements [Store.Compact]: one transaction that deletes every
-// existing message row for the conversation and re-inserts summary followed
-// by keep as fresh, sequential (project_name, context_id, seq) pairs starting
-// at 1 again. Old seq values cannot simply be reused once the rows between
-// them are gone, so this renumbers from scratch rather than trying to splice
-// into the existing sequence — the conversation's turn_count is reset to
-// match (1 + len(keep)) in the same transaction so later Appends continue the
-// new, shorter sequence correctly. archived_at is untouched: unlike a turn,
-// compaction is not the user asking for the conversation back.
-func (s *PostgresStore) Compact(ctx context.Context, projectName, contextID string, summary Turn, keep []Turn) error {
+// Compact implements [Store.Compact] by turn position, in one transaction.
+// It first creates or locks the conversation row — the same row every Append
+// upserts — so an Append that committed before it is visible here and kept,
+// and an Append that comes after it waits and continues from the new
+// turn_count. Inside that lock it refuses a caller whose window predates
+// another compaction ([ErrCompactStale]), deletes the message rows of turns
+// 1..through, moves the surviving rows down so the summary takes turn 1 and
+// the rest follow densely, sets turn_count to match and counts the
+// compaction. Creating the row before touching messages is what lets the
+// messages foreign key hold on a conversation compacted before its first
+// Append. archived_at is untouched:
+// unlike a turn, compaction is not the user asking for the conversation back.
+func (s *PostgresStore) Compact(ctx context.Context, projectName, contextID string, summary Turn, through, compactions int64) error {
+	if through < 0 {
+		return fmt.Errorf("conversation store: compact through %d: %w", through, ErrCompactRange)
+	}
 	ctx, cancel := context.WithTimeout(ctx, dbOpTimeout)
 	defer cancel()
 	summary = clampTurn(summary)
-
-	turns := make([]Turn, 0, 1+len(keep))
-	turns = append(turns, summary)
-	for _, t := range keep {
-		turns = append(turns, clampTurn(t))
-	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -471,37 +499,58 @@ func (s *PostgresStore) Compact(ctx context.Context, projectName, contextID stri
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	var head, done int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO conversations (project_name, context_id, turn_count)
+		 VALUES ($1, $2, 0)
+		 ON CONFLICT (project_name, context_id) DO UPDATE SET last_active_at = now()
+		 RETURNING turn_count, compactions`,
+		projectName, contextID).Scan(&head, &done); err != nil {
+		return fmt.Errorf("conversation store: compact: lock conversation: %w", err)
+	}
+	if compactions != done {
+		return fmt.Errorf("conversation store: compact from compaction %d of %d: %w", compactions, done, ErrCompactStale)
+	}
+	if through > head {
+		return fmt.Errorf("conversation store: compact through %d of %d: %w", through, head, ErrCompactRange)
+	}
+
 	if _, err := tx.Exec(ctx,
-		`DELETE FROM messages WHERE project_name = $1 AND context_id = $2`,
-		projectName, contextID); err != nil {
+		`DELETE FROM messages WHERE project_name = $1 AND context_id = $2 AND seq <= $3`,
+		projectName, contextID, 2*through); err != nil {
 		return fmt.Errorf("conversation store: compact: delete messages: %w", err)
 	}
 
-	batch := &pgx.Batch{}
-	for i, t := range turns {
-		turnNo := int64(i + 1)
-		batch.Queue(
-			`INSERT INTO messages (project_name, context_id, seq, role, content)
-			 VALUES ($1, $2, $3, 'user', $4), ($1, $2, $5, 'assistant', $6)`,
-			projectName, contextID, 2*turnNo-1, t.UserText, 2*turnNo, t.AssistantText)
-	}
-	br := tx.SendBatch(ctx, batch)
-	for range turns {
-		if _, err := br.Exec(); err != nil {
-			br.Close()
-			return fmt.Errorf("conversation store: compact: insert messages: %w", err)
+	// Turn k > through becomes turn k-through+1, i.e. seq drops by
+	// 2*(through-1) (or rises by 2 when through is 0). The rows go through
+	// negative seq first: moving them in one UPDATE can collide with a row
+	// not yet moved, since the primary key is checked row by row.
+	if shift := 2 * (through - 1); shift != 0 {
+		if _, err := tx.Exec(ctx,
+			`UPDATE messages SET seq = -seq
+			 WHERE project_name = $1 AND context_id = $2 AND seq > $3`,
+			projectName, contextID, 2*through); err != nil {
+			return fmt.Errorf("conversation store: compact: renumber messages: %w", err)
 		}
-	}
-	if err := br.Close(); err != nil {
-		return fmt.Errorf("conversation store: compact: insert messages: %w", err)
+		if _, err := tx.Exec(ctx,
+			`UPDATE messages SET seq = -seq - $3
+			 WHERE project_name = $1 AND context_id = $2 AND seq < 0`,
+			projectName, contextID, shift); err != nil {
+			return fmt.Errorf("conversation store: compact: renumber messages: %w", err)
+		}
 	}
 
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO conversations (project_name, context_id, turn_count)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (project_name, context_id) DO UPDATE
-		   SET turn_count = $3, last_active_at = now()`,
-		projectName, contextID, int64(len(turns))); err != nil {
+		`INSERT INTO messages (project_name, context_id, seq, role, content)
+		 VALUES ($1, $2, 1, 'user', $3), ($1, $2, 2, 'assistant', $4)`,
+		projectName, contextID, summary.UserText, summary.AssistantText); err != nil {
+		return fmt.Errorf("conversation store: compact: insert summary: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE conversations SET turn_count = $3, compactions = compactions + 1
+		 WHERE project_name = $1 AND context_id = $2`,
+		projectName, contextID, head-through+1); err != nil {
 		return fmt.Errorf("conversation store: compact: update conversation: %w", err)
 	}
 
