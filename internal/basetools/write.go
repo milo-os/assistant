@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,9 @@ const (
 	ResourcesPlanToolName = "resources_plan"
 	// ResourcesApplyToolName carries out a plan that was agreed to.
 	ResourcesApplyToolName = "resources_apply"
+	// PlanApprovalPrefix starts the exact message a person sends to approve
+	// a plan in words: the prefix, then the plan's approval code.
+	PlanApprovalPrefix = "Approve plan "
 )
 
 const (
@@ -127,6 +131,10 @@ type PlanOutput struct {
 	PlanToken string `json:"planToken,omitempty"`
 	// ExpiresAt is when the token stops being accepted, in RFC 3339.
 	ExpiresAt string `json:"expiresAt,omitempty"`
+	// ApprovalCode names this plan for a person to approve in words, by
+	// replying exactly PlanApprovalPrefix + ApprovalCode, where no plan card is
+	// drawn. Planning the same change again gives the same code.
+	ApprovalCode string `json:"approvalCode,omitempty"`
 	// Note carries anything about the plan the person should hear.
 	Note string `json:"note,omitempty"`
 }
@@ -258,10 +266,14 @@ func resourcesPlan(opts Options) *tool {
 			expiry := opts.now().Add(plantoken.TTL)
 			out.PlanToken = plantoken.Mint(opts.PlanTokenKey, binding, expiry)
 			out.ExpiresAt = expiry.UTC().Format(time.RFC3339)
+			out.ApprovalCode = plantoken.ApprovalCode(opts.PlanTokenKey, binding)
 			if len(ordered) > 1 {
 				out.Note = "These are applied in the order shown, because a later one refers to an " +
-					"earlier one. Hand them back to " + ResourcesApplyToolName + " in exactly this order."
+					"earlier one. Hand them back to " + ResourcesApplyToolName + " in exactly this order. "
 			}
+			out.Note += "Applying needs the person's own approval in a later message: where no plan card " +
+				"is shown, tell them to reply exactly \"" + PlanApprovalPrefix + out.ApprovalCode +
+				"\", then stop and wait. On that turn, plan the same manifests again and apply them."
 			return result(out)
 		},
 	)
@@ -390,6 +402,14 @@ func resourcesApply(opts Options) *tool {
 				}
 			}
 
+			// Only now, with the plan proven and accepted again, ask whether a
+			// person approved it in this turn. The token alone proves which
+			// plan, not that anybody agreed to it: the model holds it.
+			if err := CheckApplyApproval(ctx, args.PlanToken,
+				plantoken.ApprovalCode(opts.PlanTokenKey, binding)); err != nil {
+				return "", err
+			}
+
 			out := ApplyOutput{Applied: make([]AppliedResource, 0, len(items))}
 			for _, item := range items {
 				action := actionCreate
@@ -421,8 +441,21 @@ func resourcesApply(opts Options) *tool {
 // partialFailure reports a change that stopped part-way. What was done stays
 // done, so naming it exactly is what lets the person carry on instead of
 // guessing.
+//
+// A failed write is only reported as not done when the platform cannot have
+// applied it. When the request may have reached the platform, the model is
+// told so and sent to read the resource back, because applying again on a
+// guess can repeat a change that already landed.
 func partialFailure(applied []AppliedResource, failed *manifestItem, err error) error {
+	landed := mayHaveLanded(err)
 	if len(applied) == 0 {
+		if landed {
+			return fmt.Errorf(
+				"this change may have been applied: %s %q was sent to the platform, but the call "+
+					"failed before it answered (%w). Do not apply again yet. Read it back with %s, "+
+					"tell the person what is actually there, and only then plan any retry",
+				failed.kind, failed.name, err, ResourcesGetToolName)
+		}
 		return fmt.Errorf("nothing was changed: %s %q could not be applied: %w",
 			failed.kind, failed.name, err)
 	}
@@ -430,10 +463,33 @@ func partialFailure(applied []AppliedResource, failed *manifestItem, err error) 
 	for _, resource := range applied {
 		done = append(done, fmt.Sprintf("%s %s (%sd)", resource.Kind, resource.Name, resource.Action))
 	}
+	if landed {
+		return fmt.Errorf(
+			"this change stopped part-way. Already done, and still done: %s. %s %q may also have "+
+				"been applied: it was sent to the platform, but the call failed before it answered (%w). "+
+				"Nothing after it was attempted. Read %s %q back with %s before retrying anything, "+
+				"tell the person exactly this, then plan the rest again",
+			strings.Join(done, ", "), failed.kind, failed.name, err, failed.kind, failed.name, ResourcesGetToolName)
+	}
 	return fmt.Errorf(
 		"this change stopped part-way. Already done, and still done: %s. Not done: %s %q, because %w. "+
 			"Nothing after it was attempted either. Tell the person exactly this, then plan the rest again",
 		strings.Join(done, ", "), failed.kind, failed.name, err)
+}
+
+// mayHaveLanded reports whether a failed write might still have been applied.
+// It is false only when the request never left ([projectapi.ErrNotSent]) or
+// the platform answered with a rejection. A 5xx, a 408, a dropped connection
+// or an unreadable reply all leave the outcome open.
+func mayHaveLanded(err error) bool {
+	if errors.Is(err, projectapi.ErrNotSent) {
+		return false
+	}
+	var apiErr *projectapi.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code >= http.StatusInternalServerError || apiErr.Code == http.StatusRequestTimeout
+	}
+	return true
 }
 
 // ------------------------------------------------------------------ parsing

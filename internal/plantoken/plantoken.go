@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,6 +36,9 @@ const (
 	// version prefixes the hashed payload so a later change to what the token
 	// covers cannot be confused with today's.
 	version = "plan.v1"
+
+	// approvalVersion domain-separates [ApprovalCode] from token MACs.
+	approvalVersion = "plan-approval.v1"
 
 	// keyBytes is the size of a generated key.
 	keyBytes = 32
@@ -150,6 +154,20 @@ func Verify(key []byte, token string, binding Binding, now time.Time, planTool s
 // two bindings can be built from the same bytes; without it, manifests split
 // differently would hash alike.
 func mac(key []byte, binding Binding, expiryUnix int64) []byte {
+	return macOf(key, version, binding, strconv.FormatInt(expiryUnix, 10))
+}
+
+// ApprovalCode names a plan for a person to approve by typing it back. It
+// covers the same binding as a token but not the expiry, so planning the same
+// change again gives the same code, and any change to a manifest, their
+// order, the project, or a resource it would replace gives a different one.
+// It authorizes nothing on its own: it only says which plan a person meant.
+func ApprovalCode(key []byte, binding Binding) string {
+	sum := macOf(key, approvalVersion, binding, "")
+	return "plan-" + hex.EncodeToString(sum[:8])
+}
+
+func macOf(key []byte, version string, binding Binding, expiry string) []byte {
 	var payload bytes.Buffer
 	writePart(&payload, []byte(version))
 	writePart(&payload, []byte(binding.Project))
@@ -161,7 +179,7 @@ func mac(key []byte, binding Binding, expiryUnix int64) []byte {
 	for _, resourceVersion := range binding.ResourceVersions {
 		writePart(&payload, []byte(resourceVersion))
 	}
-	writePart(&payload, []byte(strconv.FormatInt(expiryUnix, 10)))
+	writePart(&payload, []byte(expiry))
 
 	hash := hmac.New(sha256.New, key)
 	hash.Write(payload.Bytes())

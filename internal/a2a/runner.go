@@ -32,6 +32,9 @@ type RunRequest struct {
 	// ContextID is the A2A contextId == conversation id == metering resource.
 	ContextID string
 	TaskID    string
+	// MessageID is the sender's id for the message (A2A messageId). Empty
+	// on the HTTP paths, which have none.
+	MessageID string
 	// Mentions are the resources the user pointed at with "@kind/name". They
 	// are advisory context for the turn, already present verbatim in UserText.
 	Mentions []Mention

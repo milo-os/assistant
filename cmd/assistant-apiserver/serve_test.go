@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"k8s.io/apiserver/pkg/server/options"
+
+	"github.com/milo-os/assistant/internal/config"
 )
 
 // validate guards the one hard requirement to start: a conversation-store DSN.
@@ -46,5 +48,34 @@ func TestRequestHeaderUIDHeadersAccepted(t *testing.T) {
 	if errs := opts.RequestHeader.Validate(); len(errs) > 0 {
 		t.Fatalf("--requestheader-uid-headers rejected, so the caller's UID would "+
 			"be dropped and Milo would deny every request: %v", errs)
+	}
+}
+
+// The endpoint resource advertises the same normalized address the agent card
+// and usage events use, and nothing at all when PUBLIC_BASE_URL is unset.
+func TestAdvertisedBaseURL(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		cfg  string
+		want string
+	}{
+		{"set, trailing slash trimmed by config", "https://assistant.example.com/", "https://assistant.example.com", "https://assistant.example.com"},
+		{"unset ignores the localhost fallback", "", "http://localhost:7820", ""},
+		{"blank counts as unset", "  ", "http://localhost:7820", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(key string) string {
+				if key == "PUBLIC_BASE_URL" {
+					return tc.env
+				}
+				return ""
+			}
+			got := advertisedBaseURL(getenv, &config.Config{PublicBaseURL: tc.cfg})
+			if got != tc.want {
+				t.Fatalf("advertisedBaseURL = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

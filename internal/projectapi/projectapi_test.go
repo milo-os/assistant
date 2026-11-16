@@ -473,3 +473,45 @@ func TestNestedHelpers(t *testing.T) {
 		t.Fatal("ConditionTrue(Available) should be false")
 	}
 }
+
+// A write that never reached the platform matches ErrNotSent, so the change
+// path can say nothing was changed. One that reached it and lost its answer
+// must not, because it may have been applied.
+func TestWriteFailuresSayWhetherTheRequestWasSent(t *testing.T) {
+	hangUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer hangUp.Close()
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+
+	tests := []struct {
+		name        string
+		baseURL     string
+		wantNotSent bool
+	}{
+		{"connection refused", gone.URL, true},
+		{"connection dropped after sending", hangUp.URL, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := projectapi.New(projectapi.Config{BaseURL: tt.baseURL, AllowInsecureCredentialForwarding: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			obj := projectapi.Object{"metadata": map[string]any{"name": "api", "namespace": "default"}}
+			_, err = client.As("demo", "tok").Create(context.Background(),
+				projectapi.Resource{Group: "compute.datumapis.com", Version: "v1alpha1",
+					Resource: "workloads", Kind: "Workload", Namespaced: true}, obj, false)
+			if err == nil {
+				t.Fatal("Create succeeded, want an error")
+			}
+			if got := errors.Is(err, projectapi.ErrNotSent); got != tt.wantNotSent {
+				t.Fatalf("errors.Is(err, projectapi.ErrNotSent) = %v, want %v (err: %v)", got, tt.wantNotSent, err)
+			}
+		})
+	}
+}

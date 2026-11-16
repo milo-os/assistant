@@ -81,6 +81,7 @@ func (e *Executor) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter
 			ProjectName:  projectName,
 			ContextID:    ec.ContextID,
 			TaskID:       string(ec.TaskID),
+			MessageID:    messageID(ec.Message),
 			Mentions:     Mentions(ec.Message, ec.Metadata),
 		}, sink)
 		if sink.stopped {

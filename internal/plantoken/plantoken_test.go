@@ -217,3 +217,30 @@ func assertRefusalIsUseful(t *testing.T, refusal, planTool string) {
 		t.Errorf("the refusal does not say what to do instead: %q", refusal)
 	}
 }
+
+func TestApprovalCodeNamesTheBindingNotTheToken(t *testing.T) {
+	binding := plantoken.Binding{Project: "demo", Manifests: [][]byte{[]byte(`{"kind":"Workload"}`)}, ResourceVersions: []string{""}}
+
+	code := plantoken.ApprovalCode(key, binding)
+	if !strings.HasPrefix(code, "plan-") || len(code) != len("plan-")+16 {
+		t.Fatalf("code = %q", code)
+	}
+	if again := plantoken.ApprovalCode(key, binding); again != code {
+		t.Fatal("the same binding must give the same code")
+	}
+	moved := binding
+	moved.ResourceVersions = []string{"7"}
+	other := binding
+	other.Project = "other"
+	for name, b := range map[string]plantoken.Binding{"resource changed": moved, "other project": other} {
+		if plantoken.ApprovalCode(key, b) == code {
+			t.Errorf("%s: code did not change", name)
+		}
+	}
+	if plantoken.ApprovalCode([]byte("another-key-long-enough-to-be-one"), binding) == code {
+		t.Error("code does not depend on the key")
+	}
+	if strings.Contains(plantoken.Mint(key, binding, time.Unix(0, 0)), strings.TrimPrefix(code, "plan-")) {
+		t.Error("code reuses token bytes")
+	}
+}

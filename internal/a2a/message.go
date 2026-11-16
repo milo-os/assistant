@@ -46,6 +46,14 @@ func ApprovalText(msg *a2a.Message) string {
 	return msg.Parts[0].Text()
 }
 
+// messageID is the sender's id for msg, or empty without one.
+func messageID(msg *a2a.Message) string {
+	if msg == nil {
+		return ""
+	}
+	return msg.ID
+}
+
 func metaString(meta map[string]any, key string) string {
 	if meta == nil {
 		return ""

@@ -1,7 +1,9 @@
 package basetools_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -481,8 +483,7 @@ func TestApplyReportsAChangeThatStoppedPartWay(t *testing.T) {
 
 	// The second write fails after the first succeeded. Its dry run still
 	// passes, which is how a change gets part-way.
-	p.overrideWrite(http.MethodPost, "/workloads",
-		reply{code: 500, body: `{"kind":"Status","code":500,"message":"the platform is unwell"}`})
+	p.overrideWrite(http.MethodPost, "/workloads", status(422, "the project is out of allowance"))
 
 	refusal := callErr(t, p.writeTools(t, "demo", "tok"), basetools.ResourcesApplyToolName,
 		applyInput(plan.PlanToken, plan.Results[0].Manifest, plan.Results[1].Manifest))
@@ -492,6 +493,71 @@ func TestApplyReportsAChangeThatStoppedPartWay(t *testing.T) {
 	}
 	if !strings.Contains(refusal, "Network default") {
 		t.Fatalf("it must name what was done: %q", refusal)
+	}
+	if !strings.Contains(refusal, `Not done: Workload "api"`) {
+		t.Fatalf("a rejected write must be named as not done: %q", refusal)
+	}
+}
+
+// A write that reached the platform but got no clear answer may have landed.
+// Saying "nothing was changed" there would send the model to apply again on
+// a guess, so it is told to read the resource back first.
+func TestApplyReportsAWriteThatMayHaveLanded(t *testing.T) {
+	tests := []struct {
+		name   string
+		answer reply
+	}{
+		{"connection dropped after sending", reply{hangUp: true}},
+		{"gateway timeout", status(504, "the server was unable to return a response in time")},
+		{"server error", status(500, "the platform is unwell")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := writePlatform(t)
+			plan := planOf(t, p.writeTools(t, "demo", "tok"), workloadManifest)
+			p.overrideWrite(http.MethodPost, "/workloads", tt.answer)
+
+			refusal := callErr(t, p.writeTools(t, "demo", "tok"), basetools.ResourcesApplyToolName,
+				applyInput(plan.PlanToken, plan.Results[0].Manifest))
+
+			if strings.Contains(refusal, "nothing was changed") {
+				t.Fatalf("an ambiguous write must not claim nothing changed: %q", refusal)
+			}
+			if !strings.Contains(refusal, "may have been applied") {
+				t.Fatalf("refusal must say the change may have landed: %q", refusal)
+			}
+			if !strings.Contains(refusal, basetools.ResourcesGetToolName) {
+				t.Fatalf("refusal must send the model to read it back: %q", refusal)
+			}
+		})
+	}
+}
+
+// The same holds part-way: the write that broke is named as possibly applied,
+// not as not done.
+func TestApplyPartWayReportsAWriteThatMayHaveLanded(t *testing.T) {
+	p := newPlatform(t).
+		route("/apis/compute.datumapis.com/v1alpha1",
+			ok(`{"resources":[{"name":"workloads","kind":"Workload","namespaced":true},
+				{"name":"networks","kind":"Network","namespaced":true}]}`)).
+		routeFor(http.MethodGet, "/workloads/api", status(404, "not found")).
+		routeFor(http.MethodGet, "/networks/default", status(404, "not found")).
+		routeFor(http.MethodPost, "/networks", ok(`{"metadata":{"name":"default"}}`)).
+		routeFor(http.MethodPost, "/workloads", ok(`{"metadata":{"name":"api"}}`))
+	plan := planOf(t, p.writeTools(t, "demo", "tok"), workloadManifest, networkManifest)
+	p.overrideWrite(http.MethodPost, "/workloads", reply{hangUp: true})
+
+	refusal := callErr(t, p.writeTools(t, "demo", "tok"), basetools.ResourcesApplyToolName,
+		applyInput(plan.PlanToken, plan.Results[0].Manifest, plan.Results[1].Manifest))
+
+	if !strings.Contains(refusal, "Network default") {
+		t.Fatalf("it must name what was done: %q", refusal)
+	}
+	if strings.Contains(refusal, "Not done") {
+		t.Fatalf("an ambiguous write must not be called not done: %q", refusal)
+	}
+	if !strings.Contains(refusal, `Workload "api" may also have been applied`) {
+		t.Fatalf("refusal must say the broken write may have landed: %q", refusal)
 	}
 }
 
@@ -573,4 +639,81 @@ func assertRefusedAndUnchanged(t *testing.T, p *platform, refusal string) {
 		t.Errorf("the refusal does not say what to do instead: %q", refusal)
 	}
 	assertNothingPersisted(t, p)
+}
+
+// ---------------------------------------------------------------- approval
+
+type recordingApproval struct {
+	tokens, codes []string
+	err           error
+}
+
+func (a *recordingApproval) Approve(_ context.Context, token, code string) error {
+	a.tokens = append(a.tokens, token)
+	a.codes = append(a.codes, code)
+	return a.err
+}
+
+// The token is in the model's hands, so it can never be the approval: with
+// nothing in the turn to approve, a valid plan still writes nothing.
+func TestApplyWithoutAnApprovalWritesNothing(t *testing.T) {
+	p := writePlatform(t)
+	tools := p.writeTools(t, "demo", "tok")
+	plan := planOf(t, tools, workloadManifest)
+
+	_, err := tools[basetools.ResourcesApplyToolName].Execute(context.Background(),
+		json.RawMessage(applyInput(plan.PlanToken, plan.Results[0].Manifest)))
+	if err == nil || !strings.Contains(err.Error(), "no person has approved this plan") {
+		t.Fatalf("err = %v, want a refusal that asks for approval", err)
+	}
+	if writes := persistedWrites(p); len(writes) != 0 {
+		t.Fatalf("writes = %+v, want none", writes)
+	}
+}
+
+func TestApplyAsksTheApprovalForThisPlanAndHonoursARefusal(t *testing.T) {
+	p := writePlatform(t)
+	tools := p.writeTools(t, "demo", "tok")
+	plan := planOf(t, tools, workloadManifest)
+	if !strings.HasPrefix(plan.ApprovalCode, "plan-") ||
+		!strings.Contains(plan.Note, basetools.PlanApprovalPrefix+plan.ApprovalCode) {
+		t.Fatalf("plan must name its approval code and the exact reply: code=%q note=%q",
+			plan.ApprovalCode, plan.Note)
+	}
+	if again := planOf(t, tools, workloadManifest); again.ApprovalCode != plan.ApprovalCode {
+		t.Fatalf("planning the same change again changed the code: %q → %q", plan.ApprovalCode, again.ApprovalCode)
+	}
+
+	approval := &recordingApproval{err: errors.New("not approved")}
+	ctx := basetools.WithApplyApproval(context.Background(), approval)
+	_, err := tools[basetools.ResourcesApplyToolName].Execute(ctx,
+		json.RawMessage(applyInput(plan.PlanToken, plan.Results[0].Manifest)))
+	if err == nil || err.Error() != "not approved" {
+		t.Fatalf("err = %v, want the approval's refusal", err)
+	}
+	if len(approval.tokens) != 1 || approval.tokens[0] != plan.PlanToken || approval.codes[0] != plan.ApprovalCode {
+		t.Fatalf("approval asked with tokens=%v codes=%v", approval.tokens, approval.codes)
+	}
+	if writes := persistedWrites(p); len(writes) != 0 {
+		t.Fatalf("writes = %+v, want none", writes)
+	}
+}
+
+// A bad token is refused before the approval is asked, so a mistake never
+// uses up the person's approval.
+func TestApplyChecksTheTokenBeforeAskingForApproval(t *testing.T) {
+	p := writePlatform(t)
+	tools := p.writeTools(t, "demo", "tok")
+	plan := planOf(t, tools, workloadManifest)
+	edited := strings.Replace(plan.Results[0].Manifest, "replicas: 2", "replicas: 20", 1)
+
+	approval := &recordingApproval{}
+	ctx := basetools.WithApplyApproval(context.Background(), approval)
+	if _, err := tools[basetools.ResourcesApplyToolName].Execute(ctx,
+		json.RawMessage(applyInput(plan.PlanToken, edited))); err == nil {
+		t.Fatal("an edited manifest was applied")
+	}
+	if len(approval.tokens) != 0 {
+		t.Fatalf("approval was asked for a plan that did not verify: %v", approval.tokens)
+	}
 }

@@ -131,8 +131,8 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		// After compaction the summary turn's synthetic marker sits at the
 		// head of the transcript; the title must skip it and pick the oldest
 		// real user message that survived.
-		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"),
-			[]Turn{{UserText: "and the edge-cache one?", AssistantText: "a"}}); err != nil {
+		// The summary replaces turn 1; turns 2 and 3 stay.
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), 1, 0); err != nil {
 			t.Fatal(err)
 		}
 		got, err = s.GetConversation(ctx, project, contextID)
@@ -140,7 +140,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 			t.Fatalf("post-compact title = %q, %v", got.Title, err)
 		}
 		// Only a summary left: no title rather than the marker text.
-		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), nil); err != nil {
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), 3, 1); err != nil {
 			t.Fatal(err)
 		}
 		got, err = s.GetConversation(ctx, project, contextID)
@@ -302,7 +302,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		if err := s.Rename(ctx, project, contextID, "named while archived"); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), nil); err != nil {
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), 1, 0); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := s.GetConversation(ctx, project, contextID); err != nil || got.ArchivedAt.IsZero() {
@@ -389,7 +389,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 			{UserText: "u4", AssistantText: "a4"},
 			{UserText: "u5", AssistantText: "a5"},
 		}
-		if err := s.Compact(ctx, project, contextID, summary, keep); err != nil {
+		if err := s.Compact(ctx, project, contextID, summary, 3, 0); err != nil {
 			t.Fatal(err)
 		}
 		turns, err := s.Turns(ctx, project, contextID)
@@ -416,14 +416,14 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		}
 	})
 
-	t.Run("compact with empty keep leaves only the summary", func(t *testing.T) {
+	t.Run("compact through the newest turn leaves only the summary", func(t *testing.T) {
 		s := newStore(t)
 		project, contextID := fresh("compact-empty")
 		if err := s.Append(ctx, project, contextID, Turn{UserText: "u1", AssistantText: "a1"}); err != nil {
 			t.Fatal(err)
 		}
 		summary := NewSummaryTurn("everything digested")
-		if err := s.Compact(ctx, project, contextID, summary, nil); err != nil {
+		if err := s.Compact(ctx, project, contextID, summary, 1, 0); err != nil {
 			t.Fatal(err)
 		}
 		turns, err := s.Turns(ctx, project, contextID)
@@ -439,16 +439,26 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 		s := newStore(t)
 		project, contextID := fresh("compact-fresh")
 		summary := NewSummaryTurn("digest")
-		keep := []Turn{{UserText: "u1", AssistantText: "a1"}}
-		if err := s.Compact(ctx, project, contextID, summary, keep); err != nil {
+		if err := s.Compact(ctx, project, contextID, summary, 0, 0); err != nil {
 			t.Fatal(err)
 		}
 		turns, err := s.Turns(ctx, project, contextID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(turns) != 2 || !IsSummaryTurn(turns[0]) || turns[1] != keep[0] {
+		if len(turns) != 1 || !IsSummaryTurn(turns[0]) {
 			t.Fatalf("turns after compact on fresh conversation = %+v", turns)
+		}
+		conv, err := s.GetConversation(ctx, project, contextID)
+		if err != nil || conv.TurnCount != 1 {
+			t.Fatalf("conversation after compact on fresh conversation = %+v, %v", conv, err)
+		}
+		// The next turn continues after the summary.
+		if err := s.Append(ctx, project, contextID, Turn{UserText: "u1", AssistantText: "a1"}); err != nil {
+			t.Fatal(err)
+		}
+		if turns, err := s.Turns(ctx, project, contextID); err != nil || len(turns) != 2 || turns[1].UserText != "u1" {
+			t.Fatalf("turns after append = %+v, %v", turns, err)
 		}
 	})
 
@@ -465,8 +475,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 			}
 		}
 		summary := NewSummaryTurn("digest of u1-u2")
-		keep := []Turn{{UserText: "u3", AssistantText: "a3"}, {UserText: "u4", AssistantText: "a4"}}
-		if err := s.Compact(ctx, project, contextID, summary, keep); err != nil {
+		if err := s.Compact(ctx, project, contextID, summary, 2, 0); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.Append(ctx, project, contextID, Turn{UserText: "u5", AssistantText: "a5"}); err != nil {
@@ -498,8 +507,7 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 			t.Fatal(err)
 		}
 		summary := NewSummaryTurn("digest of u1")
-		keep := []Turn{{UserText: "u2", AssistantText: "a2"}}
-		if err := s.Compact(ctx, project, contextID, summary, keep); err != nil {
+		if err := s.Compact(ctx, project, contextID, summary, 1, 0); err != nil {
 			t.Fatal(err)
 		}
 
@@ -532,6 +540,219 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 			if m.Seq != int64(i+1) {
 				t.Fatalf("msgs[%d].Seq = %d, want %d (dense monotonic seq)", i, m.Seq, i+1)
 			}
+		}
+	})
+
+	t.Run("window head is the newest turn's position", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("window-head")
+		if w, err := s.Window(ctx, project, contextID); err != nil || w.Head != 0 || w.Turns != nil {
+			t.Fatalf("empty window = %+v, %v", w, err)
+		}
+		appendTurns(t, s, project, contextID, 1, 3)
+		w, err := s.Window(ctx, project, contextID)
+		if err != nil || w.Head != 3 || len(w.Turns) != 3 {
+			t.Fatalf("window = %+v, %v; want head 3 over 3 turns", w, err)
+		}
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), 2, 0); err != nil {
+			t.Fatal(err)
+		}
+		w, err = s.Window(ctx, project, contextID)
+		if err != nil || w.Head != 2 || len(w.Turns) != 2 || w.Turns[1].UserText != "u3" {
+			t.Fatalf("window after compact = %+v, %v; want summary then u3 at head 2", w, err)
+		}
+	})
+
+	t.Run("a turn appended while compacting survives", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("compact-inflight")
+		appendTurns(t, s, project, contextID, 1, 4)
+		// The agent reads the window and starts summarizing u1-u2 ...
+		w, err := s.Window(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// ... another turn of the conversation finishes meanwhile ...
+		appendTurns(t, s, project, contextID, 5, 5)
+		// ... and the summary lands, naming the turns it was built from.
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest of u1-u2"), w.Head-2, w.Compactions); err != nil {
+			t.Fatal(err)
+		}
+		appendTurns(t, s, project, contextID, 6, 6)
+
+		turns, err := s.Turns(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := userTexts(turns); got != "[conversation summary] u3 u4 u5 u6" {
+			t.Fatalf("turns after in-flight compaction = %q", got)
+		}
+		if conv, err := s.GetConversation(ctx, project, contextID); err != nil || conv.TurnCount != 5 {
+			t.Fatalf("conversation = %+v, %v; want TurnCount 5", conv, err)
+		}
+	})
+
+	t.Run("appends racing a compaction are all kept", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("compact-race")
+		appendTurns(t, s, project, contextID, 1, 3)
+		w, err := s.Window(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const n = 8
+		var wg sync.WaitGroup
+		errs := make(chan error, n+1)
+		for i := range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs <- s.Append(ctx, project, contextID, Turn{
+					UserText: fmt.Sprintf("r%d", i), AssistantText: "a"})
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), w.Head-1, w.Compactions)
+		}()
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		turns, err := s.Turns(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// summary + u3 (kept) + every racing append, none torn or lost.
+		if len(turns) != 2+n || !IsSummaryTurn(turns[0]) || turns[1].UserText != "u3" {
+			t.Fatalf("turns after racing compaction = %q", userTexts(turns))
+		}
+		seen := map[string]bool{}
+		for _, turn := range turns[2:] {
+			if turn.AssistantText != "a" {
+				t.Fatalf("torn turn: %+v", turn)
+			}
+			seen[turn.UserText] = true
+		}
+		if len(seen) != n {
+			t.Fatalf("racing appends lost: %q", userTexts(turns))
+		}
+	})
+
+	t.Run("compact past the newest turn changes nothing", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("compact-range")
+		appendTurns(t, s, project, contextID, 1, 2)
+		for _, through := range []int64{-1, 3} {
+			err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), through, 0)
+			if !errors.Is(err, ErrCompactRange) {
+				t.Fatalf("Compact(through=%d) = %v, want ErrCompactRange", through, err)
+			}
+		}
+		if turns, err := s.Turns(ctx, project, contextID); err != nil || userTexts(turns) != "u1 u2" {
+			t.Fatalf("turns after rejected compaction = %q, %v", userTexts(turns), err)
+		}
+		if _, err := s.GetConversation(ctx, project, "ctx-never-seen-"+uniqueSuffix(t)); !errors.Is(err, ErrConversationNotFound) {
+			t.Fatalf("unknown conversation = %v", err)
+		}
+		if err := s.Compact(ctx, project, "ctx-range-fresh-"+uniqueSuffix(t), NewSummaryTurn("d"), 1, 0); !errors.Is(err, ErrCompactRange) {
+			t.Fatalf("Compact(through=1) on a fresh conversation = %v, want ErrCompactRange", err)
+		}
+	})
+
+	t.Run("a second compaction from the same window is refused", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("compact-stale")
+		appendTurns(t, s, project, contextID, 1, 6)
+		// Two replicas read the same window and both decide to compact.
+		w, err := s.Window(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A summarizes u1-u2 and commits first, renumbering the turns.
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest A"), w.Positions[1], w.Compactions); err != nil {
+			t.Fatal(err)
+		}
+		// B summarized only u1; its through is a position in the numbering
+		// A just replaced, where it would name A's summary.
+		err = s.Compact(ctx, project, contextID, NewSummaryTurn("digest B"), w.Positions[0], w.Compactions)
+		if !errors.Is(err, ErrCompactStale) {
+			t.Fatalf("second Compact = %v, want ErrCompactStale", err)
+		}
+		turns, err := s.Turns(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := userTexts(turns); got != "[conversation summary] u3 u4 u5 u6" || turns[0].AssistantText != "digest A" {
+			t.Fatalf("turns after refused compaction = %q (%q)", got, turns[0].AssistantText)
+		}
+		if conv, err := s.GetConversation(ctx, project, contextID); err != nil || conv.TurnCount != 5 {
+			t.Fatalf("conversation = %+v, %v; want TurnCount 5", conv, err)
+		}
+		// A fresh read sees the new count and compacts again.
+		w, err = s.Window(ctx, project, contextID)
+		if err != nil || w.Compactions != 1 {
+			t.Fatalf("window after compaction = %+v, %v; want Compactions 1", w, err)
+		}
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest C"), w.Positions[1], w.Compactions); err != nil {
+			t.Fatal(err)
+		}
+		if turns, err := s.Turns(ctx, project, contextID); err != nil || userTexts(turns) != "[conversation summary] u4 u5 u6" {
+			t.Fatalf("turns after re-read compaction = %q, %v", userTexts(turns), err)
+		}
+	})
+
+	t.Run("a compaction after an append still applies", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("compact-after-append")
+		appendTurns(t, s, project, contextID, 1, 3)
+		w, err := s.Window(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// An append does not renumber, so it does not make the window stale.
+		appendTurns(t, s, project, contextID, 4, 4)
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), w.Positions[0], w.Compactions); err != nil {
+			t.Fatalf("Compact after append = %v", err)
+		}
+		if turns, err := s.Turns(ctx, project, contextID); err != nil || userTexts(turns) != "[conversation summary] u2 u3 u4" {
+			t.Fatalf("turns = %q, %v", userTexts(turns), err)
+		}
+	})
+
+	t.Run("window positions hold across an empty turn", func(t *testing.T) {
+		s := newStore(t)
+		project, contextID := fresh("window-gap")
+		appendTurns(t, s, project, contextID, 1, 2)
+		if err := s.Append(ctx, project, contextID, Turn{}); err != nil {
+			t.Fatal(err)
+		}
+		appendTurns(t, s, project, contextID, 4, 5)
+		w, err := s.Window(ctx, project, contextID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A store may leave the empty turn out; either way every returned
+		// turn carries its own position and the newest is the head.
+		if len(w.Positions) != len(w.Turns) || w.Head != 5 || w.Positions[len(w.Positions)-1] != 5 {
+			t.Fatalf("window = %+v; want one position per turn, head 5", w)
+		}
+		for i, turn := range w.Turns {
+			if turn.UserText != "" && turn.UserText != fmt.Sprintf("u%d", w.Positions[i]) {
+				t.Fatalf("turn %q reported at position %d", turn.UserText, w.Positions[i])
+			}
+		}
+		// Keep the newest two turns: compact through the turn before u4.
+		keepFrom := len(w.Turns) - 2
+		if err := s.Compact(ctx, project, contextID, NewSummaryTurn("digest"), w.Positions[keepFrom]-1, w.Compactions); err != nil {
+			t.Fatal(err)
+		}
+		if turns, err := s.Turns(ctx, project, contextID); err != nil || userTexts(turns) != "[conversation summary] u4 u5" {
+			t.Fatalf("turns after compaction across a gap = %q, %v", userTexts(turns), err)
 		}
 	})
 
@@ -571,6 +792,26 @@ func storeConformance(t *testing.T, newStore func(t *testing.T) interface {
 			}
 		}
 	})
+}
+
+// appendTurns appends turns u<from>..u<to> (answers a<i>) in order.
+func appendTurns(t *testing.T, s Store, project, contextID string, from, to int) {
+	t.Helper()
+	for i := from; i <= to; i++ {
+		turn := Turn{UserText: fmt.Sprintf("u%d", i), AssistantText: fmt.Sprintf("a%d", i)}
+		if err := s.Append(context.Background(), project, contextID, turn); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// userTexts joins the turns' user texts with spaces, for compact assertions.
+func userTexts(turns []Turn) string {
+	parts := make([]string, len(turns))
+	for i, turn := range turns {
+		parts[i] = turn.UserText
+	}
+	return strings.Join(parts, " ")
 }
 
 var uniqueCounter struct {

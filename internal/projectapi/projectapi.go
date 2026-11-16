@@ -21,11 +21,13 @@ package projectapi
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -162,6 +164,34 @@ func (r Resource) GroupVersion() string {
 // an empty list means there is nothing there yet, and a kind nobody is serving
 // means nothing looked. Matched with errors.Is.
 var ErrKindNotServed = errors.New("this project does not offer that kind of resource")
+
+// ErrNotSent marks a request that failed before the platform received it:
+// it could not be encoded or built, its credential was refused, or the
+// connection was never made. A write that fails this way changed nothing.
+// Any other failure of a write leaves open whether it was applied. Matched
+// with errors.Is.
+var ErrNotSent = errors.New("the request was not sent")
+
+// notSent wraps err so it matches [ErrNotSent].
+func notSent(err error) error { return fmt.Errorf("%w: %w", ErrNotSent, err) }
+
+// neverConnected reports whether a transport error happened before any byte
+// of the request reached the platform: a failed dial, name lookup or TLS
+// handshake. A dropped connection, a timeout or a reset after that may come
+// after the platform read the request, so they are left out.
+func neverConnected(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var certErr *tls.CertificateVerificationError
+	var headerErr tls.RecordHeaderError
+	return errors.As(err, &certErr) || errors.As(err, &headerErr)
+}
 
 // APIError is a rejection from the platform, kept whole. The status carries
 // the field paths a rejection names, which are the part a person acts on.
@@ -329,7 +359,7 @@ func (p *Project) Get(ctx context.Context, r Resource, namespace, name string) (
 func (p *Project) Create(ctx context.Context, r Resource, obj Object, dryRun bool) (Object, error) {
 	raw, err := json.Marshal(obj)
 	if err != nil {
-		return nil, fmt.Errorf("the %s could not be encoded: %w", r.Kind, err)
+		return nil, notSent(fmt.Errorf("the %s could not be encoded: %w", r.Kind, err))
 	}
 	body, err := p.do(ctx, http.MethodPost, p.path(r, namespaceOf(obj), ""), dryRunQuery(dryRun), raw)
 	if err != nil {
@@ -345,7 +375,7 @@ func (p *Project) Create(ctx context.Context, r Resource, obj Object, dryRun boo
 func (p *Project) Update(ctx context.Context, r Resource, obj Object, dryRun bool) (Object, error) {
 	raw, err := json.Marshal(obj)
 	if err != nil {
-		return nil, fmt.Errorf("the %s could not be encoded: %w", r.Kind, err)
+		return nil, notSent(fmt.Errorf("the %s could not be encoded: %w", r.Kind, err))
 	}
 	name, _ := NestedString(obj, "metadata", "name")
 	body, err := p.do(ctx, http.MethodPut, p.path(r, namespaceOf(obj), name), dryRunQuery(dryRun), raw)
@@ -418,7 +448,7 @@ func (p *Project) do(ctx context.Context, method, path string, query url.Values,
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return nil, fmt.Errorf("building the request: %w", err)
+		return nil, notSent(fmt.Errorf("building the request: %w", err))
 	}
 	// The caller's own credential, and nothing else. There is no service
 	// credential on this path to fall back to. Never attach it to a plaintext
@@ -427,7 +457,7 @@ func (p *Project) do(ctx context.Context, method, path string, query url.Values,
 		if err := (credentialpolicy.Policy{AllowInsecure: p.client.allowInsecure}).CheckURL(endpoint); err != nil {
 			p.client.logger.Warn("projectapi.credential_plaintext_refused",
 				"host", hostOf(endpoint), "error", err.Error())
-			return nil, err
+			return nil, notSent(err)
 		}
 		req.Header.Set("Authorization", "Bearer "+p.token)
 	}
@@ -448,7 +478,11 @@ func (p *Project) do(ctx context.Context, method, path string, query url.Values,
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("the platform could not be reached: %w", err)
+		err = fmt.Errorf("the platform could not be reached: %w", err)
+		if neverConnected(err) {
+			return nil, notSent(err)
+		}
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 

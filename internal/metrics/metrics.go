@@ -48,7 +48,8 @@ type Metrics struct {
 	// outcome (success/error).
 	ModelCallDuration *prometheus.HistogramVec
 	// CompactionTotal is assistant_history_compaction_total, labeled by
-	// outcome (success/failed_open) — see internal/agent.Conversation.maybeCompact.
+	// outcome (success/failed_open/superseded) — see
+	// internal/agent.Conversation.maybeCompact.
 	CompactionTotal *prometheus.CounterVec
 	// GapReportTotal is assistant_gap_report_total, labeled by outcome
 	// (success/error) — see internal/capability's report_capability_gap tool.
@@ -127,7 +128,7 @@ func New() *Metrics {
 		}, []string{"outcome"}),
 		CompactionTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "assistant_history_compaction_total",
-			Help: "Total history-compaction attempts by outcome (success/failed_open).",
+			Help: "Total history-compaction attempts by outcome (success/failed_open/superseded).",
 		}, []string{"outcome"}),
 		GapReportTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "assistant_gap_report_total",
@@ -204,7 +205,8 @@ func (m *Metrics) RecordModelCall(outcome string, d time.Duration) {
 }
 
 // RecordCompaction counts one history-compaction attempt under outcome
-// ("success"/"failed_open").
+// ("success"/"failed_open", or "superseded" when another compaction of the
+// same conversation committed first and this one was refused).
 func (m *Metrics) RecordCompaction(outcome string) {
 	if m == nil {
 		return

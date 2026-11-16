@@ -12,6 +12,7 @@ package history
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -50,11 +51,43 @@ type Reader interface {
 	Messages(ctx context.Context, projectName, contextID string) ([]Message, error)
 }
 
+// ErrCompactRange is returned by [Store.Compact] when through names a turn
+// position the conversation has not reached (or is negative). It means the
+// caller's read and its compaction disagree about the conversation, and
+// nothing was changed.
+var ErrCompactRange = errors.New("compaction position outside the conversation")
+
+// ErrCompactStale is returned by [Store.Compact] when the conversation has
+// been compacted since the caller read the [Window] it computed through from.
+// Compaction renumbers positions, so a through from the older numbering would
+// name turns that were never summarized; the store refuses it and changes
+// nothing. It means another compaction already ran.
+var ErrCompactStale = errors.New("conversation compacted since the window was read")
+
 // Turn is one completed exchange: what the user said and what the assistant
 // answered.
 type Turn struct {
 	UserText      string
 	AssistantText string
+}
+
+// Window is one read of a conversation's replay window: Turns oldest first
+// (the same turns [Store.Turns] returns), Positions[i] the stored position of
+// Turns[i], and Head, the position of the newest of them. Positions are
+// 1-based turn numbers that only grow as turns are appended, so a turn
+// appended after the read sits past Head. They are not always contiguous: a
+// store may leave a turn out of the window (the Postgres store skips one with
+// no text), so a caller naming turns by position uses Positions, not
+// arithmetic from Head. Head is 0 when the window is empty.
+//
+// Compactions is how many times the conversation had been compacted when the
+// window was read. Compaction renumbers positions, so [Store.Compact] takes it
+// back and refuses ([ErrCompactStale]) a position from an older numbering.
+type Window struct {
+	Turns       []Turn
+	Positions   []int64
+	Head        int64
+	Compactions int64
 }
 
 // MaxStoredContentLen caps how many bytes of a single user/assistant message
@@ -180,13 +213,25 @@ type Store interface {
 	// Turns returns the conversation's turns, oldest first. A conversation
 	// that has never been seen yields nil, nil.
 	Turns(ctx context.Context, projectName, contextID string) ([]Turn, error)
+	// Window is Turns plus the stored position of the newest turn returned,
+	// which is what a later Compact needs to name the turns it replaces.
+	Window(ctx context.Context, projectName, contextID string) (Window, error)
 	// Append records one completed turn at the end of the conversation.
 	Append(ctx context.Context, projectName, contextID string, turn Turn) error
-	// Compact atomically replaces every stored turn with summary followed by
-	// keep, preserving keep's order. Used only by the summarization
-	// compaction step (internal/agent); never called from the normal chat
-	// Append path.
-	Compact(ctx context.Context, projectName, contextID string, summary Turn, keep []Turn) error
+	// Compact atomically replaces every stored turn at a position up to and
+	// including through with summary. Turns after through stay, in order,
+	// after the summary — including turns appended since the caller read the
+	// [Window] it computed through from, so a turn recorded while the summary
+	// was being generated is never lost. through is 0 to replace nothing (the
+	// summary is prepended), and past the conversation's newest position it
+	// is [ErrCompactRange] with nothing changed. compactions is the
+	// [Window.Compactions] of that same read: if the conversation has been
+	// compacted since, through is in a numbering that no longer exists and
+	// the call is [ErrCompactStale] with nothing changed. Positions are
+	// renumbered densely from 1 afterwards and the compaction count goes up
+	// by one. Used only by the summarization compaction step
+	// (internal/agent); never called from the normal chat Append path.
+	Compact(ctx context.Context, projectName, contextID string, summary Turn, through, compactions int64) error
 	Renamer
 }
 
@@ -255,6 +300,14 @@ type memoryMeta struct {
 	name         string
 	// archivedAt is when the conversation was archived; zero when it is not.
 	archivedAt time.Time
+	// head is the position of the newest stored turn, the counterpart of the
+	// Postgres store's turn_count: it grows by one per Append, is untouched
+	// by the retention trim, and Compact renumbers it. The stored slice holds
+	// positions head-len+1 .. head.
+	head int64
+	// compactions counts successful Compact calls, the counterpart of the
+	// Postgres store's compactions column.
+	compactions int64
 }
 
 type storeKey struct {
@@ -279,16 +332,28 @@ func NewMemoryStore() *MemoryStore {
 }
 
 // Turns implements [Store].
-func (s *MemoryStore) Turns(_ context.Context, projectName, contextID string) ([]Turn, error) {
+func (s *MemoryStore) Turns(ctx context.Context, projectName, contextID string) ([]Turn, error) {
+	w, err := s.Window(ctx, projectName, contextID)
+	return w.Turns, err
+}
+
+// Window implements [Store].
+func (s *MemoryStore) Window(_ context.Context, projectName, contextID string) (Window, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	stored := s.turns[storeKey{project: projectName, context: contextID}]
+	key := storeKey{project: projectName, context: contextID}
+	stored := s.turns[key]
 	if len(stored) == 0 {
-		return nil, nil
+		return Window{}, nil
 	}
+	m := s.meta[key]
 	out := make([]Turn, len(stored))
 	copy(out, stored)
-	return out, nil
+	positions := make([]int64, len(stored))
+	for i := range positions {
+		positions[i] = m.head - int64(len(stored)) + 1 + int64(i)
+	}
+	return Window{Turns: out, Positions: positions, Head: m.head, Compactions: m.compactions}, nil
 }
 
 // Append implements [Store]. Over-long turn text is truncated to
@@ -301,12 +366,14 @@ func (s *MemoryStore) Append(_ context.Context, projectName, contextID string, t
 	defer s.mu.Unlock()
 	key := storeKey{project: projectName, context: contextID}
 	now := time.Now()
-	if m, ok := s.meta[key]; ok {
-		m.lastActiveAt = now
-		m.archivedAt = time.Time{}
-	} else {
-		s.meta[key] = &memoryMeta{createdAt: now, lastActiveAt: now}
+	m, ok := s.meta[key]
+	if !ok {
+		m = &memoryMeta{createdAt: now}
+		s.meta[key] = m
 	}
+	m.lastActiveAt = now
+	m.archivedAt = time.Time{}
+	m.head++
 	turns := append(s.turns[key], turn)
 	if len(turns) > MaxTurnsPerConversation {
 		// Copy the kept tail into a fresh slice so the dropped turns' text is
@@ -319,27 +386,47 @@ func (s *MemoryStore) Append(_ context.Context, projectName, contextID string, t
 	return nil
 }
 
-// Compact implements [Store.Compact]: replaces the conversation's turn slice
-// under the same mutex Append uses, and touches lastActiveAt the same way
-// Append does — compaction is conversation activity, not a background sweep.
-// It leaves the archive state alone: compaction can run on the service's own
-// initiative, and a sweep the user never asked for must not undo an archive
-// they did.
-func (s *MemoryStore) Compact(_ context.Context, projectName, contextID string, summary Turn, keep []Turn) error {
+// Compact implements [Store.Compact] under the same mutex Append uses, so a
+// turn appended before it is kept and one appended after it continues the
+// renumbered sequence — the same outcome the Postgres store gets from its
+// row lock. It touches lastActiveAt the way Append does (compaction is
+// conversation activity, not a background sweep) but leaves the archive
+// state alone: compaction can run on the service's own initiative, and a
+// sweep the user never asked for must not undo an archive they did.
+func (s *MemoryStore) Compact(_ context.Context, projectName, contextID string, summary Turn, through, compactions int64) error {
 	summary = clampTurn(summary)
-	turns := make([]Turn, 0, 1+len(keep))
-	turns = append(turns, summary)
-	turns = append(turns, keep...)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := storeKey{project: projectName, context: contextID}
-	now := time.Now()
-	if m, ok := s.meta[key]; ok {
-		m.lastActiveAt = now
-	} else {
-		s.meta[key] = &memoryMeta{createdAt: now, lastActiveAt: now}
+	m := s.meta[key]
+	var head, done int64
+	if m != nil {
+		head, done = m.head, m.compactions
 	}
+	if compactions != done {
+		return fmt.Errorf("history: compact from compaction %d of %d: %w", compactions, done, ErrCompactStale)
+	}
+	if through < 0 || through > head {
+		return fmt.Errorf("history: compact through %d of %d: %w", through, head, ErrCompactRange)
+	}
+	now := time.Now()
+	if m == nil {
+		m = &memoryMeta{createdAt: now}
+		s.meta[key] = m
+	}
+
+	// stored[i] sits at position first+i; drop the ones at or before through.
+	stored := s.turns[key]
+	first := head - int64(len(stored)) + 1
+	drop := min(max(through-first+1, 0), int64(len(stored)))
+	turns := make([]Turn, 0, 1+len(stored)-int(drop))
+	turns = append(turns, summary)
+	turns = append(turns, stored[drop:]...)
+
+	m.head = head - through + 1
+	m.compactions++
+	m.lastActiveAt = now
 	s.turns[key] = turns
 	return nil
 }
