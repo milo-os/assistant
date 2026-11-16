@@ -58,23 +58,21 @@ jobs:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
-      # The App must be installed on the catalog repo with pull-request write.
-      # It is currently scoped to milo-os/cli-plugins only, so this step fails
-      # until that installation is widened -- and a catalog entry whose bump
-      # automation never runs silently freezes at whatever version landed first.
+      # Milo plugins are published to the Milo catalog, where this App is
+      # installed with pull-request write.
       - name: Mint catalog token from the GitHub App
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PLUGIN_INDEX_APP_ID }}
           private-key: ${{ secrets.PLUGIN_INDEX_APP_PRIVATE_KEY }}
-          owner: datum-cloud
-          repositories: datumctl-plugins
+          owner: milo-os
+          repositories: cli-plugins
 
       - name: Open the catalog PR
-        uses: datum-cloud/actions/update-plugin-index@v1.26.0
+        uses: datum-cloud/actions/update-plugin-index@v1.27.1
         with:
-          index-repo: datum-cloud/datumctl-plugins
+          index-repo: milo-os/cli-plugins
           plugin-name: assistant
           version: ${{ github.event.release.tag_name }}
           token: ${{ steps.app-token.outputs.token }}
