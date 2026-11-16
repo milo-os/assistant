@@ -27,6 +27,10 @@ import (
 const (
 	// DefaultMCPConnectTimeout bounds a single MCP server connect.
 	DefaultMCPConnectTimeout = 5 * time.Second
+	// DefaultMCPCloseTimeout bounds closing a turn's MCP sessions. Close runs
+	// when the turn finalizes, ahead of metering and history, so one server
+	// that hangs on its DELETE must not hold those up.
+	DefaultMCPCloseTimeout = 3 * time.Second
 	// ToolNamespaceSeparator joins the server shortname and the provider tool
 	// name into the model-facing tool name.
 	ToolNamespaceSeparator = "__"
@@ -75,6 +79,8 @@ type ComposeOptions struct {
 	KnowledgeMaxSourcesPerService int
 	// MCPConnectTimeout overrides [DefaultMCPConnectTimeout] when > 0.
 	MCPConnectTimeout time.Duration
+	// MCPCloseTimeout overrides [DefaultMCPCloseTimeout] when > 0.
+	MCPCloseTimeout time.Duration
 	// SkillTimeout and SkillMaxBytes override the skill-body fetch defaults
 	// when > 0 (see DefaultSkillTimeout / DefaultSkillMaxBytes).
 	SkillTimeout  time.Duration
@@ -507,6 +513,10 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 	}
 	sort.Strings(mutatingNames)
 
+	closeTimeout := opts.MCPCloseTimeout
+	if closeTimeout <= 0 {
+		closeTimeout = DefaultMCPCloseTimeout
+	}
 	closed := false
 	return &Composed{
 		SystemPromptAddendum: addendum,
@@ -517,9 +527,7 @@ func Compose(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions
 				return nil
 			}
 			closed = true
-			for _, s := range sessions {
-				_ = s.Close()
-			}
+			closeSessions(sessions, closeTimeout, logger)
 			return nil
 		},
 	}, nil
@@ -712,7 +720,7 @@ func notifyComposed(fn func(CapabilityDocument, error), doc CapabilityDocument, 
 // binding object instead. Aggregating per DOCUMENT rather than per server is
 // what the Composed condition needs — the condition describes one binding, and
 // one binding may declare several servers.
-func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, sanctioned, dialable *hostAllowList, logger *slog.Logger) (agentcore.ToolSet, []mcpSession, []error) {
+func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOptions, guard *ipGuard, sanctioned, dialable *hostAllowList, logger *slog.Logger) (agentcore.ToolSet, []openSession, []error) {
 	connect := opts.connect
 	if connect == nil {
 		connect = guardedConnector(defaultConnector(opts.AllowInsecureCredentialForwarding), guard)
@@ -723,7 +731,7 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 	}
 
 	tools := agentcore.ToolSet{}
-	var sessions []mcpSession
+	var sessions []openSession
 	docErrs := make([]error, len(docs))
 
 	for i, doc := range docs {
@@ -775,7 +783,7 @@ func connectTools(ctx context.Context, docs []CapabilityDocument, opts ComposeOp
 					"mcp server %q: connect to %s failed", server.Name, server.Endpoint))
 				continue
 			}
-			sessions = append(sessions, session)
+			sessions = append(sessions, openSession{service: serviceName, server: server.Name, session: session})
 
 			// Bound tools/list with the same budget as connect: a provider that
 			// connects then hangs on the list call must never stall a chat turn.
@@ -871,6 +879,49 @@ func NamespaceToolName(serverName, toolName string) string {
 // document (the agent card's per-service skill IDs) applies the same rule as
 // [NamespaceToolName] rather than passing an arbitrary provider string through.
 func SanitizeName(v string) string { return toolNameSanitizer.ReplaceAllString(v, "-") }
+
+// openSession is an MCP session a turn opened, with the names its close is
+// logged under.
+type openSession struct {
+	service string
+	server  string
+	session mcpSession
+}
+
+// closeSessions closes every session concurrently and waits at most timeout
+// for them. A session still closing at the deadline is logged and left to
+// finish on its own goroutine, so a hung server delays the turn by timeout at
+// most rather than indefinitely.
+func closeSessions(sessions []openSession, timeout time.Duration, logger *slog.Logger) {
+	if len(sessions) == 0 {
+		return
+	}
+	done := make(chan int, len(sessions))
+	for i, s := range sessions {
+		go func() {
+			_ = s.session.Close()
+			done <- i
+		}()
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	closed := make([]bool, len(sessions))
+	for remaining := len(sessions); remaining > 0; remaining-- {
+		select {
+		case i := <-done:
+			closed[i] = true
+		case <-timer.C:
+			for i, s := range sessions {
+				if !closed[i] {
+					logger.Warn("capability.mcp.close_timed_out",
+						"service", s.service, "server", s.server, "timeout", timeout.String())
+				}
+			}
+			return
+		}
+	}
+}
 
 // guardedConnector wraps a connector with the SSRF guard: it refuses to connect
 // to an endpoint whose scheme is disallowed or that resolves to a non-routable

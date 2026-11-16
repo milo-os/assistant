@@ -91,6 +91,10 @@ const (
 	StateCompleted State = "completed"
 	StateFailed    State = "failed"
 	StateCanceled  State = "canceled"
+
+	// stateRunning is a turn that has not reached a terminal part yet. It is
+	// never reported: finalize settles it to failed or canceled.
+	stateRunning State = "running"
 )
 
 // Deps are the injected collaborators a [Conversation] needs. They are set
@@ -382,7 +386,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	// authenticated. Composition decides which endpoints, if any, may see it.
 	caller := capability.CallerIdentity{BearerToken: auth.BearerTokenFromContext(ctx)}
 
-	composed, _ := capability.Compose(ctx, docs, capability.ComposeOptions{
+	composed, err := capability.Compose(ctx, docs, capability.ComposeOptions{
 		HTTPClient:                        c.deps.HTTPClient,
 		AllowPrivateNetworks:              c.deps.AllowPrivateCapabilityNetworks,
 		AllowInsecureCredentialForwarding: c.deps.AllowInsecureCredentialForwarding,
@@ -408,6 +412,14 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		},
 		Logger: c.logger,
 	})
+	if err != nil {
+		// Compose only fails on a malformed operator allow-list. Nothing was
+		// connected, so there is nothing to close: the turn fails up front
+		// with a message the caller sees, and the cause goes to the log.
+		c.logger.Error("agent.capability.compose_failed",
+			"taskId", params.TaskID, "projectName", params.ProjectName, "error", err.Error())
+		return c.failedStream(ctx, params, errComposeFailed)
+	}
 
 	maxOutputTokens := c.deps.MaxOutputTokens
 	if maxOutputTokens <= 0 {
@@ -477,9 +489,44 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 		composed:    composed,
 		invocations: &invocations,
 		invMu:       &mu,
-		state:       StateCompleted,
+		state:       stateRunning,
 	}
 }
+
+// errComposeFailed is the message a turn ends with when its capabilities
+// could not be composed. It names no configuration detail; the log has that.
+const errComposeFailed = "the assistant's capability configuration is invalid, so this turn could not run"
+
+// errStreamTruncated and errClosedEarly are the messages a turn ends with
+// when its stream stops before the run reached a terminal part.
+const (
+	errStreamTruncated = "the run ended before the turn finished"
+	errClosedEarly     = "the turn was closed before it finished"
+)
+
+// failedStream returns a Stream that yields no events and finalizes as
+// [StateFailed] with msg, for a turn that cannot start at all. It still
+// records the turn metric and meters nothing, like any other failed turn.
+func (c *Conversation) failedStream(ctx context.Context, params Params, msg string) *Stream {
+	return &Stream{
+		ctx:         ctx,
+		turnStart:   time.Now(),
+		conv:        c,
+		params:      params,
+		inner:       endedReader{},
+		composed:    &capability.Composed{},
+		invocations: &[]capability.ProviderToolInvocation{},
+		invMu:       &sync.Mutex{},
+		state:       StateFailed,
+		errMsg:      msg,
+	}
+}
+
+// endedReader is a StreamReader with nothing to read.
+type endedReader struct{}
+
+func (endedReader) Recv() (agentcore.StreamPart, error) { return agentcore.StreamPart{}, io.EOF }
+func (endedReader) Close() error                        { return nil }
 
 // turnContext derives the per-turn context. A positive timeout applies a
 // wall-clock deadline; a negative one disables the bound (caller context only);
@@ -750,6 +797,12 @@ func (s *Stream) Recv() (Event, error) {
 	for {
 		part, err := s.inner.Recv()
 		if err == io.EOF {
+			if s.state == stateRunning {
+				// The loop always ends on a finish or error part, so an
+				// EOF without one is a broken run, not a finished answer.
+				s.state = StateFailed
+				s.errMsg = errStreamTruncated
+			}
 			s.finalize()
 			return Event{}, io.EOF
 		}
@@ -839,8 +892,15 @@ func (s *Stream) Result() Result {
 
 // Close releases the stream's resources. It is safe to call more than once and
 // finalizes the run (metering + session close) if that has not happened yet.
+//
+// A Close before the run reached its terminal part ends the turn canceled, so
+// a partial answer is neither reported as completed nor stored in history.
 func (s *Stream) Close() error {
 	_ = s.inner.Close()
+	if !s.finalized && s.state == stateRunning {
+		s.state = StateCanceled
+		s.errMsg = errClosedEarly
+	}
 	s.finalize()
 	return nil
 }

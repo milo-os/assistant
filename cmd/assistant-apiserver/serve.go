@@ -208,16 +208,27 @@ func (o *serverOptions) config(ctx context.Context) (*assistantapiserver.Config,
 				Conversations: store,
 				GapReports:    gapStore,
 				Runner:        runner,
-				// The address clients should send A2A traffic to. Read from the
-				// same env the service uses for its agent card, so discovery and
-				// the card cannot disagree.
-				PublicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
+				// The address clients should send A2A traffic to: the same
+				// normalized value the agent card and usage events use.
+				PublicBaseURL: advertisedBaseURL(os.Getenv, agentCfg),
 			},
 		}, func() {
 			store.Close()
 			gapStore.Close()
 			runnerCleanup()
 		}, nil
+}
+
+// advertisedBaseURL is the address the assistantendpoints resource reports.
+// It is the normalized [config.Config.PublicBaseURL], so it matches the agent
+// card and the usage events' source exactly. When PUBLIC_BASE_URL is unset it
+// is empty rather than config's localhost fallback, which no client could
+// reach: the CLI turns an empty address into an error naming the setting.
+func advertisedBaseURL(getenv func(string) string, cfg *config.Config) string {
+	if strings.TrimSpace(getenv("PUBLIC_BASE_URL")) == "" {
+		return ""
+	}
+	return cfg.PublicBaseURL
 }
 
 func (o *serverOptions) run(ctx context.Context) error {

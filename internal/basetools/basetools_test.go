@@ -20,6 +20,9 @@ import (
 type reply struct {
 	code int
 	body string
+	// hangUp drops the connection after the request was read, with no
+	// answer: the platform got the write, and the caller cannot tell.
+	hangUp bool
 }
 
 func ok(body string) reply { return reply{code: 200, body: body} }
@@ -108,6 +111,13 @@ func newPlatform(t *testing.T) *platform {
 			}
 		}
 		p.mu.Unlock()
+		if answer.hangUp {
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(answer.code)
 		_, _ = w.Write([]byte(answer.body))

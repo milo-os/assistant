@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -421,8 +422,21 @@ func resourcesApply(opts Options) *tool {
 // partialFailure reports a change that stopped part-way. What was done stays
 // done, so naming it exactly is what lets the person carry on instead of
 // guessing.
+//
+// A failed write is only reported as not done when the platform cannot have
+// applied it. When the request may have reached the platform, the model is
+// told so and sent to read the resource back, because applying again on a
+// guess can repeat a change that already landed.
 func partialFailure(applied []AppliedResource, failed *manifestItem, err error) error {
+	landed := mayHaveLanded(err)
 	if len(applied) == 0 {
+		if landed {
+			return fmt.Errorf(
+				"this change may have been applied: %s %q was sent to the platform, but the call "+
+					"failed before it answered (%w). Do not apply again yet. Read it back with %s, "+
+					"tell the person what is actually there, and only then plan any retry",
+				failed.kind, failed.name, err, ResourcesGetToolName)
+		}
 		return fmt.Errorf("nothing was changed: %s %q could not be applied: %w",
 			failed.kind, failed.name, err)
 	}
@@ -430,10 +444,33 @@ func partialFailure(applied []AppliedResource, failed *manifestItem, err error) 
 	for _, resource := range applied {
 		done = append(done, fmt.Sprintf("%s %s (%sd)", resource.Kind, resource.Name, resource.Action))
 	}
+	if landed {
+		return fmt.Errorf(
+			"this change stopped part-way. Already done, and still done: %s. %s %q may also have "+
+				"been applied: it was sent to the platform, but the call failed before it answered (%w). "+
+				"Nothing after it was attempted. Read %s %q back with %s before retrying anything, "+
+				"tell the person exactly this, then plan the rest again",
+			strings.Join(done, ", "), failed.kind, failed.name, err, failed.kind, failed.name, ResourcesGetToolName)
+	}
 	return fmt.Errorf(
 		"this change stopped part-way. Already done, and still done: %s. Not done: %s %q, because %w. "+
 			"Nothing after it was attempted either. Tell the person exactly this, then plan the rest again",
 		strings.Join(done, ", "), failed.kind, failed.name, err)
+}
+
+// mayHaveLanded reports whether a failed write might still have been applied.
+// It is false only when the request never left ([projectapi.ErrNotSent]) or
+// the platform answered with a rejection. A 5xx, a 408, a dropped connection
+// or an unreadable reply all leave the outcome open.
+func mayHaveLanded(err error) bool {
+	if errors.Is(err, projectapi.ErrNotSent) {
+		return false
+	}
+	var apiErr *projectapi.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code >= http.StatusInternalServerError || apiErr.Code == http.StatusRequestTimeout
+	}
+	return true
 }
 
 // ------------------------------------------------------------------ parsing

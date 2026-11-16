@@ -14,6 +14,7 @@ import (
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/agentcore/mockmodel"
 	"github.com/milo-os/assistant/internal/capability"
+	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/usage"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -363,5 +364,96 @@ func TestCanceledContext(t *testing.T) {
 	drainEvents(t, stream)
 	if stream.Result().State != StateCanceled {
 		t.Fatalf("state = %s, want canceled", stream.Result().State)
+	}
+}
+
+// TestRunFailsTurnWhenComposeFails: a malformed host allow-list makes Compose
+// fail. The turn must end failed with a message the caller sees, never call
+// the model, and store nothing, instead of panicking on a nil composition.
+func TestRunFailsTurnWhenComposeFails(t *testing.T) {
+	model := &recordingModel{}
+	store := history.NewMemoryStore()
+	conv := New(Deps{Model: model, ModelMode: "mock", Emitter: noopEmitter(), History: store,
+		CapabilityIdentityForwardHosts: []string{"gateway.example.com:443"}})
+	params := Params{UserText: "hi", ProjectName: "demo", ContextID: "ctx-1"}
+
+	stream := conv.Run(context.Background(), params)
+	defer func() { _ = stream.Close() }()
+	if events := drainEvents(t, stream); len(events) != 0 {
+		t.Fatalf("events = %+v, want none", events)
+	}
+
+	res := stream.Result()
+	if res.State != StateFailed {
+		t.Fatalf("state = %s, want %s", res.State, StateFailed)
+	}
+	if res.Error != errComposeFailed {
+		t.Fatalf("error = %q, want %q", res.Error, errComposeFailed)
+	}
+	if len(model.requests) != 0 {
+		t.Fatalf("model saw %d requests, want 0", len(model.requests))
+	}
+	turns, err := store.Turns(context.Background(), params.ProjectName, params.ContextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 0 {
+		t.Fatalf("stored %d turns, want 0", len(turns))
+	}
+}
+
+// TestCloseBeforeDrainDoesNotCompleteTheTurn: a caller that stops reading
+// after the first text delta and closes the stream must not have the partial
+// answer finalized as completed or stored in history.
+func TestCloseBeforeDrainDoesNotCompleteTheTurn(t *testing.T) {
+	store := history.NewMemoryStore()
+	conv := New(Deps{Model: &recordingModel{}, ModelMode: "mock", Emitter: noopEmitter(), History: store})
+	params := Params{UserText: "hi", ProjectName: "demo", ContextID: "ctx-1"}
+
+	stream := conv.Run(context.Background(), params)
+	ev, err := stream.Recv()
+	if err != nil || ev.Kind != EventText {
+		t.Fatalf("first Recv = %+v, %v; want a text event", ev, err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	res := stream.Result()
+	if res.State != StateCanceled {
+		t.Fatalf("state = %s, want %s", res.State, StateCanceled)
+	}
+	if res.Error != errClosedEarly {
+		t.Fatalf("error = %q, want %q", res.Error, errClosedEarly)
+	}
+	assertNoTurnsStored(t, store, params)
+}
+
+// TestEOFWithoutTerminalPartFailsTheTurn: a run that stops without a finish or
+// error part did not finish, so its text is not a completed answer.
+func TestEOFWithoutTerminalPartFailsTheTurn(t *testing.T) {
+	store := history.NewMemoryStore()
+	conv := New(Deps{Model: &recordingModel{}, ModelMode: "mock", Emitter: noopEmitter(), History: store})
+	params := Params{UserText: "hi", ProjectName: "demo", ContextID: "ctx-1"}
+	s := streamOver(conv, params, agentcore.StreamPart{Kind: agentcore.StreamPartTextDelta, Text: "half an ans"})
+	s.state = stateRunning
+
+	drainEvents(t, s)
+
+	res := s.Result()
+	if res.State != StateFailed || res.Error != errStreamTruncated {
+		t.Fatalf("result = %s %q, want %s %q", res.State, res.Error, StateFailed, errStreamTruncated)
+	}
+	assertNoTurnsStored(t, store, params)
+}
+
+func assertNoTurnsStored(t *testing.T, store *history.MemoryStore, params Params) {
+	t.Helper()
+	turns, err := store.Turns(context.Background(), params.ProjectName, params.ContextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 0 {
+		t.Fatalf("stored %d turns, want 0", len(turns))
 	}
 }

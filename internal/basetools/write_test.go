@@ -481,8 +481,7 @@ func TestApplyReportsAChangeThatStoppedPartWay(t *testing.T) {
 
 	// The second write fails after the first succeeded. Its dry run still
 	// passes, which is how a change gets part-way.
-	p.overrideWrite(http.MethodPost, "/workloads",
-		reply{code: 500, body: `{"kind":"Status","code":500,"message":"the platform is unwell"}`})
+	p.overrideWrite(http.MethodPost, "/workloads", status(422, "the project is out of allowance"))
 
 	refusal := callErr(t, p.writeTools(t, "demo", "tok"), basetools.ResourcesApplyToolName,
 		applyInput(plan.PlanToken, plan.Results[0].Manifest, plan.Results[1].Manifest))
@@ -492,6 +491,71 @@ func TestApplyReportsAChangeThatStoppedPartWay(t *testing.T) {
 	}
 	if !strings.Contains(refusal, "Network default") {
 		t.Fatalf("it must name what was done: %q", refusal)
+	}
+	if !strings.Contains(refusal, `Not done: Workload "api"`) {
+		t.Fatalf("a rejected write must be named as not done: %q", refusal)
+	}
+}
+
+// A write that reached the platform but got no clear answer may have landed.
+// Saying "nothing was changed" there would send the model to apply again on
+// a guess, so it is told to read the resource back first.
+func TestApplyReportsAWriteThatMayHaveLanded(t *testing.T) {
+	tests := []struct {
+		name   string
+		answer reply
+	}{
+		{"connection dropped after sending", reply{hangUp: true}},
+		{"gateway timeout", status(504, "the server was unable to return a response in time")},
+		{"server error", status(500, "the platform is unwell")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := writePlatform(t)
+			plan := planOf(t, p.writeTools(t, "demo", "tok"), workloadManifest)
+			p.overrideWrite(http.MethodPost, "/workloads", tt.answer)
+
+			refusal := callErr(t, p.writeTools(t, "demo", "tok"), basetools.ResourcesApplyToolName,
+				applyInput(plan.PlanToken, plan.Results[0].Manifest))
+
+			if strings.Contains(refusal, "nothing was changed") {
+				t.Fatalf("an ambiguous write must not claim nothing changed: %q", refusal)
+			}
+			if !strings.Contains(refusal, "may have been applied") {
+				t.Fatalf("refusal must say the change may have landed: %q", refusal)
+			}
+			if !strings.Contains(refusal, basetools.ResourcesGetToolName) {
+				t.Fatalf("refusal must send the model to read it back: %q", refusal)
+			}
+		})
+	}
+}
+
+// The same holds part-way: the write that broke is named as possibly applied,
+// not as not done.
+func TestApplyPartWayReportsAWriteThatMayHaveLanded(t *testing.T) {
+	p := newPlatform(t).
+		route("/apis/compute.datumapis.com/v1alpha1",
+			ok(`{"resources":[{"name":"workloads","kind":"Workload","namespaced":true},
+				{"name":"networks","kind":"Network","namespaced":true}]}`)).
+		routeFor(http.MethodGet, "/workloads/api", status(404, "not found")).
+		routeFor(http.MethodGet, "/networks/default", status(404, "not found")).
+		routeFor(http.MethodPost, "/networks", ok(`{"metadata":{"name":"default"}}`)).
+		routeFor(http.MethodPost, "/workloads", ok(`{"metadata":{"name":"api"}}`))
+	plan := planOf(t, p.writeTools(t, "demo", "tok"), workloadManifest, networkManifest)
+	p.overrideWrite(http.MethodPost, "/workloads", reply{hangUp: true})
+
+	refusal := callErr(t, p.writeTools(t, "demo", "tok"), basetools.ResourcesApplyToolName,
+		applyInput(plan.PlanToken, plan.Results[0].Manifest, plan.Results[1].Manifest))
+
+	if !strings.Contains(refusal, "Network default") {
+		t.Fatalf("it must name what was done: %q", refusal)
+	}
+	if strings.Contains(refusal, "Not done") {
+		t.Fatalf("an ambiguous write must not be called not done: %q", refusal)
+	}
+	if !strings.Contains(refusal, `Workload "api" may also have been applied`) {
+		t.Fatalf("refusal must say the broken write may have landed: %q", refusal)
 	}
 }
 
