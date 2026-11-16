@@ -32,6 +32,9 @@ const (
 	ResourcesPlanToolName = "resources_plan"
 	// ResourcesApplyToolName carries out a plan that was agreed to.
 	ResourcesApplyToolName = "resources_apply"
+	// PlanApprovalPrefix starts the exact message a person sends to approve
+	// a plan in words: the prefix, then the plan's approval code.
+	PlanApprovalPrefix = "Approve plan "
 )
 
 const (
@@ -128,6 +131,10 @@ type PlanOutput struct {
 	PlanToken string `json:"planToken,omitempty"`
 	// ExpiresAt is when the token stops being accepted, in RFC 3339.
 	ExpiresAt string `json:"expiresAt,omitempty"`
+	// ApprovalCode names this plan for a person to approve in words, by
+	// replying exactly PlanApprovalPrefix + ApprovalCode, where no plan card is
+	// drawn. Planning the same change again gives the same code.
+	ApprovalCode string `json:"approvalCode,omitempty"`
 	// Note carries anything about the plan the person should hear.
 	Note string `json:"note,omitempty"`
 }
@@ -259,10 +266,14 @@ func resourcesPlan(opts Options) *tool {
 			expiry := opts.now().Add(plantoken.TTL)
 			out.PlanToken = plantoken.Mint(opts.PlanTokenKey, binding, expiry)
 			out.ExpiresAt = expiry.UTC().Format(time.RFC3339)
+			out.ApprovalCode = plantoken.ApprovalCode(opts.PlanTokenKey, binding)
 			if len(ordered) > 1 {
 				out.Note = "These are applied in the order shown, because a later one refers to an " +
-					"earlier one. Hand them back to " + ResourcesApplyToolName + " in exactly this order."
+					"earlier one. Hand them back to " + ResourcesApplyToolName + " in exactly this order. "
 			}
+			out.Note += "Applying needs the person's own approval in a later message: where no plan card " +
+				"is shown, tell them to reply exactly \"" + PlanApprovalPrefix + out.ApprovalCode +
+				"\", then stop and wait. On that turn, plan the same manifests again and apply them."
 			return result(out)
 		},
 	)
@@ -389,6 +400,14 @@ func resourcesApply(opts Options) *tool {
 							"the manifest, plan again, and show the person who asked what comes back",
 						item.kind, item.name, item.errors[0].Message)
 				}
+			}
+
+			// Only now, with the plan proven and accepted again, ask whether a
+			// person approved it in this turn. The token alone proves which
+			// plan, not that anybody agreed to it: the model holds it.
+			if err := CheckApplyApproval(ctx, args.PlanToken,
+				plantoken.ApprovalCode(opts.PlanTokenKey, binding)); err != nil {
+				return "", err
 			}
 
 			out := ApplyOutput{Applied: make([]AppliedResource, 0, len(items))}

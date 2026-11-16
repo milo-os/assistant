@@ -1,7 +1,9 @@
 package basetools_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -637,4 +639,81 @@ func assertRefusedAndUnchanged(t *testing.T, p *platform, refusal string) {
 		t.Errorf("the refusal does not say what to do instead: %q", refusal)
 	}
 	assertNothingPersisted(t, p)
+}
+
+// ---------------------------------------------------------------- approval
+
+type recordingApproval struct {
+	tokens, codes []string
+	err           error
+}
+
+func (a *recordingApproval) Approve(_ context.Context, token, code string) error {
+	a.tokens = append(a.tokens, token)
+	a.codes = append(a.codes, code)
+	return a.err
+}
+
+// The token is in the model's hands, so it can never be the approval: with
+// nothing in the turn to approve, a valid plan still writes nothing.
+func TestApplyWithoutAnApprovalWritesNothing(t *testing.T) {
+	p := writePlatform(t)
+	tools := p.writeTools(t, "demo", "tok")
+	plan := planOf(t, tools, workloadManifest)
+
+	_, err := tools[basetools.ResourcesApplyToolName].Execute(context.Background(),
+		json.RawMessage(applyInput(plan.PlanToken, plan.Results[0].Manifest)))
+	if err == nil || !strings.Contains(err.Error(), "no person has approved this plan") {
+		t.Fatalf("err = %v, want a refusal that asks for approval", err)
+	}
+	if writes := persistedWrites(p); len(writes) != 0 {
+		t.Fatalf("writes = %+v, want none", writes)
+	}
+}
+
+func TestApplyAsksTheApprovalForThisPlanAndHonoursARefusal(t *testing.T) {
+	p := writePlatform(t)
+	tools := p.writeTools(t, "demo", "tok")
+	plan := planOf(t, tools, workloadManifest)
+	if !strings.HasPrefix(plan.ApprovalCode, "plan-") ||
+		!strings.Contains(plan.Note, basetools.PlanApprovalPrefix+plan.ApprovalCode) {
+		t.Fatalf("plan must name its approval code and the exact reply: code=%q note=%q",
+			plan.ApprovalCode, plan.Note)
+	}
+	if again := planOf(t, tools, workloadManifest); again.ApprovalCode != plan.ApprovalCode {
+		t.Fatalf("planning the same change again changed the code: %q → %q", plan.ApprovalCode, again.ApprovalCode)
+	}
+
+	approval := &recordingApproval{err: errors.New("not approved")}
+	ctx := basetools.WithApplyApproval(context.Background(), approval)
+	_, err := tools[basetools.ResourcesApplyToolName].Execute(ctx,
+		json.RawMessage(applyInput(plan.PlanToken, plan.Results[0].Manifest)))
+	if err == nil || err.Error() != "not approved" {
+		t.Fatalf("err = %v, want the approval's refusal", err)
+	}
+	if len(approval.tokens) != 1 || approval.tokens[0] != plan.PlanToken || approval.codes[0] != plan.ApprovalCode {
+		t.Fatalf("approval asked with tokens=%v codes=%v", approval.tokens, approval.codes)
+	}
+	if writes := persistedWrites(p); len(writes) != 0 {
+		t.Fatalf("writes = %+v, want none", writes)
+	}
+}
+
+// A bad token is refused before the approval is asked, so a mistake never
+// uses up the person's approval.
+func TestApplyChecksTheTokenBeforeAskingForApproval(t *testing.T) {
+	p := writePlatform(t)
+	tools := p.writeTools(t, "demo", "tok")
+	plan := planOf(t, tools, workloadManifest)
+	edited := strings.Replace(plan.Results[0].Manifest, "replicas: 2", "replicas: 20", 1)
+
+	approval := &recordingApproval{}
+	ctx := basetools.WithApplyApproval(context.Background(), approval)
+	if _, err := tools[basetools.ResourcesApplyToolName].Execute(ctx,
+		json.RawMessage(applyInput(plan.PlanToken, edited))); err == nil {
+		t.Fatal("an edited manifest was applied")
+	}
+	if len(approval.tokens) != 0 {
+		t.Fatalf("approval was asked for a plan that did not verify: %v", approval.tokens)
+	}
 }

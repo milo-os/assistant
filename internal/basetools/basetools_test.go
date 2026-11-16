@@ -212,7 +212,7 @@ func call(t *testing.T, tools agentcore.ToolSet, name, input string) string {
 	if !exists {
 		t.Fatalf("%s was not composed", name)
 	}
-	out, err := tool.Execute(context.Background(), json.RawMessage(input))
+	out, err := tool.Execute(approvedCtx(), json.RawMessage(input))
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
@@ -227,7 +227,7 @@ func callErr(t *testing.T, tools agentcore.ToolSet, name, input string) string {
 	if !exists {
 		t.Fatalf("%s was not composed", name)
 	}
-	out, err := tool.Execute(context.Background(), json.RawMessage(input))
+	out, err := tool.Execute(approvedCtx(), json.RawMessage(input))
 	if err == nil {
 		t.Fatalf("%s returned %q, want a refusal", name, out)
 	}
@@ -338,4 +338,14 @@ func TestEveryReadRunsAsTheCaller(t *testing.T) {
 			t.Fatalf("request to %s carried %q", request.path, request.authorization)
 		}
 	}
+}
+
+// approveAll approves every apply. Tests of what resources_apply does once a
+// person has approved use it; the approval gate has its own tests.
+type approveAll struct{}
+
+func (approveAll) Approve(context.Context, string, string) error { return nil }
+
+func approvedCtx() context.Context {
+	return basetools.WithApplyApproval(context.Background(), approveAll{})
 }

@@ -127,6 +127,19 @@ func TestExecutePassesMentionsToTheRunner(t *testing.T) {
 	}
 }
 
+// The message's own id reaches the runner, which spends a text plan approval
+// once per message by it.
+func TestExecutePassesMessageIDToTheRunner(t *testing.T) {
+	runner := &capturingRunner{}
+	msg := wireMessage(t, map[string]any{"projectName": "proj"})
+	msg.ID = "msg-42"
+	collect(NewExecutor(runner, nil), &a2asrv.ExecutorContext{Message: msg, TaskID: "task-1", ContextID: "ctx-1"})
+
+	if runner.got.MessageID != "msg-42" {
+		t.Fatalf("runner saw messageId %q, want msg-42", runner.got.MessageID)
+	}
+}
+
 // A message with no mentions key is exactly what every client sent before this
 // existed, and must stay a no-op.
 func TestMentionsAbsentIsNil(t *testing.T) {

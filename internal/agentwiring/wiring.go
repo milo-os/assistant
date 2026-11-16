@@ -270,13 +270,19 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	}
 	// Exec approvals require a shared, durable consume ledger. A deployment
 	// without Postgres cannot run compute exec, even if it can diagnose it.
-	var execApprovals execapproval.Store
-	if cfg.ConversationStoreURL != "" && len(execApprovalKey) >= 32 {
+	// Plan approvals share the same ledger so a replayed approval applies
+	// nothing on any replica; without Postgres the agent keeps a
+	// process-local ledger for them.
+	var execApprovals, planApprovals execapproval.Store
+	if cfg.ConversationStoreURL != "" {
 		pg, err := execapproval.NewPostgresStore(ctx, cfg.ConversationStoreURL)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		execApprovals = pg
+		planApprovals = pg
+		if len(execApprovalKey) >= 32 {
+			execApprovals = pg
+		}
 		prevCleanup := cleanup
 		cleanup = func() { prevCleanup(); pg.Close() }
 	}
@@ -308,6 +314,7 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 		PlanTokenKey:                      planTokenKey,
 		ExecApprovalKey:                   execApprovalKey,
 		ExecApprovals:                     execApprovals,
+		PlanApprovals:                     planApprovals,
 		AllowPrivateCapabilityNetworks:    cfg.AllowPrivateCapabilityNetworks,
 		AllowInsecureCredentialForwarding: cfg.AllowInsecureCredentialForwarding,
 		CapabilityIdentityForwardHosts:    cfg.CapabilityIdentityForwardHosts,
@@ -377,6 +384,7 @@ func (r conversationRunner) Run(ctx context.Context, req assistanta2a.RunRequest
 		ProjectName:  req.ProjectName,
 		ContextID:    req.ContextID,
 		TaskID:       req.TaskID,
+		MessageID:    req.MessageID,
 		Mentions:     agentMentions(req.Mentions),
 		Surface:      agentSurface(req.Surface),
 		ApprovePlan:  agentPlanApproval(req.ApprovePlan),

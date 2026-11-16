@@ -165,6 +165,11 @@ type Deps struct {
 	// ExecApprovals atomically consumes human-approved compute exec plans.
 	// Nil removes the execution tool from the model's available tools.
 	ExecApprovals execapproval.Store
+	// PlanApprovals consumes each person's approval of a resources plan once,
+	// so a replayed approval applies nothing. Nil uses a store local to this
+	// process, which is single-use only within one replica; deployments with
+	// more than one should share a Postgres store.
+	PlanApprovals execapproval.Store
 	// GapReports backs the report_capability_gap__<service> tools: lets
 	// the model flag that a provider service is missing a tool or lookup
 	// a user needed, written to THAT PROVIDER's own project (see
@@ -253,6 +258,9 @@ func New(deps Deps) *Conversation {
 	if deps.Metrics == nil {
 		deps.Metrics = appmetrics.New()
 	}
+	if deps.PlanApprovals == nil {
+		deps.PlanApprovals = execapproval.NewMemoryStore()
+	}
 	return &Conversation{deps: deps, logger: logger}
 }
 
@@ -269,6 +277,10 @@ type Params struct {
 	ContextID string
 	// TaskID is the A2A task id, used for logging.
 	TaskID string
+	// MessageID is the transport's identity for this message (A2A's
+	// messageId), empty where the transport has none. A text plan approval
+	// is spent once per message by it (see planApproval.consumeText).
+	MessageID string
 	// Mentions are the resources the user referenced with "@kind/name"; they
 	// add one system note to this turn (see mentionNote).
 	Mentions []Mention
@@ -475,6 +487,7 @@ func (c *Conversation) Run(ctx context.Context, params Params) *Stream {
 	if a := params.ApprovePlan; a != nil && a.Token != "" && len(a.Manifests) > 0 {
 		model = &approvedPlanModel{inner: model, approval: *a}
 	}
+	gatedTools = gateApplyTool(gatedTools, params, c.deps.PlanApprovals)
 	gatedTools = withChoiceTool(gatedTools, params.Surface)
 	inner := agentcore.Run(turnCtx, agentcore.LoopOptions{
 		Model:           model,
