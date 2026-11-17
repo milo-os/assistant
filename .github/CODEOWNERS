@@ -1,3 +1,2 @@
-# Billing reviews price changes. Only these files have an owner; everything
-# else is unowned, as before this file existed.
+* @milo-os/sre
 config/components/service-catalog-*/service-pricing.yaml @milo-os/billing
