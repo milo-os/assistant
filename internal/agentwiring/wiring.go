@@ -271,17 +271,17 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	}
 	// Exec approvals require a shared, durable consume ledger. A deployment
 	// without Postgres cannot run compute exec, even if it can diagnose it.
-	// Plan approvals need the same ledger so a spent approval stays spent
-	// across restarts and replicas; their rows are retained rather than
-	// pruned. Without Postgres there is no such ledger, so resources_apply
-	// is not offered at all (planning still is).
+	// Plan approvals need a ledger of their own on the same database, so a
+	// spent approval stays spent across restarts and replicas; it keeps rows
+	// for thirty days. Without Postgres there is no such ledger, so
+	// resources_apply is not offered at all (planning still is).
 	var execApprovals, planApprovals execapproval.Store
 	if cfg.ConversationStoreURL != "" {
 		pg, err := execapproval.NewPostgresStore(ctx, cfg.ConversationStoreURL)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		planApprovals = pg.Retaining()
+		planApprovals = pg.PlanApprovals()
 		if len(execApprovalKey) >= 32 {
 			execApprovals = pg
 		}

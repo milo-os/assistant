@@ -9,40 +9,48 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schema = `CREATE TABLE IF NOT EXISTS assistant_exec_approvals (
+// ledger names one approvals table and how long its rows are kept. Table
+// names are constants here and never come from input.
+type ledger struct {
+	table     string
+	retention string // a Postgres interval
+}
+
+// execLedger holds compute exec approvals. Compute plans expire within
+// minutes, so a day of replay history is plenty.
+var execLedger = ledger{table: "assistant_exec_approvals", retention: "1 day"}
+
+// planLedger holds resources_apply plan approvals. They are keyed on the
+// project and the plan's approval code, which stays the same for every
+// re-plan of the same change, so a row must outlive any plan token minted for
+// that change: thirty days. They have their own table because replicas still
+// running the previous release prune assistant_exec_approvals after a day,
+// and must never reach these rows.
+var planLedger = ledger{table: "assistant_plan_approvals", retention: "30 days"}
+
+func (l ledger) schema() string {
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
   project text NOT NULL,
   plan_hash bytea NOT NULL,
   consumed_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (project, plan_hash)
-)`
+)`, l.table)
+}
 
-// retainColumn marks approvals the daily prune must keep. Plan approvals are
-// keyed on the conversation and the plan's approval code, with no expiry of
-// their own, so forgetting one would let a replay apply again. Older tables
-// gain the column on boot.
-const retainColumn = `ALTER TABLE assistant_exec_approvals
-  ADD COLUMN IF NOT EXISTS retain boolean NOT NULL DEFAULT false`
+func (l ledger) consumedAtIndex() string {
+	return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_consumed_at_idx ON %s (consumed_at)`, l.table, l.table)
+}
 
-// prunableIndex covers only the rows the prune may delete. Retained rows are
-// never deleted, so an index over every row would grow with them and the
-// prune would scan them all.
-const prunableIndex = `CREATE INDEX IF NOT EXISTS assistant_exec_approvals_prunable_idx
-  ON assistant_exec_approvals (consumed_at) WHERE NOT retain`
-
-// dropConsumedAtIndex removes the full index prunableIndex replaces.
-const dropConsumedAtIndex = `DROP INDEX IF EXISTS assistant_exec_approvals_consumed_at_idx`
-
-// pruneInterval is how often one process deletes old exec approvals. Rows are
-// kept a day, so pruning a few minutes late costs nothing, and Consume no
-// longer pays for a DELETE on every call.
+// pruneInterval is how often one store deletes rows past its retention.
+// Pruning a few minutes late costs nothing, and Consume does not pay for a
+// DELETE on every call.
 const pruneInterval = 10 * time.Minute
 
+// PostgresStore is one approvals ledger shared by every assistant replica.
 type PostgresStore struct {
-	pool *pgxpool.Pool
-	// retain keeps what this store consumes out of the daily prune.
-	retain bool
-	// prune is shared by every store over the same pool.
-	prune *pruneSchedule
+	pool   *pgxpool.Pool
+	ledger ledger
+	prune  *pruneSchedule
 }
 
 // pruneSchedule lets one prune through per pruneInterval.
@@ -71,74 +79,71 @@ func (p *pruneSchedule) retry() {
 	p.next = time.Time{}
 }
 
+// NewPostgresStore connects, creates both approval tables if they are
+// missing, and returns the exec approvals ledger. [PostgresStore.PlanApprovals]
+// gives the plan approvals ledger over the same pool.
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("exec approval store: connect: %w", err)
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("exec approval store: schema: %w", err)
+	for _, l := range []ledger{execLedger, planLedger} {
+		if _, err := pool.Exec(ctx, l.schema()); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("exec approval store: %s schema: %w", l.table, err)
+		}
+		if _, err := pool.Exec(ctx, l.consumedAtIndex()); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("exec approval store: %s index: %w", l.table, err)
+		}
 	}
-	if _, err := pool.Exec(ctx, retainColumn); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("exec approval store: retain column: %w", err)
-	}
-	if _, err := pool.Exec(ctx, prunableIndex); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("exec approval store: index: %w", err)
-	}
-	if _, err := pool.Exec(ctx, dropConsumedAtIndex); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("exec approval store: drop old index: %w", err)
-	}
-	return &PostgresStore{pool: pool, prune: &pruneSchedule{now: time.Now}}, nil
+	return newStore(pool, execLedger), nil
+}
+
+func newStore(pool *pgxpool.Pool, l ledger) *PostgresStore {
+	return &PostgresStore{pool: pool, ledger: l, prune: &pruneSchedule{now: time.Now}}
+}
+
+// PlanApprovals returns the plan approvals ledger, over the same pool.
+// Closing either store closes the pool.
+func (s *PostgresStore) PlanApprovals() *PostgresStore {
+	return newStore(s.pool, planLedger)
 }
 
 func (s *PostgresStore) Close() { s.pool.Close() }
-
-// Retaining returns a store over the same ledger whose approvals are never
-// pruned, so a spent approval stays spent at any age. Plan approvals use it;
-// exec approvals expire with their plans and keep the default. Closing either
-// store closes the shared pool.
-func (s *PostgresStore) Retaining() *PostgresStore {
-	return &PostgresStore{pool: s.pool, retain: true, prune: s.prune}
-}
 
 func (s *PostgresStore) Consume(ctx context.Context, project, planToken string) (bool, error) {
 	key := MakeKey(project, planToken)
 	if err := s.pruneIfDue(ctx); err != nil {
 		return false, err
 	}
-	tag, err := s.pool.Exec(ctx, `INSERT INTO assistant_exec_approvals (project, plan_hash, retain)
-		VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, key.Project, key.Plan[:], s.retain)
+	tag, err := s.pool.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (project, plan_hash)
+		VALUES ($1, $2) ON CONFLICT DO NOTHING`, s.ledger.table), key.Project, key.Plan[:])
 	if err != nil {
-		return false, fmt.Errorf("consume exec approval: %w", err)
+		return false, fmt.Errorf("consume %s: %w", s.ledger.table, err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
 
-// pruneIfDue deletes old exec approvals, at most once per pruneInterval.
-// Compute plans expire within minutes. Keep a day of replay history, then
-// delete old hashes so the ledger cannot grow without bound. Retained
-// approvals are kept: see [PostgresStore.Retaining].
+// pruneIfDue deletes rows past the ledger's retention, at most once per
+// pruneInterval, so the ledger cannot grow without bound.
 func (s *PostgresStore) pruneIfDue(ctx context.Context) error {
 	if !s.prune.due() {
 		return nil
 	}
-	if _, err := s.pool.Exec(ctx, `DELETE FROM assistant_exec_approvals
-		WHERE consumed_at < now() - interval '1 day' AND NOT retain`); err != nil {
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`DELETE FROM %s
+		WHERE consumed_at < now() - $1::interval`, s.ledger.table), s.ledger.retention); err != nil {
 		s.prune.retry()
-		return fmt.Errorf("prune exec approvals: %w", err)
+		return fmt.Errorf("prune %s: %w", s.ledger.table, err)
 	}
 	return nil
 }
 
 func (s *PostgresStore) Release(ctx context.Context, project, planToken string) error {
 	key := MakeKey(project, planToken)
-	if _, err := s.pool.Exec(ctx, `DELETE FROM assistant_exec_approvals
-		WHERE project = $1 AND plan_hash = $2`, key.Project, key.Plan[:]); err != nil {
-		return fmt.Errorf("release exec approval: %w", err)
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`DELETE FROM %s
+		WHERE project = $1 AND plan_hash = $2`, s.ledger.table), key.Project, key.Plan[:]); err != nil {
+		return fmt.Errorf("release %s: %w", s.ledger.table, err)
 	}
 	return nil
 }
