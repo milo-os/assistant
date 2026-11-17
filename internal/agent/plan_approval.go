@@ -42,9 +42,8 @@ func gateApplyTool(tools agentcore.ToolSet, params Params, store execapproval.St
 		return gated
 	}
 	approval := &planApproval{
-		project:   params.ProjectName,
-		contextID: params.ContextID,
-		store:     store,
+		project: params.ProjectName,
+		store:   store,
 	}
 	if a := params.ApprovePlan; a != nil && a.Token != "" {
 		approval.cardToken = a.Token
@@ -81,9 +80,9 @@ func (t *approvalGatedTool) Definition() agentcore.ToolDefinition { return t.inn
 func (t *approvalGatedTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	out, err := t.inner.Execute(basetools.WithApplyApproval(ctx, t.approval), input)
 	if err != nil && t.approval.spent() {
-		err = fmt.Errorf("%w. This approval is spent: the same plan cannot be approved again in this "+
-			"conversation. Read the resource back to see what is there, then plan again from that "+
-			"(a different plan gets a new approval), or start a new conversation", err)
+		err = fmt.Errorf("%w. This approval is spent: the same plan cannot be approved again. Read the "+
+			"resource back to see what is there, then plan again from that: once a change has landed, "+
+			"or for a different change, the plan gets a new approval code", err)
 	}
 	return out, err
 }
@@ -93,7 +92,6 @@ type planApproval struct {
 	cardToken string
 	ref       string
 	project   string
-	contextID string
 	store     execapproval.Store
 
 	mu   sync.Mutex
@@ -150,15 +148,16 @@ func (a *planApproval) Approve(ctx context.Context, planToken, approvalCode stri
 	if a.store == nil {
 		return errors.New("nothing was changed: approvals cannot be recorded right now, so none is accepted")
 	}
-	key := planApprovalKey(a.contextID, approvalCode)
+	key := planApprovalKey(approvalCode)
 	fresh, err := a.store.Consume(ctx, a.project, key)
 	if err != nil {
 		return fmt.Errorf("nothing was changed: the approval could not be recorded: %w", err)
 	}
 	if !fresh {
 		return errors.New("nothing was changed: this approval was already used, and the same plan " +
-			"cannot be approved again in this conversation. Plan again and ask the person to approve " +
-			"what comes back if it differs, or start a new conversation")
+			"cannot be approved again. Read the resources back and plan again from what is there: " +
+			"once a change has landed, or for a different change, the plan gets a new approval code " +
+			"for the person to approve")
 	}
 	a.used = true
 	a.key = key
@@ -166,22 +165,33 @@ func (a *planApproval) Approve(ctx context.Context, planToken, approvalCode stri
 }
 
 // planApprovalKey is what every approval of one plan is recorded under in the
-// shared ledger (which scopes it by project): the conversation and the plan's
-// approval code. A card click, the typed code and the typed plan token all
-// approve the same plan, so they share one key and the plan is applied at most
-// once, whichever way it was approved.
+// shared ledger, which scopes it by project: the plan's approval code alone.
+// A card click, the typed code and the typed plan token all approve the same
+// plan, so they share one key and the plan is applied at most once, whichever
+// way it was approved.
 //
 // approvalCode is what resources_apply derived from the verified plan binding,
-// never anything the model or the person passed: it is the same for every
-// re-plan of the same manifests, project and replaced resource versions, while
-// each re-plan mints a new token. Keying on it means an approval delivered
-// again (a client, replica or A2A retry) cannot pass against a re-plan of the
-// same change, and a changed plan has a different code the person has not
-// approved. There is no message identity and no time in the key, so a spent
-// approval stays spent at any age on every surface. The cost is that the
-// person cannot approve the same plan twice in one conversation;
-// resources_apply releases the approval when nothing reached the platform,
-// which covers a clean retry.
-func planApprovalKey(contextID, approvalCode string) string {
-	return "resources_apply\x00plan\x00" + contextID + "\x00" + approvalCode
+// never anything the model, the person or the client passed: it is the same
+// for every re-plan of the same manifests, project and replaced resource
+// versions, while each re-plan mints a new token. Keying on it means an
+// approval delivered again (a client, replica or A2A retry, under any
+// conversation or message id) cannot pass against a re-plan of the same
+// change, and a changed plan has a different code the person has not approved.
+// Nothing the client chooses is in the key, and no time either: the ledger
+// keeps the row for thirty days (see execapproval's plan ledger), far past any
+// plan token for the change.
+//
+// Applying a change moves the resource versions it replaced, so the next plan
+// for that resource has a new code. The cost is a resource created, deleted
+// and created again from identical manifests: nothing it replaces has a
+// version, so the second create carries the first one's code and is refused
+// until the row ages out. resources_apply releases an approval when nothing
+// reached the platform, which covers a clean retry.
+//
+// While replicas of the previous release still run during a rollout, an
+// approval spent there is not in this ledger (they keyed on the plan token,
+// which expires within 15 minutes), so a replay can pass once for the length
+// of the rollout.
+func planApprovalKey(approvalCode string) string {
+	return "resources_apply\x00plan\x00" + approvalCode
 }

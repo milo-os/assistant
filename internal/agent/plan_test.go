@@ -17,6 +17,7 @@ import (
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/plantoken"
 	"github.com/milo-os/assistant/internal/projectapi"
+	"github.com/milo-os/assistant/internal/testdb"
 )
 
 func planResultJSON(t *testing.T, out basetools.PlanOutput) string {
@@ -345,42 +346,124 @@ func TestExactApprovalMessageAppliesThatPlan(t *testing.T) {
 	}
 }
 
-// A text approval is spent per conversation. The same message delivered
-// again (a client, replica or A2A retry) is refused even against a re-plan of
-// the same manifests, which carries a new token but the same code, whatever
-// message id it arrives under. Another conversation is separate.
-func TestTextApprovalIsOncePerConversation(t *testing.T) {
-	store := execapproval.NewMemoryStore()
-	inner := &fakeApply{}
-	approve := basetools.PlanApprovalPrefix + "plan-abc"
-	message := func(contextID, id string) Params {
-		return Params{UserText: approve, ApprovalText: approve, ProjectName: "demo",
-			ContextID: contextID, MessageID: id}
+// An approval is spent per project, not per conversation: the conversation id
+// comes from the client, so the same approval sent again under another
+// context id (or message id) must not apply a second time. That holds for
+// each way of approving, against a re-plan of the same manifests (a new
+// token, the same code). Another project is a separate ledger.
+func TestApprovalReplayUnderAnotherConversationIsRefused(t *testing.T) {
+	const code = "plan-abc"
+	card := func(token string) Params {
+		return Params{UserText: "Approve the plan",
+			ApprovePlan: &PlanApproval{Token: token, Manifests: []string{"kind: Workload\n"}}}
 	}
+	typed := func(ref string) Params {
+		text := basetools.PlanApprovalPrefix + ref
+		return Params{UserText: text, ApprovalText: text}
+	}
+	for _, tc := range []struct {
+		name string
+		// approval gives the turn's params for the plan token being applied.
+		approval func(token string) Params
+		// replanned reports whether a replay may carry a re-plan's new token;
+		// a card or a typed token names one token, so its replay carries it.
+		replanned bool
+	}{
+		{"card", card, false},
+		{"typed code", func(string) Params { return typed(code) }, true},
+		{"typed plan token", typed, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := execapproval.NewMemoryStore()
+			inner := &fakeApply{}
+			turn := func(project, contextID, messageID, token string) error {
+				params := tc.approval(token)
+				params.ProjectName, params.ContextID, params.MessageID = project, contextID, messageID
+				_, err := gatedApply(params, store, inner).Execute(context.Background(), applyArgs(token, code))
+				return err
+			}
 
-	if _, err := gatedApply(message("conv-1", "msg-1"), store, inner).Execute(context.Background(), applyArgs("tok-1", "plan-abc")); err != nil {
-		t.Fatalf("first approval: %v", err)
+			if err := turn("demo", "conv-a", "msg-1", "tok-1"); err != nil {
+				t.Fatalf("first approval: %v", err)
+			}
+			replayToken := "tok-1"
+			if tc.replanned {
+				replayToken = "tok-2"
+			}
+			for _, conv := range []string{"conv-a", "conv-b", ""} {
+				err := turn("demo", conv, "msg-1", replayToken)
+				if err == nil {
+					t.Fatalf("the approval replayed under context %q applied again", conv)
+				}
+				if !strings.Contains(err.Error(), "the same plan cannot be approved again") {
+					t.Fatalf("the refusal must say the plan cannot be approved again: %v", err)
+				}
+			}
+			if inner.writes != 1 {
+				t.Fatalf("writes = %d after replays, want 1", inner.writes)
+			}
+			if err := turn("other", "conv-b", "msg-1", "tok-1"); err != nil {
+				t.Fatalf("the same code in another project: %v", err)
+			}
+			if inner.writes != 2 {
+				t.Fatalf("writes = %d, want 2 (one per project)", inner.writes)
+			}
+		})
 	}
-	for _, id := range []string{"msg-1", "msg-2", ""} {
-		_, err := gatedApply(message("conv-1", id), store, inner).Execute(context.Background(), applyArgs("tok-2", "plan-abc"))
-		if err == nil {
-			t.Fatalf("a replayed approval (message id %q) applied a re-plan of the same manifests", id)
-		}
-		if !strings.Contains(err.Error(), "cannot be approved again in this conversation") {
-			t.Fatalf("the refusal must say the plan cannot be approved again here: %v", err)
-		}
+}
+
+// Two turns carrying the same approval race through gateApplyTool into one
+// shared ledger, as two replicas would: exactly one applies. Run with -race.
+func TestConcurrentApprovalsOfOnePlanApplyOnce(t *testing.T) {
+	stores := map[string]func(t *testing.T) execapproval.Store{
+		"memory": func(*testing.T) execapproval.Store { return execapproval.NewMemoryStore() },
+		"postgres": func(t *testing.T) execapproval.Store {
+			pg, err := execapproval.NewPostgresStore(context.Background(), testdb.URL(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(pg.Close)
+			return pg.PlanApprovals()
+		},
 	}
-	if _, err := gatedApply(message("conv-2", "msg-1"), store, inner).Execute(context.Background(), applyArgs("tok-3", "plan-abc")); err != nil {
-		t.Fatalf("the same approval in a new conversation: %v", err)
-	}
-	if inner.writes != 2 {
-		t.Fatalf("writes = %d, want 2 (one per conversation)", inner.writes)
+	for name, open := range stores {
+		t.Run(name, func(t *testing.T) {
+			store := open(t)
+			project := fmt.Sprintf("race-%d", time.Now().UnixNano())
+			approve := basetools.PlanApprovalPrefix + "plan-abc"
+			const turns = 8
+			inners := make([]*fakeApply, turns)
+			errs := make([]error, turns)
+			var wg sync.WaitGroup
+			for i := range turns {
+				inners[i] = &fakeApply{}
+				params := Params{UserText: approve, ApprovalText: approve, ProjectName: project,
+					ContextID: fmt.Sprintf("conv-%d", i)}
+				tool := gatedApply(params, store, inners[i])
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_, errs[i] = tool.Execute(context.Background(), applyArgs(fmt.Sprintf("tok-%d", i), "plan-abc"))
+				}()
+			}
+			wg.Wait()
+			writes, applied := 0, 0
+			for i := range turns {
+				writes += inners[i].writes
+				if errs[i] == nil {
+					applied++
+				}
+			}
+			if writes != 1 || applied != 1 {
+				t.Fatalf("writes=%d applied=%d across %d racing turns, want exactly one", writes, applied, turns)
+			}
+		})
 	}
 }
 
 // A card click, the typed code and the typed plan token all approve the same
 // plan, so they share one ledger key: once the plan is applied by any of them,
-// the other two are refused in that conversation, in either order. Each turn
+// the other two are refused, in either order. Each turn
 // is a fresh delivery carrying the same plan (same token, same code).
 func TestEveryApprovalOfAPlanSharesOneKey(t *testing.T) {
 	const token, code = "tok-1", "plan-abc"
@@ -419,10 +502,9 @@ func TestEveryApprovalOfAPlanSharesOneKey(t *testing.T) {
 
 // A replay is refused however long after the approval it arrives. The old
 // key held a half-TTL time bucket, so a replay 15 minutes on was fresh again.
-// The key now holds only the conversation and the plan's approval code, and
-// planApproval reads no clock, so no age can make it fresh; the Postgres
-// ledger keeps these rows out of its prune (see execapproval's tests, which
-// age one 30 days). Here a replay is tried long past where every bucket of
+// The key now holds only the plan's approval code, and planApproval reads no
+// clock, so no age can make it fresh within the Postgres plan ledger's thirty
+// days (see execapproval's tests). Here a replay is tried long past where every bucket of
 // the old scheme would have moved on.
 func TestTextApprovalReplayIsRefusedAtAnyAge(t *testing.T) {
 	store := execapproval.NewMemoryStore()
@@ -440,7 +522,7 @@ func TestTextApprovalReplayIsRefusedAtAnyAge(t *testing.T) {
 			t.Fatalf("a replay %v later applied again", age)
 		}
 	}
-	if fresh, err := store.Consume(context.Background(), "demo", planApprovalKey("conv-1", "plan-abc")); err != nil || fresh {
+	if fresh, err := store.Consume(context.Background(), "demo", planApprovalKey("plan-abc")); err != nil || fresh {
 		t.Fatalf("the approval's key is not spent in the ledger: fresh=%v err=%v", fresh, err)
 	}
 	if inner.writes != 1 {
@@ -451,7 +533,7 @@ func TestTextApprovalReplayIsRefusedAtAnyAge(t *testing.T) {
 // An apply that failed before anything reached the platform gives the
 // approval back, so the person can approve the same plan again. One that may
 // have landed, or that the platform rejected, keeps it spent, and the model
-// is told this plan cannot be approved again in this conversation.
+// is told this plan cannot be approved again.
 func TestAFailedApplyReleasesTheApprovalOnlyWhenNothingWasSent(t *testing.T) {
 	approve := basetools.PlanApprovalPrefix + "plan-abc"
 	for _, tc := range []struct {
@@ -481,7 +563,7 @@ func TestAFailedApplyReleasesTheApprovalOnlyWhenNothingWasSent(t *testing.T) {
 			if err == nil {
 				t.Fatal("the failing apply succeeded")
 			}
-			if spent := strings.Contains(err.Error(), "cannot be approved again in this conversation"); spent == tc.wantRelease {
+			if spent := strings.Contains(err.Error(), "the same plan cannot be approved again"); spent == tc.wantRelease {
 				t.Fatalf("spent note present=%v, want %v: %v", spent, !tc.wantRelease, err)
 			}
 
