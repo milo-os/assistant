@@ -423,7 +423,7 @@ func resourcesApply(opts Options) *tool {
 					_, err = opts.Project.Create(ctx, item.resource, item.desired, false)
 				}
 				if err != nil {
-					return "", partialFailure(out.Applied, item, err)
+					return "", applyFailure(ctx, out.Applied, item, err)
 				}
 				out.Applied = append(out.Applied, AppliedResource{
 					Action: action, Kind: item.kind, Name: item.name, Namespace: item.namespace,
@@ -436,6 +436,21 @@ func resourcesApply(opts Options) *tool {
 			return result(out)
 		},
 	)
+}
+
+// applyFailure reports a failed write. When it was the first and never left
+// this process, nothing the person approved reached the platform, so the
+// approval is released for them to give again.
+func applyFailure(ctx context.Context, applied []AppliedResource, failed *manifestItem, err error) error {
+	failure := partialFailure(applied, failed, err)
+	if len(applied) > 0 || !errors.Is(err, projectapi.ErrNotSent) {
+		return failure
+	}
+	if relErr := ReleaseApplyApproval(ctx); relErr != nil {
+		return fmt.Errorf("%w. The approval could not be given back for another try (%v)", failure, relErr)
+	}
+	return fmt.Errorf("%w. The person's approval was not used up: once the cause is fixed they can "+
+		"approve this same plan again", failure)
 }
 
 // partialFailure reports a change that stopped part-way. What was done stays

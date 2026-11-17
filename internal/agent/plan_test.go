@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +16,7 @@ import (
 	"github.com/milo-os/assistant/internal/execapproval"
 	"github.com/milo-os/assistant/internal/history"
 	"github.com/milo-os/assistant/internal/plantoken"
+	"github.com/milo-os/assistant/internal/projectapi"
 )
 
 func planResultJSON(t *testing.T, out basetools.PlanOutput) string {
@@ -190,7 +193,8 @@ func TestStreamReportsHowAnApprovedPlanWent(t *testing.T) {
 // card still hears that it failed, and the model still gets to say so.
 func TestApprovalAppliesThePlanWithoutAModelDecision(t *testing.T) {
 	model := &recordingModel{}
-	conv := New(Deps{Model: model, ModelMode: "mock", Emitter: noopEmitter()})
+	conv := New(Deps{Model: model, ModelMode: "mock", Emitter: noopEmitter(),
+		PlanApprovals: execapproval.NewMemoryStore()})
 	stream := conv.Run(context.Background(), Params{
 		UserText: "Approve the plan", ProjectName: "demo", TaskID: "t1",
 		Surface:     &Surface{Name: surfaceHomeFirstRun},
@@ -230,7 +234,11 @@ func TestApprovalAppliesThePlanWithoutAModelDecision(t *testing.T) {
 // fakeApply stands in for resources_apply: it takes the plan's approval code
 // from its input (the real tool derives it from the manifests) and writes
 // only when the turn's approval agrees.
-type fakeApply struct{ writes int }
+type fakeApply struct {
+	writes int
+	// fail, when set, is the write's error once the approval is given.
+	fail error
+}
 
 func (f *fakeApply) Definition() agentcore.ToolDefinition {
 	return agentcore.ToolDefinition{Name: basetools.ResourcesApplyToolName}
@@ -246,6 +254,15 @@ func (f *fakeApply) Execute(ctx context.Context, input json.RawMessage) (string,
 	}
 	if err := basetools.CheckApplyApproval(ctx, args.PlanToken, args.Code); err != nil {
 		return "", err
+	}
+	if f.fail != nil {
+		// What resources_apply does when its first write never left.
+		if errors.Is(f.fail, projectapi.ErrNotSent) {
+			if err := basetools.ReleaseApplyApproval(ctx); err != nil {
+				return "", err
+			}
+		}
+		return "", f.fail
 	}
 	f.writes++
 	return `{"applied":[]}`, nil
@@ -328,57 +345,70 @@ func TestExactApprovalMessageAppliesThatPlan(t *testing.T) {
 	}
 }
 
-// A text approval is spent per message. The same message delivered again (a
-// client, replica or A2A retry) is refused even against a re-plan of the same
-// manifests, which carries a new token but the same code. A new message from
-// the person with that code still works, as after an apply that failed
-// before it reached the platform.
-func TestTextApprovalIsOncePerMessage(t *testing.T) {
+// A text approval is spent per conversation. The same message delivered
+// again (a client, replica or A2A retry) is refused even against a re-plan of
+// the same manifests, which carries a new token but the same code, whatever
+// message id it arrives under. Another conversation is separate.
+func TestTextApprovalIsOncePerConversation(t *testing.T) {
 	store := execapproval.NewMemoryStore()
 	inner := &fakeApply{}
 	approve := basetools.PlanApprovalPrefix + "plan-abc"
-	message := func(id string) Params {
+	message := func(contextID, id string) Params {
 		return Params{UserText: approve, ApprovalText: approve, ProjectName: "demo",
-			ContextID: "conv-1", MessageID: id}
+			ContextID: contextID, MessageID: id}
 	}
 
-	if _, err := gatedApply(message("msg-1"), store, inner).Execute(context.Background(), applyArgs("tok-1", "plan-abc")); err != nil {
+	if _, err := gatedApply(message("conv-1", "msg-1"), store, inner).Execute(context.Background(), applyArgs("tok-1", "plan-abc")); err != nil {
 		t.Fatalf("first approval: %v", err)
 	}
-	if _, err := gatedApply(message("msg-1"), store, inner).Execute(context.Background(), applyArgs("tok-2", "plan-abc")); err == nil {
-		t.Fatal("a redelivered approval message applied a re-plan of the same manifests")
+	for _, id := range []string{"msg-1", "msg-2", ""} {
+		_, err := gatedApply(message("conv-1", id), store, inner).Execute(context.Background(), applyArgs("tok-2", "plan-abc"))
+		if err == nil {
+			t.Fatalf("a replayed approval (message id %q) applied a re-plan of the same manifests", id)
+		}
+		if !strings.Contains(err.Error(), "cannot be approved again in this conversation") {
+			t.Fatalf("the refusal must say the plan cannot be approved again here: %v", err)
+		}
 	}
-	if _, err := gatedApply(message("msg-2"), store, inner).Execute(context.Background(), applyArgs("tok-3", "plan-abc")); err != nil {
-		t.Fatalf("a new approval message with the same code: %v", err)
+	if _, err := gatedApply(message("conv-2", "msg-1"), store, inner).Execute(context.Background(), applyArgs("tok-3", "plan-abc")); err != nil {
+		t.Fatalf("the same approval in a new conversation: %v", err)
 	}
 	if inner.writes != 2 {
-		t.Fatalf("writes = %d, want 2 (one per approval message)", inner.writes)
+		t.Fatalf("writes = %d, want 2 (one per conversation)", inner.writes)
 	}
 }
 
-// The ledger keys a text approval on what the person typed, not on the code
-// the model passes to resources_apply. Otherwise a redelivered message could
-// apply again just because the model passed a different code the second time.
-func TestTextApprovalReplayIsRefusedWhateverCodeTheModelPasses(t *testing.T) {
-	approve := basetools.PlanApprovalPrefix + "tok-1"
+// A card click, the typed code and the typed plan token all approve the same
+// plan, so they share one ledger key: once the plan is applied by any of them,
+// the other two are refused in that conversation, in either order. Each turn
+// is a fresh delivery carrying the same plan (same token, same code).
+func TestEveryApprovalOfAPlanSharesOneKey(t *testing.T) {
+	const token, code = "tok-1", "plan-abc"
+	card := Params{UserText: "Approve the plan", ProjectName: "demo", ContextID: "conv-1",
+		ApprovePlan: &PlanApproval{Token: token, Manifests: []string{"kind: Workload\n"}}}
+	typed := func(ref string) Params {
+		text := basetools.PlanApprovalPrefix + ref
+		return Params{UserText: text, ApprovalText: text, ProjectName: "demo", ContextID: "conv-1"}
+	}
 	for _, tc := range []struct {
-		name      string
-		messageID string
+		name  string
+		order []Params
 	}{
-		{"with a message id", "msg-1"},
-		{"without a message id", ""},
+		{"card, then code, then token", []Params{card, typed(code), typed(token)}},
+		{"code, then card, then token", []Params{typed(code), card, typed(token)}},
+		{"token, then card, then code", []Params{typed(token), card, typed(code)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := execapproval.NewMemoryStore()
 			inner := &fakeApply{}
-			params := Params{UserText: approve, ApprovalText: approve, ProjectName: "demo",
-				ContextID: "conv-1", MessageID: tc.messageID}
-
-			if _, err := gatedApply(params, store, inner).Execute(context.Background(), applyArgs("tok-1", "")); err != nil {
-				t.Fatalf("first approval: %v", err)
-			}
-			if _, err := gatedApply(params, store, inner).Execute(context.Background(), applyArgs("tok-1", "plan-abc")); err == nil {
-				t.Fatal("a redelivered approval applied again because the model passed a different code")
+			for i, params := range tc.order {
+				_, err := gatedApply(params, store, inner).Execute(context.Background(), applyArgs(token, code))
+				if i == 0 && err != nil {
+					t.Fatalf("first approval: %v", err)
+				}
+				if i > 0 && err == nil {
+					t.Fatalf("approval %d applied the same plan again", i+1)
+				}
 			}
 			if inner.writes != 1 {
 				t.Fatalf("writes = %d, want 1", inner.writes)
@@ -387,43 +417,93 @@ func TestTextApprovalReplayIsRefusedWhateverCodeTheModelPasses(t *testing.T) {
 	}
 }
 
-// Without a message identity (/chat/stream, the apiserver), a text approval
-// is spent per approval code for one to two half-TTL windows: a replay is
-// refused within that span, and accepted again only after it, never later
-// than the plan token itself would have expired.
-func TestTextApprovalWithoutMessageIdentityIsOncePerWindow(t *testing.T) {
+// A replay is refused however long after the approval it arrives. The old
+// key held a half-TTL time bucket, so a replay 15 minutes on was fresh again.
+// The key now holds only the conversation and the plan's approval code, and
+// planApproval reads no clock, so no age can make it fresh; the Postgres
+// ledger keeps these rows out of its prune (see execapproval's tests, which
+// age one 30 days). Here a replay is tried long past where every bucket of
+// the old scheme would have moved on.
+func TestTextApprovalReplayIsRefusedAtAnyAge(t *testing.T) {
 	store := execapproval.NewMemoryStore()
 	inner := &fakeApply{}
 	approve := basetools.PlanApprovalPrefix + "plan-abc"
 	params := Params{UserText: approve, ApprovalText: approve, ProjectName: "demo", ContextID: "conv-1"}
-	start := time.Unix(0, 0).Add(10 * textApprovalWindow).Add(textApprovalWindow - time.Second)
-	at := func(now time.Time) agentcore.Tool {
-		tool := gatedApply(params, store, inner)
-		tool.(*approvalGatedTool).approval.now = func() time.Time { return now }
-		return tool
-	}
 
-	for _, step := range []struct {
-		name string
-		now  time.Time
-		ok   bool
-	}{
-		{"first approval", start, true},
-		{"replay in the same window", start, false},
-		{"replay just past the window edge", start.Add(2 * time.Second), false},
-		{"replay at the longest refusal", start.Add(textApprovalWindow), false},
-		{"after two windows", start.Add(2*textApprovalWindow + time.Second), true},
-	} {
-		_, err := at(step.now).Execute(context.Background(), applyArgs("tok-"+step.name, "plan-abc"))
-		if (err == nil) != step.ok {
-			t.Fatalf("%s: err = %v, want approved=%v", step.name, err, step.ok)
+	if _, err := gatedApply(params, store, inner).Execute(context.Background(), applyArgs("tok-1", "plan-abc")); err != nil {
+		t.Fatalf("first approval: %v", err)
+	}
+	for _, age := range []time.Duration{plantoken.TTL / 2, 2 * plantoken.TTL, 24 * time.Hour, 365 * 24 * time.Hour} {
+		// A re-plan of the same change: a new token, the same code.
+		token := "tok-" + age.String()
+		if _, err := gatedApply(params, store, inner).Execute(context.Background(), applyArgs(token, "plan-abc")); err == nil {
+			t.Fatalf("a replay %v later applied again", age)
 		}
 	}
-	if 2*textApprovalWindow > plantoken.TTL {
-		t.Fatalf("refusal can outlive a plan token: 2*%v > %v", textApprovalWindow, plantoken.TTL)
+	if fresh, err := store.Consume(context.Background(), "demo", planApprovalKey("conv-1", "plan-abc")); err != nil || fresh {
+		t.Fatalf("the approval's key is not spent in the ledger: fresh=%v err=%v", fresh, err)
 	}
-	if inner.writes != 2 {
-		t.Fatalf("writes = %d, want 2", inner.writes)
+	if inner.writes != 1 {
+		t.Fatalf("writes = %d, want 1", inner.writes)
+	}
+}
+
+// An apply that failed before anything reached the platform gives the
+// approval back, so the person can approve the same plan again. One that may
+// have landed, or that the platform rejected, keeps it spent, and the model
+// is told this plan cannot be approved again in this conversation.
+func TestAFailedApplyReleasesTheApprovalOnlyWhenNothingWasSent(t *testing.T) {
+	approve := basetools.PlanApprovalPrefix + "plan-abc"
+	for _, tc := range []struct {
+		name        string
+		params      Params
+		token       string
+		fail        error
+		wantRelease bool
+	}{
+		{"text, not sent", Params{UserText: approve, ApprovalText: approve}, "tok-1",
+			fmt.Errorf("nothing was changed: %w", projectapi.ErrNotSent), true},
+		{"text, may have landed", Params{UserText: approve, ApprovalText: approve}, "tok-1",
+			errors.New("this change may have been applied"), false},
+		{"card, not sent", Params{UserText: "Approve the plan",
+			ApprovePlan: &PlanApproval{Token: "tok-1", Manifests: []string{"kind: Workload\n"}}}, "tok-1",
+			fmt.Errorf("nothing was changed: %w", projectapi.ErrNotSent), true},
+		{"card, may have landed", Params{UserText: "Approve the plan",
+			ApprovePlan: &PlanApproval{Token: "tok-1", Manifests: []string{"kind: Workload\n"}}}, "tok-1",
+			errors.New("this change may have been applied"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := execapproval.NewMemoryStore()
+			params := tc.params
+			params.ProjectName, params.ContextID = "demo", "conv-1"
+
+			_, err := gatedApply(params, store, &fakeApply{fail: tc.fail}).Execute(context.Background(), applyArgs(tc.token, "plan-abc"))
+			if err == nil {
+				t.Fatal("the failing apply succeeded")
+			}
+			if spent := strings.Contains(err.Error(), "cannot be approved again in this conversation"); spent == tc.wantRelease {
+				t.Fatalf("spent note present=%v, want %v: %v", spent, !tc.wantRelease, err)
+			}
+
+			inner := &fakeApply{}
+			_, err = gatedApply(params, store, inner).Execute(context.Background(), applyArgs(tc.token, "plan-abc"))
+			if got := err == nil && inner.writes == 1; got != tc.wantRelease {
+				t.Fatalf("approving the same plan again: applied=%v (err=%v), want %v", got, err, tc.wantRelease)
+			}
+		})
+	}
+}
+
+// Without a durable approval store resources_apply is not offered at all.
+// Other tools, planning among them, stay.
+func TestApplyIsNotOfferedWithoutAnApprovalStore(t *testing.T) {
+	tools := agentcore.ToolSet{basetools.ResourcesApplyToolName: &fakeApply{}, "other": &fakeApply{}}
+	got := gateApplyTool(tools, Params{}, nil)
+	if _, ok := got[basetools.ResourcesApplyToolName]; ok {
+		t.Fatal("resources_apply was offered with no approval store")
+	}
+	if got["other"] != tools["other"] || len(tools) != 2 {
+		t.Fatalf("other tools changed: %v (input %v)", got, tools)
 	}
 }
 

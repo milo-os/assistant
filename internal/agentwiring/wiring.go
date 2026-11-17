@@ -23,6 +23,7 @@ import (
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/agent"
 	"github.com/milo-os/assistant/internal/auth"
+	"github.com/milo-os/assistant/internal/basetools"
 	"github.com/milo-os/assistant/internal/capability"
 	"github.com/milo-os/assistant/internal/capability/crdsource"
 	"github.com/milo-os/assistant/internal/config"
@@ -270,21 +271,28 @@ func NewRunner(ctx context.Context, cfg *config.Config, log *slog.Logger, metric
 	}
 	// Exec approvals require a shared, durable consume ledger. A deployment
 	// without Postgres cannot run compute exec, even if it can diagnose it.
-	// Plan approvals share the same ledger so a replayed approval applies
-	// nothing on any replica; without Postgres the agent keeps a
-	// process-local ledger for them.
+	// Plan approvals need the same ledger so a spent approval stays spent
+	// across restarts and replicas; their rows are retained rather than
+	// pruned. Without Postgres there is no such ledger, so resources_apply
+	// is not offered at all (planning still is).
 	var execApprovals, planApprovals execapproval.Store
 	if cfg.ConversationStoreURL != "" {
 		pg, err := execapproval.NewPostgresStore(ctx, cfg.ConversationStoreURL)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		planApprovals = pg
+		planApprovals = pg.Retaining()
 		if len(execApprovalKey) >= 32 {
 			execApprovals = pg
 		}
 		prevCleanup := cleanup
 		cleanup = func() { prevCleanup(); pg.Close() }
+	} else if platformAPI != nil && len(planTokenKey) > 0 {
+		log.Warn("plan_approvals.disabled",
+			"tool", basetools.ResourcesApplyToolName,
+			"note", "CONVERSATION_STORE_URL not set — applying plans is disabled: a spent approval "+
+				"must be recorded durably and shared by every replica, or a restart would accept it again. "+
+				"Planning stays available")
 	}
 
 	// The Composed half of the status feedback loop, wired only when there is a

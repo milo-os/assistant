@@ -169,6 +169,76 @@ func TestCompactThroughFollowsPositions(t *testing.T) {
 	}
 }
 
+// skippingStore reads a window the way the Postgres store does: a turn with
+// no text is left out of Turns and Positions, though it keeps its position.
+type skippingStore struct{ *history.MemoryStore }
+
+func (s skippingStore) Window(ctx context.Context, projectName, contextID string) (history.Window, error) {
+	w, err := s.MemoryStore.Window(ctx, projectName, contextID)
+	if err != nil {
+		return w, err
+	}
+	out := history.Window{Head: w.Head, Compactions: w.Compactions}
+	for i, turn := range w.Turns {
+		if turn.UserText == "" && turn.AssistantText == "" {
+			continue
+		}
+		out.Turns = append(out.Turns, turn)
+		out.Positions = append(out.Positions, w.Positions[i])
+	}
+	return out, nil
+}
+
+func (s skippingStore) Turns(ctx context.Context, projectName, contextID string) ([]history.Turn, error) {
+	w, err := s.Window(ctx, projectName, contextID)
+	return w.Turns, err
+}
+
+// TestCompactDeletesASkippedTurnAtTheBoundary documents what happens to a
+// no-text turn the window skipped, sitting between the last summarized turn
+// and the first kept one: compactThrough ends the summarized range just before
+// the first kept turn, so the skipped turn is deleted with it. That is
+// harmless, since a turn with no text adds nothing to replay, and every turn
+// with text survives either in the summary or as itself.
+func TestCompactDeletesASkippedTurnAtTheBoundary(t *testing.T) {
+	ctx := context.Background()
+	raw := history.NewMemoryStore()
+	store := skippingStore{MemoryStore: raw}
+	conv := New(Deps{Model: &compactModel{}, ModelMode: "mock", Emitter: noopEmitter(),
+		History: store, HistoryTokenBudget: 1_000_000})
+	params := Params{ProjectName: "demo-project", ContextID: "conv-gap"}
+
+	seedTurns(t, raw, params, SummaryBatchTurns)
+	if err := raw.Append(ctx, params.ProjectName, params.ContextID, history.Turn{}); err != nil {
+		t.Fatal(err)
+	}
+	kept := []history.Turn{{UserText: "kept 1", AssistantText: "a"}, {UserText: "kept 2", AssistantText: "b"}}
+	for _, turn := range kept {
+		if err := raw.Append(ctx, params.ProjectName, params.ContextID, turn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	window, err := store.Window(ctx, params.ProjectName, params.ContextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := compactThrough(window, SummaryBatchTurns); got != SummaryBatchTurns+1 {
+		t.Fatalf("compactThrough = %d, want %d: the skipped turn's position", got, SummaryBatchTurns+1)
+	}
+
+	if err := conv.Compact(ctx, params); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	after, err := raw.Window(ctx, params.ProjectName, params.ContextID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Turns) != 3 || !history.IsSummaryTurn(after.Turns[0]) ||
+		after.Turns[1] != kept[0] || after.Turns[2] != kept[1] {
+		t.Fatalf("stored turns = %+v, want the summary and the two kept turns, the empty one gone", after.Turns)
+	}
+}
+
 // TestCompactSummarizeFailureReturnsError: unlike the automatic path, a
 // summarize failure on the manual path is a real error, and history is left
 // untouched (no Compact call reaches the store).

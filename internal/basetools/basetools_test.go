@@ -346,6 +346,8 @@ type approveAll struct{}
 
 func (approveAll) Approve(context.Context, string, string) error { return nil }
 
+func (approveAll) Release(context.Context) error { return nil }
+
 func approvedCtx() context.Context {
 	return basetools.WithApplyApproval(context.Background(), approveAll{})
 }

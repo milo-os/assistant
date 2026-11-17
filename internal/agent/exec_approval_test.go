@@ -92,6 +92,10 @@ func (failingApprovalStore) Consume(context.Context, string, string) (bool, erro
 	return false, errors.New("ledger unavailable")
 }
 
+func (failingApprovalStore) Release(context.Context, string, string) error {
+	return errors.New("ledger unavailable")
+}
+
 func TestExecApprovalFailsClosedOnLedgerError(t *testing.T) {
 	inner := &captureExecTool{}
 	tool := gateExecTools(agentcore.ToolSet{computeExecRunTool: inner}, "Approve exec plan",
