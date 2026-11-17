@@ -34,6 +34,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/milo-os/assistant/internal/credentialpolicy"
 )
@@ -276,9 +277,9 @@ func (p *Project) Resolve(ctx context.Context, group, version, kindOrResource st
 		return Resource{}, fmt.Errorf("a kind is required, e.g. \"Workload\"")
 	}
 
-	path := "/apis/" + group + "/" + version
-	if group == "" {
-		path = "/api/" + version
+	path, err := apiRoot("", group, version)
+	if err != nil {
+		return Resource{}, err
 	}
 	body, err := p.do(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
@@ -314,6 +315,72 @@ func (p *Project) Resolve(ctx context.Context, group, version, kindOrResource st
 	return Resource{}, fmt.Errorf("%w: %q is not served under %q", ErrKindNotServed, name, groupVersion(group, version))
 }
 
+// apiRoot builds the path a group and version are served under, below prefix
+// ("" for the API itself, "/openapi/v3" for its schemas). Both values can come
+// from a model's tool arguments or a manifest's apiVersion, so they are held to
+// the Kubernetes naming rules — a DNS-1123 subdomain for the group and a
+// DNS-1035 label for the version — before they go anywhere near a URL; that
+// alone rules out "..", "/", "%" and "?". They are escaped as well, so the
+// path never depends on the check alone.
+func apiRoot(prefix, group, version string) (string, error) {
+	if err := validGroupVersion(group, version); err != nil {
+		return "", err
+	}
+	if group == "" {
+		return prefix + "/api/" + url.PathEscape(version), nil
+	}
+	return prefix + "/apis/" + url.PathEscape(group) + "/" + url.PathEscape(version), nil
+}
+
+// validGroupVersion rejects a group or version Kubernetes would not accept.
+// An empty group is the core group and is allowed.
+func validGroupVersion(group, version string) error {
+	if group != "" {
+		if msgs := validation.IsDNS1123Subdomain(group); len(msgs) > 0 {
+			return fmt.Errorf("%q is not a valid API group (e.g. \"compute.datumapis.com\"): %s", group, strings.Join(msgs, "; "))
+		}
+	}
+	if msgs := validation.IsDNS1035Label(version); len(msgs) > 0 {
+		return fmt.Errorf("%q is not a valid API version (e.g. \"v1alpha1\"): %s", version, strings.Join(msgs, "; "))
+	}
+	return nil
+}
+
+// ValidName rejects an object name the platform would not accept, before it
+// becomes a path segment. Names come straight from manifests, and escaping
+// alone keeps "." and ".." as they are, which would climb out of the segment.
+func ValidName(name string) error {
+	if err := notDotSegment(name); err != nil {
+		return fmt.Errorf("%q is not a valid name: %w", name, err)
+	}
+	if msgs := validation.IsDNS1123Subdomain(name); len(msgs) > 0 {
+		return fmt.Errorf("%q is not a valid name (lowercase letters, digits, '-' and '.', e.g. \"api\"): %s",
+			name, strings.Join(msgs, "; "))
+	}
+	return nil
+}
+
+// ValidNamespace rejects a namespace the platform would not accept, for the
+// same reason as [ValidName].
+func ValidNamespace(namespace string) error {
+	if err := notDotSegment(namespace); err != nil {
+		return fmt.Errorf("%q is not a valid namespace: %w", namespace, err)
+	}
+	if msgs := validation.IsDNS1123Label(namespace); len(msgs) > 0 {
+		return fmt.Errorf("%q is not a valid namespace (lowercase letters, digits and '-', e.g. \"default\"): %s",
+			namespace, strings.Join(msgs, "; "))
+	}
+	return nil
+}
+
+// notDotSegment refuses the two path segments that mean "here" and "up".
+func notDotSegment(segment string) error {
+	if segment == "." || segment == ".." {
+		return errors.New("it would change which path is addressed")
+	}
+	return nil
+}
+
 func groupVersion(group, version string) string {
 	if group == "" {
 		return version
@@ -326,7 +393,11 @@ func groupVersion(group, version string) string {
 // List returns every object of the kind. An empty namespace reads across all
 // of them, which is also the only correct call for a kind held in none.
 func (p *Project) List(ctx context.Context, r Resource, namespace string) ([]Object, error) {
-	body, err := p.do(ctx, http.MethodGet, p.path(r, namespace, ""), nil, nil)
+	path, err := p.path(r, namespace, "")
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.do(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +416,11 @@ func (p *Project) List(ctx context.Context, r Resource, namespace string) ([]Obj
 // Get returns one object. A missing one comes back as an [*APIError] that
 // [IsNotFound] recognizes, so callers can tell "not there" from "went wrong".
 func (p *Project) Get(ctx context.Context, r Resource, namespace, name string) (Object, error) {
-	body, err := p.do(ctx, http.MethodGet, p.path(r, namespace, name), nil, nil)
+	path, err := p.path(r, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.do(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +436,18 @@ func (p *Project) Create(ctx context.Context, r Resource, obj Object, dryRun boo
 	if err != nil {
 		return nil, notSent(fmt.Errorf("the %s could not be encoded: %w", r.Kind, err))
 	}
-	body, err := p.do(ctx, http.MethodPost, p.path(r, namespaceOf(obj), ""), dryRunQuery(dryRun), raw)
+	// The name rides in the body, not the path, but the platform is asked to
+	// keep it, so it gets the same check.
+	if name, _ := NestedString(obj, "metadata", "name"); name != "" {
+		if err := ValidName(name); err != nil {
+			return nil, notSent(err)
+		}
+	}
+	path, err := p.path(r, namespaceOf(obj), "")
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.do(ctx, http.MethodPost, path, dryRunQuery(dryRun), raw)
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +464,11 @@ func (p *Project) Update(ctx context.Context, r Resource, obj Object, dryRun boo
 		return nil, notSent(fmt.Errorf("the %s could not be encoded: %w", r.Kind, err))
 	}
 	name, _ := NestedString(obj, "metadata", "name")
-	body, err := p.do(ctx, http.MethodPut, p.path(r, namespaceOf(obj), name), dryRunQuery(dryRun), raw)
+	path, err := p.path(r, namespaceOf(obj), name)
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.do(ctx, http.MethodPut, path, dryRunQuery(dryRun), raw)
 	if err != nil {
 		return nil, err
 	}
@@ -396,9 +486,9 @@ func dryRunQuery(dryRun bool) url.Values {
 
 // OpenAPI returns the schema document describing one group and version.
 func (p *Project) OpenAPI(ctx context.Context, group, version string) (map[string]any, error) {
-	path := "/openapi/v3/apis/" + group + "/" + version
-	if group == "" {
-		path = "/openapi/v3/api/" + version
+	path, err := apiRoot("/openapi/v3", group, version)
+	if err != nil {
+		return nil, err
 	}
 	body, err := p.do(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
@@ -417,22 +507,37 @@ func (p *Project) OpenAPI(ctx context.Context, group, version string) (map[strin
 // ----------------------------------------------------------------- plumbing
 
 // path builds the request path for a kind. The project prefix is added by do,
-// so nothing here can address another project.
-func (p *Project) path(r Resource, namespace, name string) string {
-	var b strings.Builder
-	if r.Group == "" {
-		b.WriteString("/api/" + r.Version)
-	} else {
-		b.WriteString("/apis/" + r.Group + "/" + r.Version)
+// so nothing here can address another project; the namespace and name are
+// validated and every segment is escaped, so none can climb out of the one it
+// belongs to. Every error it returns matches [ErrNotSent].
+func (p *Project) path(r Resource, namespace, name string) (string, error) {
+	root, err := apiRoot("", r.Group, r.Version)
+	if err != nil {
+		return "", notSent(err)
 	}
+	if r.Namespaced && namespace != "" {
+		if err := ValidNamespace(namespace); err != nil {
+			return "", notSent(err)
+		}
+	}
+	if err := notDotSegment(r.Resource); err != nil {
+		return "", notSent(fmt.Errorf("%q is not a valid resource: %w", r.Resource, err))
+	}
+	if name != "" {
+		if err := ValidName(name); err != nil {
+			return "", notSent(err)
+		}
+	}
+	var b strings.Builder
+	b.WriteString(root)
 	if r.Namespaced && namespace != "" {
 		b.WriteString("/namespaces/" + url.PathEscape(namespace))
 	}
-	b.WriteString("/" + r.Resource)
+	b.WriteString("/" + url.PathEscape(r.Resource))
 	if name != "" {
 		b.WriteString("/" + url.PathEscape(name))
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // do performs one request as the caller and returns the raw body.
@@ -467,12 +572,9 @@ func (p *Project) do(ctx context.Context, method, path string, query url.Values,
 	}
 
 	client := p.client.http
-	if p.token != "" && !p.client.allowInsecure {
-		// http.Client follows redirects itself, so the initial-URL check above
-		// is not enough: refuse a hop that downgrades to plaintext rather than
-		// letting the client forward the Authorization header to it.
+	if policy := redirectPolicy(method, p.token != "" && !p.client.allowInsecure); policy != nil {
 		scoped := *p.client.http
-		scoped.CheckRedirect = httpsOnlyRedirect
+		scoped.CheckRedirect = policy
 		client = &scoped
 	}
 
@@ -504,6 +606,28 @@ func hostOf(rawURL string) string {
 	}
 	return u.Hostname()
 }
+
+// redirectPolicy picks how a request treats a redirect, or nil for the
+// client's own. A write never follows one: the platform has already received
+// it once, so a hop that then failed to connect would be reported as not sent
+// when it may have been applied. The redirect comes back as an [*APIError]
+// instead. A read with a credential follows only HTTPS hops: http.Client
+// follows redirects itself, so the initial-URL check is not enough, and a hop
+// that downgrades to plaintext would get the Authorization header.
+func redirectPolicy(method string, credentialOverTLS bool) func(*http.Request, []*http.Request) error {
+	switch {
+	case method != http.MethodGet && method != http.MethodHead:
+		return keepRedirectResponse
+	case credentialOverTLS:
+		return httpsOnlyRedirect
+	default:
+		return nil
+	}
+}
+
+// keepRedirectResponse stops at the first redirect and returns it as the
+// response.
+func keepRedirectResponse(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // httpsOnlyRedirect is installed on a credential-bearing request so a redirect
 // cannot downgrade it to plaintext. It preserves Go's default ten-hop cap.

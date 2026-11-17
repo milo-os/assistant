@@ -59,6 +59,16 @@ func (e *Executor) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter
 			return
 		}
 
+		// The server's auth middleware refuses a cross-project continuation
+		// before a2a-go touches the stored task; this is the backstop for any
+		// path that reaches the executor without it. The error does not name
+		// the owning project.
+		if ec.StoredTask != nil && ProjectName(nil, ec.StoredTask.Metadata) != projectName {
+			yield(nil, a2a.NewError(a2a.ErrInvalidParams,
+				"the task does not belong to message.metadata.projectName"))
+			return
+		}
+
 		// First event MUST be a Task (the library rejects a non-Task first
 		// event). For a brand-new message there is no stored task yet. Stamp
 		// projectName into the task metadata so the server's authz middleware

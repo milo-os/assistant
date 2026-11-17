@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	a2astore "github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
 	assistanta2a "github.com/milo-os/assistant/internal/a2a"
 	"github.com/milo-os/assistant/internal/auth"
@@ -364,6 +366,198 @@ func TestGetTask_403ForUngrantedProject(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != 403 {
 		t.Fatalf("status = %d, want 403", res.StatusCode)
+	}
+}
+
+// TestTaskReads_RefuseTaskWithNoOwner pins that GetTask and CancelTask refuse a
+// stored task with no projectName (written before owner stamping existed, or
+// by a non-executor path), even for a caller with grants, and that the refusal
+// is byte-identical to the one for another project's task.
+func TestTaskReads_RefuseTaskWithNoOwner(t *testing.T) {
+	for _, method := range []string{"GetTask", "CancelTask"} {
+		t.Run(method, func(t *testing.T) {
+			store := a2astore.NewInMemory(&a2astore.InMemoryStoreConfig{
+				Authenticator: func(context.Context) (string, error) { return "assistant", nil },
+			})
+			srv := newTestServerWithStore(t, store)
+			seedWorkingTask(t, store, "ownerless", "")
+			seedWorkingTask(t, store, "owned", project)
+
+			read := func(token string, id a2a.TaskID) (int, string) {
+				res := rpc(t, srv, token, method, map[string]any{"id": string(id)}, "r")
+				body, _ := io.ReadAll(res.Body)
+				res.Body.Close()
+				return res.StatusCode, string(body)
+			}
+			ownerlessStatus, ownerlessBody := read(goodToken, "ownerless")
+			if ownerlessStatus != http.StatusForbidden {
+				t.Fatalf("ownerless task: status = %d, want 403 (body %s)", ownerlessStatus, ownerlessBody)
+			}
+			foreignStatus, foreignBody := read(wrongToken, "owned")
+			if foreignStatus != ownerlessStatus || foreignBody != ownerlessBody {
+				t.Errorf("responses differ:\n no owner:    %d %s\n not yours:   %d %s",
+					ownerlessStatus, ownerlessBody, foreignStatus, foreignBody)
+			}
+			if strings.Contains(foreignBody, project) {
+				t.Errorf("refusal names the owning project: %s", foreignBody)
+			}
+			if got := storedTaskState(t, store, "ownerless"); got != a2a.TaskStateWorking {
+				t.Errorf("ownerless task state = %s, want it untouched", got)
+			}
+		})
+	}
+}
+
+func storedTaskState(t *testing.T, store a2astore.Store, id a2a.TaskID) a2a.TaskState {
+	t.Helper()
+	got, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	return got.Task.Status.State
+}
+
+// ── task continuation ─────────────────────────────────────────
+
+// newTestServerWithStore is [newTestServer] over a store the test can seed and
+// inspect directly.
+func newTestServerWithStore(t *testing.T, store a2astore.Store) *httptest.Server {
+	t.Helper()
+	authn, authz := testAuth()
+	srv := httptest.NewServer(New(Deps{
+		Config:        testConfig(t),
+		Logger:        logger.Silent(),
+		Authenticator: authn,
+		Authorizer:    authz,
+		Runner:        fakeRunner{},
+		TaskStore:     store,
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// seedWorkingTask stores a non-terminal task owned by owner, so a2a-go would
+// accept a continuation of it if nothing else stood in the way.
+func seedWorkingTask(t *testing.T, store a2astore.Store, id a2a.TaskID, owner string) {
+	t.Helper()
+	task := &a2a.Task{
+		ID:        id,
+		ContextID: "ctx-victim",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+		History:   []*a2a.Message{a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("victim turn"))},
+	}
+	if owner != "" {
+		task.SetMeta("projectName", owner)
+	}
+	if _, err := store.Create(context.Background(), task); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+}
+
+func continueParams(taskID a2a.TaskID, project, text string) map[string]any {
+	p := sendMessageParams(project, text)
+	p["message"].(map[string]any)["taskId"] = string(taskID)
+	return p
+}
+
+func storedHistory(t *testing.T, store a2astore.Store, id a2a.TaskID) []*a2a.Message {
+	t.Helper()
+	got, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	return got.Task.History
+}
+
+// TestSendMessage_RefusesAnotherProjectsTask pins project isolation on task
+// continuation: a caller authorized for its own project cannot name another
+// project's taskId and have its message appended to (and run against) that
+// task. a2a-go appends to history before the executor runs, so the refusal
+// must come at the auth boundary, and it must not name the owning project.
+func TestSendMessage_RefusesAnotherProjectsTask(t *testing.T) {
+	tests := []struct {
+		name    string
+		owner   string
+		project string // project the attacker's message names
+	}{
+		{name: "caller's own project", owner: project, project: "other-project"},
+		{name: "no project on the message", owner: project, project: ""},
+		{name: "task with no recorded owner", owner: "", project: "other-project"},
+	}
+	for _, tc := range tests {
+		for _, method := range []string{"SendMessage", "SendStreamingMessage"} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				store := a2astore.NewInMemory(&a2astore.InMemoryStoreConfig{
+					Authenticator: func(context.Context) (string, error) { return "assistant", nil },
+				})
+				srv := newTestServerWithStore(t, store)
+				const victim a2a.TaskID = "victim-task"
+				seedWorkingTask(t, store, victim, tc.owner)
+				before := len(storedHistory(t, store, victim))
+
+				res := rpc(t, srv, wrongToken, method, continueParams(victim, tc.project, "hijack"), "x")
+				body, _ := io.ReadAll(res.Body)
+				res.Body.Close()
+				if res.StatusCode != http.StatusForbidden {
+					t.Fatalf("status = %d, want 403 (body %s)", res.StatusCode, body)
+				}
+				if strings.Contains(string(body), project) {
+					t.Errorf("refusal names the owning project: %s", body)
+				}
+				if after := len(storedHistory(t, store, victim)); after != before {
+					t.Fatalf("victim history grew from %d to %d messages", before, after)
+				}
+			})
+		}
+	}
+}
+
+func TestSendMessage_ContinuesOwnProjectsTask(t *testing.T) {
+	store := a2astore.NewInMemory(&a2astore.InMemoryStoreConfig{
+		Authenticator: func(context.Context) (string, error) { return "assistant", nil },
+	})
+	srv := newTestServerWithStore(t, store)
+	const id a2a.TaskID = "own-task"
+	seedWorkingTask(t, store, id, project)
+
+	r := decodeRPC(t, rpc(t, srv, goodToken, "SendMessage", continueParams(id, project, "hi again"), "x"))
+	if r.Error != nil {
+		t.Fatalf("same-project continuation failed: %+v", r.Error)
+	}
+	if got := r.task(t); got.ID != id || got.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("task = %s in %q, want %s completed", got.ID, got.Status.State, id)
+	}
+	if n := len(storedHistory(t, store, id)); n < 2 {
+		t.Fatalf("history has %d messages, want the continuation appended", n)
+	}
+}
+
+// failingStore fails every lookup, standing in for an unreachable database.
+type failingStore struct{ a2astore.Store }
+
+func (failingStore) Get(context.Context, a2a.TaskID) (*a2astore.StoredTask, error) {
+	return nil, errors.New("connection refused")
+}
+
+// TestTaskLookupFailureFailsClosed: when the store cannot say who owns a task,
+// the request is refused rather than passed down without a project check.
+func TestTaskLookupFailureFailsClosed(t *testing.T) {
+	srv := newTestServerWithStore(t, failingStore{})
+	for _, tc := range []struct {
+		method string
+		params any
+	}{
+		{"GetTask", map[string]any{"id": "t-1"}},
+		{"CancelTask", map[string]any{"id": "t-1"}},
+		{"SendMessage", continueParams("t-1", project, "hi")},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			res := rpc(t, srv, goodToken, tc.method, tc.params, "x")
+			res.Body.Close()
+			if res.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", res.StatusCode)
+			}
+		})
 	}
 }
 

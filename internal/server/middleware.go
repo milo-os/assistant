@@ -150,7 +150,8 @@ func malformedBody(message string) *auth.Error {
 //
 // For an allowed method it still returns nil (defer to the handler) when it
 // cannot resolve the project (missing project, unknown task); those surface
-// downstream as InvalidParams / TaskNotFound, matching the TS flow.
+// downstream as InvalidParams / TaskNotFound, matching the TS flow. A stored
+// task with no recorded owner is refused, not deferred.
 func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal, body []byte) error {
 	peek, err := peekEnvelope(body)
 	if err != nil {
@@ -159,11 +160,21 @@ func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal
 
 	switch peek.Method {
 	case methodSendMessage, methodSendStreamingMessage:
-		project := projectFromSendParams(peek.Params)
-		if project == "" {
-			return nil // executor will reject with InvalidParams
+		project, taskID := sendTarget(peek.Params)
+		if project != "" {
+			if err := m.authorizer.AuthorizeProject(ctx, principal, project); err != nil {
+				return err
+			}
 		}
-		return m.authorizer.AuthorizeProject(ctx, principal, project)
+		if taskID != "" {
+			// Continuing a task: a2a-go loads it from the unscoped store and
+			// appends this message to its history before the executor runs, so
+			// the owner check has to happen here, not downstream.
+			if err := m.checkContinuation(ctx, a2a.TaskID(taskID), project); err != nil {
+				return err
+			}
+		}
+		return nil // with no project, the executor rejects with InvalidParams
 
 	case methodGetTask, methodCancelTask:
 		id := taskIDFromParams(peek.Params)
@@ -171,17 +182,13 @@ func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal
 			return nil
 		}
 		stored, err := m.taskStore.Get(ctx, a2a.TaskID(id))
+		if errors.Is(err, a2a.ErrTaskNotFound) {
+			return nil // library reports TaskNotFound
+		}
 		if err != nil {
-			if errors.Is(err, a2a.ErrTaskNotFound) {
-				return nil // library reports TaskNotFound
-			}
-			return nil
+			return m.storeUnavailable(err)
 		}
-		project := assistanta2a.ProjectName(nil, stored.Task.Metadata)
-		if project == "" {
-			return nil
-		}
-		return m.authorizer.AuthorizeProject(ctx, principal, project)
+		return m.checkTaskAccess(ctx, principal, stored.Task)
 
 	case methodGetExtendedAgentCard:
 		project := tenantFromExtendedCardParams(peek.Params)
@@ -216,21 +223,78 @@ func (m *authMiddleware) authorize(ctx context.Context, principal auth.Principal
 	}
 }
 
-// projectFromSendParams reads the projectName extension from a SendMessage /
-// SendStreamingMessage params object (message.metadata first, then
-// params.metadata). Any "tenant" on these params is deliberately IGNORED:
-// a2a-go's client transport auto-stamps a tenant onto every request, so
-// honoring it here would let a stray client default decide the authorized
-// project — and it is not the field the executor reads for the turn.
-func projectFromSendParams(raw json.RawMessage) string {
+// checkContinuation refuses a message that continues a task owned by a
+// project other than the one the request was authorized for. An unknown task
+// passes (the library answers TaskNotFound); a task with no recorded owner is
+// refused, since nothing proves it belongs to the caller. The error never names
+// the owning project.
+func (m *authMiddleware) checkContinuation(ctx context.Context, taskID a2a.TaskID, project string) error {
+	stored, err := m.taskStore.Get(ctx, taskID)
+	if errors.Is(err, a2a.ErrTaskNotFound) {
+		return nil
+	}
+	if err != nil {
+		return m.storeUnavailable(err)
+	}
+	owner := assistanta2a.ProjectName(nil, stored.Task.Metadata)
+	if owner == "" || owner != project {
+		return errTaskNotYours()
+	}
+	return nil
+}
+
+// errTaskNotYours is the one refusal for a stored task the caller may not
+// touch. A task with no recorded owner and a task owned by an ungranted project
+// get the same response, so a caller cannot tell the two apart or learn the
+// owner.
+func errTaskNotYours() *auth.Error {
+	return auth.Unauthorized("Task does not belong to the requested project")
+}
+
+// checkTaskAccess decides a GetTask or CancelTask on a stored task. A task with
+// no recorded owner is refused, as checkContinuation does: nothing proves it
+// belongs to the caller. An authorizer denial is replaced by errTaskNotYours;
+// any other authorizer failure (a 401, an unavailable control plane) passes
+// through unchanged.
+func (m *authMiddleware) checkTaskAccess(ctx context.Context, principal auth.Principal, task *a2a.Task) error {
+	owner := assistanta2a.ProjectName(nil, task.Metadata)
+	if owner == "" {
+		return errTaskNotYours()
+	}
+	err := m.authorizer.AuthorizeProject(ctx, principal, owner)
+	var authErr *auth.Error
+	if errors.As(err, &authErr) && authErr.Status == http.StatusForbidden {
+		return errTaskNotYours()
+	}
+	return err
+}
+
+// storeUnavailable fails closed when the task store cannot say who owns a
+// task: passing the request down would let it run without a project check.
+func (m *authMiddleware) storeUnavailable(err error) *auth.Error {
+	m.logger.Error("a2a.authz.task_lookup_failed", "error", err.Error())
+	return &auth.Error{Status: http.StatusServiceUnavailable, Message: "Task store unavailable"}
+}
+
+// sendTarget reads the projectName extension and the continued task id from a
+// SendMessage / SendStreamingMessage params object. The project comes from
+// message.metadata first, then params.metadata. Any "tenant" on these params is
+// deliberately IGNORED: a2a-go's client transport auto-stamps a tenant onto
+// every request, so honoring it here would let a stray client default decide
+// the authorized project — and it is not the field the executor reads for the
+// turn.
+func sendTarget(raw json.RawMessage) (project, taskID string) {
 	var p struct {
 		Message  *a2a.Message   `json:"message"`
 		Metadata map[string]any `json:"metadata"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return ""
+		return "", ""
 	}
-	return assistanta2a.ProjectName(p.Message, p.Metadata)
+	if p.Message != nil {
+		taskID = string(p.Message.TaskID)
+	}
+	return assistanta2a.ProjectName(p.Message, p.Metadata), taskID
 }
 
 // tenantFromExtendedCardParams reads the project off a GetExtendedAgentCard

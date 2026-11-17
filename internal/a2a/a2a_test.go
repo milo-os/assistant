@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -148,6 +149,60 @@ func TestExecute_MissingProjectNameYieldsInvalidParams(t *testing.T) {
 	if len(errs) != 1 || !errors.Is(errs[0], a2a.ErrInvalidParams) {
 		t.Fatalf("want a single ErrInvalidParams, got %v", errs)
 	}
+}
+
+// TestExecute_RefusesStoredTaskOfAnotherProject is the executor's backstop for
+// a cross-project continuation: the stored task's owner must match the
+// project the message runs against, and the run never starts otherwise.
+func TestExecute_RefusesStoredTaskOfAnotherProject(t *testing.T) {
+	stored := func(owner string) *a2a.Task {
+		task := &a2a.Task{ID: "task-1", ContextID: "ctx-1", Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}
+		if owner != "" {
+			task.SetMeta("projectName", owner)
+		}
+		return task
+	}
+	tests := []struct {
+		name    string
+		owner   string
+		refused bool
+	}{
+		{name: "other project", owner: "victim-project", refused: true},
+		{name: "no recorded owner", owner: "", refused: true},
+		{name: "same project", owner: "p", refused: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var ran bool
+			runner := runnerFunc(func() { ran = true })
+			ec := execCtx("hi", "p")
+			ec.StoredTask = stored(tc.owner)
+			events, errs := collect(NewExecutor(runner, nil), ec)
+			if !tc.refused {
+				if len(errs) != 0 || !ran {
+					t.Fatalf("same-project continuation: errs=%v ran=%v", errs, ran)
+				}
+				return
+			}
+			if ran || len(events) != 0 {
+				t.Fatalf("run started (ran=%v, %d events) for a foreign task", ran, len(events))
+			}
+			if len(errs) != 1 || !errors.Is(errs[0], a2a.ErrInvalidParams) {
+				t.Fatalf("want a single ErrInvalidParams, got %v", errs)
+			}
+			if strings.Contains(errs[0].Error(), "victim-project") {
+				t.Errorf("error reveals the owning project: %v", errs[0])
+			}
+		})
+	}
+}
+
+// runnerFunc is an AgentRunner that records it ran and completes silently.
+type runnerFunc func()
+
+func (f runnerFunc) Run(context.Context, RunRequest, RunSink) RunResult {
+	f()
+	return RunResult{State: RunCompleted}
 }
 
 func TestExecute_MissingTextYieldsInvalidParams(t *testing.T) {

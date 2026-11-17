@@ -702,10 +702,20 @@ func decodeManifest(manifest string) (projectapi.Object, *projectapi.FieldError)
 			Message: "a manifest has to say which kind it is, e.g. \"Workload\"",
 		}
 	}
-	if name, _ := projectapi.NestedString(obj, "metadata", "name"); strings.TrimSpace(name) == "" {
+	name, _ := projectapi.NestedString(obj, "metadata", "name")
+	if strings.TrimSpace(name) == "" {
 		return nil, &projectapi.FieldError{
 			Field:   "metadata.name",
 			Message: "a manifest has to carry a name",
+		}
+	}
+	// Both become path segments of every request made for this manifest.
+	if err := projectapi.ValidName(name); err != nil {
+		return nil, &projectapi.FieldError{Field: "metadata.name", Message: err.Error()}
+	}
+	if namespace, ok := projectapi.NestedString(obj, "metadata", "namespace"); ok && namespace != "" {
+		if err := projectapi.ValidNamespace(namespace); err != nil {
+			return nil, &projectapi.FieldError{Field: "metadata.namespace", Message: err.Error()}
 		}
 	}
 	return obj, nil
