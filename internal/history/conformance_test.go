@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/milo-os/assistant/internal/testdb"
 )
 
 // storeConformance runs the behavioral contract every Store+Lister must
@@ -840,10 +842,7 @@ func TestMemoryStoreConformance(t *testing.T) {
 }
 
 func TestPostgresStoreConformance(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping Postgres store tests (memory conformance still ran)")
-	}
+	url := testdb.URL(t)
 	storeConformance(t, func(t *testing.T) interface {
 		Store
 		Editor

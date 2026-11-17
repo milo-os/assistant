@@ -55,12 +55,45 @@ jobs:
       registry-organization: milo-os
     secrets: inherit
 
+  # The plugin image's Dockerfile only builds, so without this job a type error
+  # or failing test still ships. Runs for fork PRs too: it needs no secrets.
+  test-consumer-ui-plugin:
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.MILO_LINUX_RUNNER || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ui/consumer
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: ui/consumer/.nvmrc
+          cache: npm
+          cache-dependency-path: ui/consumer/package-lock.json
+      # Same flags as the image build (ui/consumer/Dockerfile).
+      - name: Install
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+      # Known to fail on main: src/widgets/chat-dock.tsx passes onChoose,
+      # onApprovePlan and onChangePlan, which exist in assistant-chat-kit 0.2.1,
+      # but npm only has 0.2.0, so tsc reports 6 TS2339 errors. The script
+      # allows exactly those 6 and fails on any other error. Run
+      # `npm run typecheck` directly once 0.2.1 is on npm and the lockfile is
+      # bumped.
+      - name: Typecheck (allows only the 6 known assistant-chat-kit 0.2.1 errors)
+        run: ../../.github/scripts/typecheck-known-errors.sh npm run typecheck
+
   # Deployed as a Component (config/components/consumer-ui-plugin) folded into
   # patch-assistant's own kustomize bundle/Flux Kustomization — no separate
   # bundle for this image. Same shape as compute's consumer-ui-plugin image job.
   publish-consumer-ui-plugin-image:
     needs:
       - validate-kustomize
+      - test-consumer-ui-plugin
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository

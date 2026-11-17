@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"testing"
+
+	"github.com/milo-os/assistant/internal/testdb"
 )
 
 // TestBuildPoolConfigAppliesBounds pins that the pool is constructed with the
@@ -43,10 +44,7 @@ func TestBuildPoolConfigRespectsOperatorStatementTimeout(t *testing.T) {
 // matching the conformance suite; the store's maxTurns is lowered so the test
 // stays fast.
 func TestPostgresStoreEnforcesPerConversationCap(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping Postgres cap test")
-	}
+	url := testdb.URL(t)
 	ctx := context.Background()
 	s, err := NewPostgresStore(ctx, url, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -88,10 +86,7 @@ func TestPostgresStoreEnforcesPerConversationCap(t *testing.T) {
 // TestPostgresStoreCapsStoredContentLength pins finding #9's content clamp in
 // the durable path. Gated on TEST_DATABASE_URL.
 func TestPostgresStoreCapsStoredContentLength(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping Postgres content-cap test")
-	}
+	url := testdb.URL(t)
 	ctx := context.Background()
 	s, err := NewPostgresStore(ctx, url, slog.New(slog.DiscardHandler))
 	if err != nil {

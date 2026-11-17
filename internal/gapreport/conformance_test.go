@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/milo-os/assistant/internal/testdb"
 )
 
 // storeConformance runs the behavioral contract every [Store] must satisfy.
@@ -556,10 +558,7 @@ func TestMemoryStoreConformance(t *testing.T) {
 }
 
 func TestPostgresStoreConformance(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping Postgres store tests (memory conformance still ran)")
-	}
+	url := testdb.URL(t)
 	storeConformance(t, func(t *testing.T) Store {
 		s, err := NewPostgresStore(context.Background(), url, slog.New(slog.DiscardHandler))
 		if err != nil {
@@ -576,10 +575,7 @@ func TestPostgresStoreConformance(t *testing.T) {
 // leaves the new ones at their ALTER TABLE defaults, which is exactly the
 // state the migration leaves every pre-existing row in.
 func TestPostgresStoreLegacyRowReadsBackAsMissingCapability(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping Postgres store tests (memory conformance still ran)")
-	}
+	url := testdb.URL(t)
 	ctx := context.Background()
 	s, err := NewPostgresStore(ctx, url, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -616,10 +612,7 @@ func TestPostgresStoreLegacyRowReadsBackAsMissingCapability(t *testing.T) {
 // database that already has it — the migrate-on-open path every process
 // start takes against the shared staging database.
 func TestPostgresStoreSchemaIsIdempotent(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping Postgres store tests (memory conformance still ran)")
-	}
+	url := testdb.URL(t)
 	ctx := context.Background()
 	first, err := NewPostgresStore(ctx, url, slog.New(slog.DiscardHandler))
 	if err != nil {

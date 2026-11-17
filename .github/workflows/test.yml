@@ -12,11 +12,21 @@ concurrency:
 jobs:
   test:
     runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.MILO_LINUX_RUNNER || 'ubuntu-latest' }}
+    # This job provides a database, so a Postgres test that finds no
+    # TEST_DATABASE_URL fails instead of skipping (internal/testdb). The shared
+    # ci-basic workflow has no database and leaves this unset, so it skips.
+    env:
+      TEST_DATABASE_REQUIRED: "true"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      # Not a `services:` container: the milo-linux runner has no Docker
+      # daemon. The script starts Postgres 17 as the runner user and exports
+      # TEST_DATABASE_URL.
+      - name: Start Postgres 17
+        run: .github/scripts/start-postgres.sh
       - name: Vet
         run: go vet ./...
       - name: Build
