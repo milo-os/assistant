@@ -5,22 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/milo-os/assistant/agentcore"
 	"github.com/milo-os/assistant/internal/basetools"
 	"github.com/milo-os/assistant/internal/execapproval"
-	"github.com/milo-os/assistant/internal/plantoken"
 )
-
-// textApprovalWindow is the span of one bucket a text approval is recorded
-// under when its message carries no identity (see [planApproval.consumeText]).
-// Two buckets are recorded, so a replay is refused for between one and two
-// of them: never longer than a plan token lives.
-const textApprovalWindow = plantoken.TTL / 2
 
 // maxApprovalRefLen bounds what an "Approve plan" message may carry. A plan
 // token is far shorter; this only stops an arbitrary blob being compared.
@@ -43,12 +34,16 @@ func gateApplyTool(tools agentcore.ToolSet, params Params, store execapproval.St
 	for name, tool := range tools {
 		gated[name] = tool
 	}
+	if store == nil {
+		delete(gated, basetools.ResourcesPlanToolName)
+		delete(gated, basetools.ResourcesApplyToolName)
+		return gated
+	}
 	approval := &planApproval{
 		project:   params.ProjectName,
 		contextID: params.ContextID,
 		messageID: params.MessageID,
 		store:     store,
-		now:       time.Now,
 	}
 	if a := params.ApprovePlan; a != nil && a.Token != "" {
 		approval.cardToken = a.Token
@@ -96,7 +91,6 @@ type planApproval struct {
 	// text approval; empty where the transport has none.
 	messageID string
 	store     execapproval.Store
-	now       func() time.Time
 
 	mu   sync.Mutex
 	used bool
@@ -130,6 +124,12 @@ func (a *planApproval) Approve(ctx context.Context, planToken, approvalCode stri
 		return fmt.Errorf("nothing was changed: the approval could not be recorded: %w", err)
 	}
 	if !fresh {
+		if a.cardToken == "" || planToken != a.cardToken {
+			return fmt.Errorf("nothing was changed: this approval was already used in this conversation, "+
+				"and an approval is accepted only once. Plan again and ask the person to approve by "+
+				"replying exactly %q, or with the plan card where one is shown",
+				basetools.PlanApprovalPrefix+planToken)
+		}
 		return errors.New("nothing was changed: this approval was already used. Plan again and ask the " +
 			"person to approve what comes back")
 	}
@@ -152,10 +152,12 @@ func (a *planApproval) consume(ctx context.Context, planToken, approvalCode stri
 	return a.consumeText(ctx)
 }
 
-// consumeText makes a text approval once-only per message. It keys on a.ref,
+// consumeText makes a text approval once-only, for good. It keys on a.ref,
 // the approval the person typed and Approve verified, never on the code the
 // model passed to resources_apply: the model can pass a different code on a
-// redelivery, which would otherwise make the key fresh again.
+// redelivery, which would otherwise make the key fresh again. A text approval
+// has no expiry of its own, since its code is the same for every re-plan of
+// the same manifests, so the record is never pruned.
 //
 // Where the transport identifies the message (A2A's messageId), the key is
 // the conversation, that id and the typed approval: a redelivery of the same
@@ -164,27 +166,16 @@ func (a *planApproval) consume(ctx context.Context, planToken, approvalCode stri
 // before reaching the platform.
 //
 // /chat/stream and the apiserver's sendmessage carry no message identity, so
-// there the key is the typed approval and the time: it is recorded for the
-// current [textApprovalWindow] bucket and the next, and either already being
-// recorded refuses it. This narrows a replay rather than closing it: the same
-// approval is refused for at least one window and at most two (7.5 to 15
-// minutes), so it stops prompt client retries, but a replay arriving after
-// both windows is accepted. Giving those surfaces a per-request id would close
-// it. The cost meanwhile is that a person approving the same plan again within
-// that span, after a failed apply, is refused too and has to wait or re-plan.
+// there the key is the conversation and the typed approval: each approval
+// code is accepted once per conversation. To approve the same manifests again
+// after a failed apply, the person replies with the new plan's token, which
+// differs on every re-plan, or uses the plan card.
 func (a *planApproval) consumeText(ctx context.Context) (bool, error) {
+	message := "typed"
 	if a.messageID != "" {
-		return a.store.Consume(ctx, a.project, textApprovalKey(a.contextID, a.messageID, a.ref))
+		message = "message:" + a.messageID
 	}
-	bucket := a.now().UnixNano() / int64(textApprovalWindow)
-	for _, b := range []int64{bucket, bucket + 1} {
-		fresh, err := a.store.Consume(ctx, a.project,
-			textApprovalKey(a.contextID, "window:"+strconv.FormatInt(b, 10), a.ref))
-		if err != nil || !fresh {
-			return false, err
-		}
-	}
-	return true, nil
+	return a.store.ConsumePermanently(ctx, a.project, textApprovalKey(a.contextID, message, a.ref))
 }
 
 // planApprovalKey keeps plan approvals apart from exec approvals in the
@@ -192,7 +183,7 @@ func (a *planApproval) consumeText(ctx context.Context) (bool, error) {
 func planApprovalKey(planToken string) string { return "resources_apply\x00" + planToken }
 
 // textApprovalKey is the ledger key of one text approval: the conversation,
-// what identifies the message (or its time window), and what the person typed.
+// what identifies the message, and what the person typed.
 func textApprovalKey(contextID, message, typed string) string {
 	return "resources_apply\x00text\x00" + contextID + "\x00" + message + "\x00" + typed
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -387,43 +388,117 @@ func TestTextApprovalReplayIsRefusedWhateverCodeTheModelPasses(t *testing.T) {
 	}
 }
 
-// Without a message identity (/chat/stream, the apiserver), a text approval
-// is spent per approval code for one to two half-TTL windows: a replay is
-// refused within that span, and accepted again only after it, never later
-// than the plan token itself would have expired.
-func TestTextApprovalWithoutMessageIdentityIsOncePerWindow(t *testing.T) {
+type agingStore struct {
+	now   time.Time
+	spent map[execapproval.Key]agingRecord
+}
+
+type agingRecord struct {
+	at        time.Time
+	permanent bool
+}
+
+func newAgingStore(now time.Time) *agingStore {
+	return &agingStore{now: now, spent: map[execapproval.Key]agingRecord{}}
+}
+
+func (s *agingStore) Consume(_ context.Context, project, token string) (bool, error) {
+	return s.consume(project, token, false), nil
+}
+
+func (s *agingStore) ConsumePermanently(_ context.Context, project, key string) (bool, error) {
+	return s.consume(project, key, true), nil
+}
+
+func (s *agingStore) consume(project, token string, permanent bool) bool {
+	key := execapproval.MakeKey(project, token)
+	if r, ok := s.spent[key]; ok && (r.permanent || s.now.Sub(r.at) < 24*time.Hour) {
+		return false
+	}
+	s.spent[key] = agingRecord{at: s.now, permanent: permanent}
+	return true
+}
+
+func TestTextApprovalReplayIsRefusedAtAnyAge(t *testing.T) {
+	approve := basetools.PlanApprovalPrefix + "plan-abc"
+	for _, tc := range []struct {
+		name      string
+		messageID string
+	}{
+		{"with a message id", "msg-1"},
+		{"without a message id", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Unix(1_000_000, 0)
+			store := newAgingStore(start)
+			inner := &fakeApply{}
+			params := Params{UserText: approve, ApprovalText: approve, ProjectName: "demo",
+				ContextID: "conv-1", MessageID: tc.messageID}
+
+			if _, err := gatedApply(params, store, inner).Execute(context.Background(), applyArgs("tok-1", "plan-abc")); err != nil {
+				t.Fatalf("first approval: %v", err)
+			}
+			for i, age := range []time.Duration{time.Second, plantoken.TTL / 2, plantoken.TTL + time.Second,
+				25 * time.Hour, 365 * 24 * time.Hour} {
+				store.now = start.Add(age)
+				_, err := gatedApply(params, store, inner).Execute(context.Background(),
+					applyArgs("tok-replay-"+strconv.Itoa(i), "plan-abc"))
+				if err == nil {
+					t.Fatalf("a replay %v later applied a re-plan of the same manifests", age)
+				}
+			}
+			if inner.writes != 1 {
+				t.Fatalf("writes = %d, want 1", inner.writes)
+			}
+		})
+	}
+}
+
+func TestSpentTextApprovalCanBeRenewedWithThePlanToken(t *testing.T) {
 	store := execapproval.NewMemoryStore()
 	inner := &fakeApply{}
-	approve := basetools.PlanApprovalPrefix + "plan-abc"
-	params := Params{UserText: approve, ApprovalText: approve, ProjectName: "demo", ContextID: "conv-1"}
-	start := time.Unix(0, 0).Add(10 * textApprovalWindow).Add(textApprovalWindow - time.Second)
-	at := func(now time.Time) agentcore.Tool {
-		tool := gatedApply(params, store, inner)
-		tool.(*approvalGatedTool).approval.now = func() time.Time { return now }
-		return tool
+	byCode := basetools.PlanApprovalPrefix + "plan-abc"
+	text := func(typed string) Params {
+		return Params{UserText: typed, ApprovalText: typed, ProjectName: "demo", ContextID: "conv-1"}
 	}
 
-	for _, step := range []struct {
-		name string
-		now  time.Time
-		ok   bool
-	}{
-		{"first approval", start, true},
-		{"replay in the same window", start, false},
-		{"replay just past the window edge", start.Add(2 * time.Second), false},
-		{"replay at the longest refusal", start.Add(textApprovalWindow), false},
-		{"after two windows", start.Add(2*textApprovalWindow + time.Second), true},
-	} {
-		_, err := at(step.now).Execute(context.Background(), applyArgs("tok-"+step.name, "plan-abc"))
-		if (err == nil) != step.ok {
-			t.Fatalf("%s: err = %v, want approved=%v", step.name, err, step.ok)
-		}
+	if _, err := gatedApply(text(byCode), store, inner).Execute(context.Background(), applyArgs("tok-1", "plan-abc")); err != nil {
+		t.Fatalf("first approval: %v", err)
 	}
-	if 2*textApprovalWindow > plantoken.TTL {
-		t.Fatalf("refusal can outlive a plan token: 2*%v > %v", textApprovalWindow, plantoken.TTL)
+	_, err := gatedApply(text(byCode), store, inner).Execute(context.Background(), applyArgs("tok-2", "plan-abc"))
+	if err == nil {
+		t.Fatal("a spent code applied again")
+	}
+	if !strings.Contains(err.Error(), `"`+basetools.PlanApprovalPrefix+`tok-2"`) {
+		t.Fatalf("refusal must offer approval by the new plan's token: %v", err)
+	}
+	byToken := basetools.PlanApprovalPrefix + "tok-2"
+	if _, err := gatedApply(text(byToken), store, inner).Execute(context.Background(), applyArgs("tok-2", "plan-abc")); err != nil {
+		t.Fatalf("approval by the new plan's token: %v", err)
 	}
 	if inner.writes != 2 {
 		t.Fatalf("writes = %d, want 2", inner.writes)
+	}
+}
+
+func TestChangeToolsAreLeftOutWithoutAnApprovalStore(t *testing.T) {
+	tools := agentcore.ToolSet{
+		basetools.ResourcesValidateToolName: &fakeApply{},
+		basetools.ResourcesPlanToolName:     &fakeApply{},
+		basetools.ResourcesApplyToolName:    &fakeApply{},
+	}
+	got := gateApplyTool(tools, Params{}, nil)
+	if _, ok := got[basetools.ResourcesApplyToolName]; ok {
+		t.Fatal("resources_apply offered without an approval store")
+	}
+	if _, ok := got[basetools.ResourcesPlanToolName]; ok {
+		t.Fatal("resources_plan offered without an approval store")
+	}
+	if _, ok := got[basetools.ResourcesValidateToolName]; !ok {
+		t.Fatal("resources_validate removed; it changes nothing")
+	}
+	if len(tools) != 3 {
+		t.Fatal("the caller's tool set was modified")
 	}
 }
 

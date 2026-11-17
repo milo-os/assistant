@@ -10,6 +10,7 @@ import (
 // to the provider, including when two requests race on different replicas.
 type Store interface {
 	Consume(ctx context.Context, project, planToken string) (bool, error)
+	ConsumePermanently(ctx context.Context, project, key string) (bool, error)
 }
 
 // Key contains only a plan hash. A refreshed bearer token cannot make the
@@ -41,4 +42,8 @@ func (s *MemoryStore) Consume(_ context.Context, project, planToken string) (boo
 	}
 	s.used[key] = struct{}{}
 	return true, nil
+}
+
+func (s *MemoryStore) ConsumePermanently(ctx context.Context, project, key string) (bool, error) {
+	return s.Consume(ctx, project, key)
 }

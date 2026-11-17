@@ -110,6 +110,10 @@ Patch composes them only when a plan-token key is available (`PLAN_TOKEN_KEY`,
 or one generated for the process). A service that cannot check a token must not
 issue one.
 
+`resources_plan` and `resources_apply` also need `CONVERSATION_STORE_URL`. Each
+approval is spent in Postgres, so no replica accepts it twice, before or after a
+restart. Without Postgres only `resources_validate` is offered.
+
 | Tool | What it does |
 |---|---|
 | `resources_validate(manifests[])` | Asks the platform to judge each manifest and keeps nothing. Returns the field path behind each rejection, whether the resource already exists, and what applying would change. **Writes nothing.** |

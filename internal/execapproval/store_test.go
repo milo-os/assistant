@@ -13,6 +13,17 @@ func TestMemoryStoreSingleUseAcrossConcurrentCalls(t *testing.T) {
 	testSingleUse(t, NewMemoryStore())
 }
 
+func TestMemoryStorePermanentRecordIsSingleUse(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	if used, err := store.ConsumePermanently(ctx, "demo", "typed"); err != nil || !used {
+		t.Fatalf("first consume: used=%v err=%v", used, err)
+	}
+	if used, err := store.ConsumePermanently(ctx, "demo", "typed"); err != nil || used {
+		t.Fatalf("second consume: used=%v err=%v", used, err)
+	}
+}
+
 func TestPostgresStoreSingleUseAndPruning(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -43,6 +54,22 @@ func TestPostgresStoreSingleUseAndPruning(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatal("expired approval row was not pruned")
+	}
+
+	if used, err := store.ConsumePermanently(ctx, project, "typed-approval"); err != nil || !used {
+		t.Fatalf("consume permanently: used=%v err=%v", used, err)
+	}
+	kept := MakeKey(project, "typed-approval")
+	if _, err := store.pool.Exec(ctx, `UPDATE assistant_exec_approvals
+		SET consumed_at = now() - interval '400 days' WHERE project = $1 AND plan_hash = $2`,
+		project, kept.Plan[:]); err != nil {
+		t.Fatal(err)
+	}
+	if used, err := store.Consume(ctx, project, "another-plan"); err != nil || !used {
+		t.Fatalf("consume after pruning: used=%v err=%v", used, err)
+	}
+	if used, err := store.ConsumePermanently(ctx, project, "typed-approval"); err != nil || used {
+		t.Fatalf("a permanent approval was pruned and spent again: used=%v err=%v", used, err)
 	}
 }
 

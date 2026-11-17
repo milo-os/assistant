@@ -166,9 +166,10 @@ type Deps struct {
 	// Nil removes the execution tool from the model's available tools.
 	ExecApprovals execapproval.Store
 	// PlanApprovals consumes each person's approval of a resources plan once,
-	// so a replayed approval applies nothing. Nil uses a store local to this
-	// process, which is single-use only within one replica; deployments with
-	// more than one should share a Postgres store.
+	// so a replayed approval applies nothing. It must outlive the process and
+	// be shared by every replica. Nil leaves resources_plan and
+	// resources_apply out, since nothing could stop an approval being
+	// replayed.
 	PlanApprovals execapproval.Store
 	// GapReports backs the report_capability_gap__<service> tools: lets
 	// the model flag that a provider service is missing a tool or lookup
@@ -257,9 +258,6 @@ func New(deps Deps) *Conversation {
 	}
 	if deps.Metrics == nil {
 		deps.Metrics = appmetrics.New()
-	}
-	if deps.PlanApprovals == nil {
-		deps.PlanApprovals = execapproval.NewMemoryStore()
 	}
 	return &Conversation{deps: deps, logger: logger}
 }
