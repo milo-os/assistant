@@ -10,6 +10,10 @@ import (
 // to the provider, including when two requests race on different replicas.
 type Store interface {
 	Consume(ctx context.Context, project, planToken string) (bool, error)
+	// Release forgets a consumed approval so it can be consumed again. A
+	// caller uses it only when nothing the approval allowed reached the
+	// platform. Releasing an approval that was never consumed is not an error.
+	Release(ctx context.Context, project, planToken string) error
 }
 
 // Key contains only a plan hash. A refreshed bearer token cannot make the
@@ -41,4 +45,11 @@ func (s *MemoryStore) Consume(_ context.Context, project, planToken string) (boo
 	}
 	s.used[key] = struct{}{}
 	return true, nil
+}
+
+func (s *MemoryStore) Release(_ context.Context, project, planToken string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.used, MakeKey(project, planToken))
+	return nil
 }

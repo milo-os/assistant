@@ -10,8 +10,18 @@ import (
 // checked against the manifests and the platform has accepted them again, so
 // a mistaken call never uses up an approval. Approve returns nil to let the
 // writes go ahead, and an error the model sees otherwise.
+//
+// project is the project the plan was made for, from its verified binding.
+// An approval belongs to one project, so Approve refuses a plan for any other
+// rather than trusting that both were wired from the same request.
+//
+// Release gives back an approval Approve accepted. resources_apply calls it
+// only when its first write never left this process
+// ([projectapi.ErrNotSent]), so nothing the person agreed to reached the
+// platform and they can approve the same plan again.
 type ApplyApproval interface {
-	Approve(ctx context.Context, planToken, approvalCode string) error
+	Approve(ctx context.Context, project, planToken, approvalCode string) error
+	Release(ctx context.Context) error
 }
 
 type applyApprovalKey struct{}
@@ -29,10 +39,20 @@ var errNoApproval = errors.New("nothing was changed: no person has approved this
 
 // CheckApplyApproval asks the approval carried on ctx; with none, it
 // refuses. resources_apply calls it before its first write.
-func CheckApplyApproval(ctx context.Context, planToken, approvalCode string) error {
+func CheckApplyApproval(ctx context.Context, project, planToken, approvalCode string) error {
 	a, _ := ctx.Value(applyApprovalKey{}).(ApplyApproval)
 	if a == nil {
 		return errNoApproval
 	}
-	return a.Approve(ctx, planToken, approvalCode)
+	return a.Approve(ctx, project, planToken, approvalCode)
+}
+
+// ReleaseApplyApproval releases the approval carried on ctx, if any.
+// resources_apply calls it when its first write was never sent.
+func ReleaseApplyApproval(ctx context.Context) error {
+	a, _ := ctx.Value(applyApprovalKey{}).(ApplyApproval)
+	if a == nil {
+		return nil
+	}
+	return a.Release(ctx)
 }

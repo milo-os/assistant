@@ -1,6 +1,7 @@
 package agentwiring
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -82,6 +83,27 @@ func TestNewRunner_CRDSourceBoots(t *testing.T) {
 		t.Fatalf("NewRunner: %v", err)
 	}
 	cleanup()
+}
+
+// Without a durable approval store, applying plans is switched off, and boot
+// says so and why, rather than falling back to a ledger one restart forgets.
+func TestNewRunner_WarnsThatAppliesAreOffWithoutAStore(t *testing.T) {
+	cfg := loadTestConfig(t, nil)
+	if cfg.ConversationStoreURL != "" || cfg.PlatformAPIURL == "" {
+		t.Fatalf("want a platform API and no store: store=%q api=%q", cfg.ConversationStoreURL, cfg.PlatformAPIURL)
+	}
+	var logs bytes.Buffer
+	_, _, cleanup, err := NewRunner(context.Background(), cfg,
+		slog.New(slog.NewTextHandler(&logs, nil)), appmetrics.New())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	cleanup()
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN msg=plan_approvals.disabled") ||
+		!strings.Contains(out, "tool=resources_apply") || !strings.Contains(out, "CONVERSATION_STORE_URL not set") {
+		t.Fatalf("boot did not warn that applies are disabled:\n%s", out)
+	}
 }
 
 // recordingSink captures the tool lifecycle callbacks the runner makes.

@@ -589,6 +589,53 @@ func TestApplyPartWayReportsAWriteThatMayHaveLanded(t *testing.T) {
 	}
 }
 
+// The approval is given back only when the apply failed before anything
+// reached the platform, so the person can approve the same plan again. After
+// a write that may have landed, or that the platform rejected, it stays spent.
+func TestApplyReleasesTheApprovalOnlyWhenNothingWasSent(t *testing.T) {
+	tests := []struct {
+		name        string
+		answer      *reply // nil: the platform is gone before the write
+		wantRelease bool
+	}{
+		{"platform unreachable", nil, true},
+		{"connection dropped after sending", &reply{hangUp: true}, false},
+		{"rejected", ptr(status(422, "the project is out of allowance")), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := writePlatform(t)
+			if tt.answer == nil {
+				// No pooled connection to reuse, so the write after Close
+				// must dial, and a refused dial is what never-sent means.
+				p.server.Config.SetKeepAlivesEnabled(false)
+			}
+			plan := planOf(t, p.writeTools(t, "demo", "tok"), workloadManifest)
+			approval := &recordingApproval{}
+			if tt.answer != nil {
+				p.overrideWrite(http.MethodPost, "/workloads", *tt.answer)
+			} else {
+				approval.onApprove = p.server.Close
+			}
+
+			ctx := basetools.WithApplyApproval(context.Background(), approval)
+			_, err := p.writeTools(t, "demo", "tok")[basetools.ResourcesApplyToolName].Execute(ctx,
+				json.RawMessage(applyInput(plan.PlanToken, plan.Results[0].Manifest)))
+			if err == nil {
+				t.Fatal("apply succeeded, want a failure")
+			}
+			if got := approval.releases == 1; got != tt.wantRelease || approval.releases > 1 {
+				t.Fatalf("releases = %d, want released=%v (err: %v)", approval.releases, tt.wantRelease, err)
+			}
+			if said := strings.Contains(err.Error(), "approve this same plan again"); said != tt.wantRelease {
+				t.Fatalf("the error must say whether the plan can be approved again: %v", err)
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
 // ---------------------------------------------------------------- guardrails
 
 func TestTheChangePathRefusesMoreThanAPersonCanRead(t *testing.T) {
@@ -672,13 +719,25 @@ func assertRefusedAndUnchanged(t *testing.T, p *platform, refusal string) {
 // ---------------------------------------------------------------- approval
 
 type recordingApproval struct {
-	tokens, codes []string
-	err           error
+	projects, tokens, codes []string
+	err                     error
+	releases                int
+	// onApprove, when set, runs as the approval is given, before any write.
+	onApprove func()
 }
 
-func (a *recordingApproval) Approve(_ context.Context, token, code string) error {
+func (a *recordingApproval) Release(context.Context) error {
+	a.releases++
+	return nil
+}
+
+func (a *recordingApproval) Approve(_ context.Context, project, token, code string) error {
+	a.projects = append(a.projects, project)
 	a.tokens = append(a.tokens, token)
 	a.codes = append(a.codes, code)
+	if a.onApprove != nil {
+		a.onApprove()
+	}
 	return a.err
 }
 
@@ -721,6 +780,11 @@ func TestApplyAsksTheApprovalForThisPlanAndHonoursARefusal(t *testing.T) {
 	}
 	if len(approval.tokens) != 1 || approval.tokens[0] != plan.PlanToken || approval.codes[0] != plan.ApprovalCode {
 		t.Fatalf("approval asked with tokens=%v codes=%v", approval.tokens, approval.codes)
+	}
+	// The approval is asked with the project the plan was bound to, which
+	// the gate checks against the turn's project before using its ledger.
+	if len(approval.projects) != 1 || approval.projects[0] != "demo" {
+		t.Fatalf("approval asked with projects=%v, want [demo]", approval.projects)
 	}
 	if writes := persistedWrites(p); len(writes) != 0 {
 		t.Fatalf("writes = %+v, want none", writes)
