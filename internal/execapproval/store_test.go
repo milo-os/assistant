@@ -126,6 +126,31 @@ func TestPostgresStoreLedgersPruneSeparately(t *testing.T) {
 	}
 }
 
+// TestPostgresStorePruneFailureStillConsumes pins that pruning is best
+// effort: a prune that fails is retried on the next Consume and never refuses
+// the approval being recorded.
+func TestPostgresStorePruneFailureStillConsumes(t *testing.T) {
+	url := testdb.URL(t)
+	ctx := context.Background()
+	exec, err := NewPostgresStore(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	broken := newStore(exec.pool, ledger{table: planLedger.table, retention: "not an interval"})
+	project := fmt.Sprintf("approval-prune-failure-%d", time.Now().UnixNano())
+
+	if used, err := broken.Consume(ctx, project, "plan"); err != nil || !used {
+		t.Fatalf("consume with a failing prune: used=%v err=%v", used, err)
+	}
+	if used, err := broken.Consume(ctx, project, "plan"); err != nil || used {
+		t.Fatalf("second consume with a failing prune: used=%v err=%v", used, err)
+	}
+	if !broken.prune.due() {
+		t.Fatal("a failed prune was not rescheduled for the next Consume")
+	}
+}
+
 // TestPostgresStoreReleaseRacesConsume runs Release against Consume on one
 // spent approval. Whichever lands first, the result must agree with the
 // ledger: a fresh Consume leaves the row, a refused one is followed by the

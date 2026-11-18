@@ -3,6 +3,7 @@ package execapproval
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -114,9 +115,7 @@ func (s *PostgresStore) Close() { s.pool.Close() }
 
 func (s *PostgresStore) Consume(ctx context.Context, project, planToken string) (bool, error) {
 	key := MakeKey(project, planToken)
-	if err := s.pruneIfDue(ctx); err != nil {
-		return false, err
-	}
+	s.pruneIfDue(ctx)
 	tag, err := s.pool.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (project, plan_hash)
 		VALUES ($1, $2) ON CONFLICT DO NOTHING`, s.ledger.table), key.Project, key.Plan[:])
 	if err != nil {
@@ -126,17 +125,18 @@ func (s *PostgresStore) Consume(ctx context.Context, project, planToken string) 
 }
 
 // pruneIfDue deletes rows past the ledger's retention, at most once per
-// pruneInterval, so the ledger cannot grow without bound.
-func (s *PostgresStore) pruneIfDue(ctx context.Context) error {
+// pruneInterval, so the ledger cannot grow without bound. Pruning is best
+// effort: a failed prune is logged and retried on the next Consume, and never
+// refuses the approval being recorded.
+func (s *PostgresStore) pruneIfDue(ctx context.Context) {
 	if !s.prune.due() {
-		return nil
+		return
 	}
 	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`DELETE FROM %s
 		WHERE consumed_at < now() - $1::interval`, s.ledger.table), s.ledger.retention); err != nil {
 		s.prune.retry()
-		return fmt.Errorf("prune %s: %w", s.ledger.table, err)
+		slog.WarnContext(ctx, "execapproval.prune_failed", "table", s.ledger.table, "error", err.Error())
 	}
-	return nil
 }
 
 func (s *PostgresStore) Release(ctx context.Context, project, planToken string) error {
