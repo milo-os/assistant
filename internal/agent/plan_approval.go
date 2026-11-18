@@ -202,10 +202,14 @@ func (a *planApproval) Approve(ctx context.Context, project, planToken, approval
 // manifests gets a new code the person can approve. resources_apply releases
 // an approval when nothing reached the platform, which covers a clean retry.
 //
-// While replicas of the previous release still run during a rollout, an
-// approval spent there is not in this ledger (they keyed on the plan token,
-// which expires within 15 minutes), so a replay can pass once for the length
-// of the rollout.
+// Replicas of the previous release never read this ledger. They key a typed
+// approval on the conversation and message id, or on a 7.5-minute window
+// where there is no message id, so while one still runs during a rollout it
+// accepts the same typed approval again under any new message id, and again
+// after each re-plan. Each such replay needs a live plan token (15 minutes),
+// an update then fails on the moved resource version and a repeated create
+// on AlreadyExists, but the guarantee here holds only once old replicas have
+// drained.
 func planApprovalKey(approvalCode string) string {
 	return "resources_apply\x00plan\x00" + approvalCode
 }
