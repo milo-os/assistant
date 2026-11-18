@@ -121,6 +121,141 @@ func TestRequestsAreScopedToTheProject(t *testing.T) {
 	}
 }
 
+// Group and version come from model-supplied tool arguments and manifest
+// apiVersions. Anything Kubernetes would not accept as a name is refused before
+// a request is built, so it can never steer the path to another API.
+func TestMalformedGroupOrVersionNeverReachesThePlatform(t *testing.T) {
+	bad := []struct{ group, version string }{
+		{"..", "v1"},
+		{"compute.datumapis.com/../../core", "v1"},
+		{"compute.datumapis.com%2F..", "v1"},
+		{"compute.datumapis.com?x=1", "v1"},
+		{"Compute.Datumapis.com", "v1"},
+		{"compute.datumapis.com", ".."},
+		{"compute.datumapis.com", "v1/../../v2"},
+		{"compute.datumapis.com", "v1%2F.."},
+		{"compute.datumapis.com", "v1?watch=true"},
+		{"", "../apis/compute.datumapis.com/v1"},
+	}
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(workloadsDiscovery))
+	}))
+	t.Cleanup(srv.Close)
+	project := clientFor(t, srv.URL).As("demo", "tok")
+	ctx := context.Background()
+
+	for _, tc := range bad {
+		t.Run(tc.group+" "+tc.version, func(t *testing.T) {
+			if _, err := project.Resolve(ctx, tc.group, tc.version, "Workload"); err == nil {
+				t.Errorf("Resolve accepted group %q version %q", tc.group, tc.version)
+			}
+			if _, err := project.OpenAPI(ctx, tc.group, tc.version); err == nil {
+				t.Errorf("OpenAPI accepted group %q version %q", tc.group, tc.version)
+			}
+			// A Resource built by hand gets the same check on reads and writes,
+			// and a refused write reports that nothing was sent.
+			r := projectapi.Resource{Group: tc.group, Version: tc.version, Resource: "workloads", Kind: "Workload"}
+			if _, err := project.List(ctx, r, ""); err == nil {
+				t.Errorf("List accepted group %q version %q", tc.group, tc.version)
+			}
+			obj := projectapi.Object{"metadata": map[string]any{"name": "w"}}
+			if _, err := project.Create(ctx, r, obj, true); !errors.Is(err, projectapi.ErrNotSent) {
+				t.Errorf("Create err = %v, want ErrNotSent", err)
+			}
+		})
+	}
+	if hits != 0 {
+		t.Fatalf("%d malformed requests reached the platform", hits)
+	}
+}
+
+// Names and namespaces come straight from manifests. Escaping keeps "." and
+// ".." as they are, so they are validated before a path is built: none of
+// these reaches the platform, and a refused write reports that nothing was
+// sent.
+func TestMalformedNameOrNamespaceNeverReachesThePlatform(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	project := clientFor(t, srv.URL).As("demo", "tok")
+	ctx := context.Background()
+	r := projectapi.Resource{Group: "compute.datumapis.com", Version: "v1alpha1",
+		Resource: "workloads", Kind: "Workload", Namespaced: true}
+
+	for _, bad := range []string{".", "..", "a/b", "Upper"} {
+		t.Run(bad, func(t *testing.T) {
+			for _, tc := range []struct{ field, namespace, name string }{
+				{"name", "default", bad},
+				{"namespace", bad, "api"},
+			} {
+				if _, err := project.Get(ctx, r, tc.namespace, tc.name); !errors.Is(err, projectapi.ErrNotSent) {
+					t.Errorf("Get with %s %q: err = %v, want ErrNotSent", tc.field, bad, err)
+				}
+				obj := projectapi.Object{"metadata": map[string]any{"name": tc.name, "namespace": tc.namespace}}
+				if _, err := project.Create(ctx, r, obj, false); !errors.Is(err, projectapi.ErrNotSent) {
+					t.Errorf("Create with %s %q: err = %v, want ErrNotSent", tc.field, bad, err)
+				}
+				if _, err := project.Update(ctx, r, obj, false); !errors.Is(err, projectapi.ErrNotSent) {
+					t.Errorf("Update with %s %q: err = %v, want ErrNotSent", tc.field, bad, err)
+				}
+			}
+			if _, err := project.List(ctx, r, bad); !errors.Is(err, projectapi.ErrNotSent) {
+				t.Errorf("List in namespace %q: err = %v, want ErrNotSent", bad, err)
+			}
+		})
+	}
+	if hits != 0 {
+		t.Fatalf("%d malformed requests reached the platform", hits)
+	}
+
+	if _, err := project.Get(ctx, r, "default", "api.v2"); err != nil {
+		t.Fatalf("a valid name was refused: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("hits = %d, want the valid request to reach the platform", hits)
+	}
+}
+
+func TestValidGroupsAndTheCoreGroupResolve(t *testing.T) {
+	var rec recorder
+	srv := newServer(t, &rec, func(string) (int, string) { return 200, workloadsDiscovery })
+	project := clientFor(t, srv.URL).As("demo", "tok")
+
+	for _, tc := range []struct{ group, version, wantSuffix string }{
+		{"compute.datumapis.com", "v1alpha1", "/apis/compute.datumapis.com/v1alpha1"},
+		{"networking.datumapis.com", "v1", "/apis/networking.datumapis.com/v1"},
+		{"", "v1", "/api/v1"},
+	} {
+		if _, err := project.Resolve(context.Background(), tc.group, tc.version, "Workload"); err != nil {
+			t.Fatalf("Resolve(%q, %q): %v", tc.group, tc.version, err)
+		}
+		if !strings.HasSuffix(rec.escapedPath, "/control-plane"+tc.wantSuffix) {
+			t.Fatalf("path = %q, want suffix %q", rec.escapedPath, tc.wantSuffix)
+		}
+	}
+}
+
+// The resource segment comes from the platform's discovery reply; it is
+// escaped like every other segment, so a slash in it stays inside it.
+func TestResourceSegmentIsEscaped(t *testing.T) {
+	var rec recorder
+	srv := newServer(t, &rec, func(string) (int, string) { return 200, `{"items":[]}` })
+	project := clientFor(t, srv.URL).As("demo", "tok")
+
+	r := projectapi.Resource{Group: "compute.datumapis.com", Version: "v1alpha1", Resource: "../secrets", Kind: "Workload"}
+	if _, err := project.List(context.Background(), r, ""); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !strings.HasSuffix(rec.escapedPath, "/apis/compute.datumapis.com/v1alpha1/..%2Fsecrets") {
+		t.Fatalf("path = %q, want the resource escaped as one segment", rec.escapedPath)
+	}
+}
+
 func TestResolveAcceptsKindOrPluralAndReportsNamespacing(t *testing.T) {
 	var rec recorder
 	srv := newServer(t, &rec, func(string) (int, string) { return 200, workloadsDiscovery })
@@ -488,6 +623,15 @@ func TestWriteFailuresSayWhetherTheRequestWasSent(t *testing.T) {
 	gone := httptest.NewServer(http.NotFoundHandler())
 	gone.Close()
 
+	// A redirect means the platform already received the write once. Were it
+	// followed, a hop that failed to connect would read as "not sent".
+	redirected := 0
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected++
+		http.Redirect(w, r, gone.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
 	tests := []struct {
 		name        string
 		baseURL     string
@@ -495,6 +639,7 @@ func TestWriteFailuresSayWhetherTheRequestWasSent(t *testing.T) {
 	}{
 		{"connection refused", gone.URL, true},
 		{"connection dropped after sending", hangUp.URL, false},
+		{"redirected to a host that cannot be reached", redirect.URL, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -513,5 +658,8 @@ func TestWriteFailuresSayWhetherTheRequestWasSent(t *testing.T) {
 				t.Fatalf("errors.Is(err, projectapi.ErrNotSent) = %v, want %v (err: %v)", got, tt.wantNotSent, err)
 			}
 		})
+	}
+	if redirected != 1 {
+		t.Fatalf("the redirecting server got %d writes, want 1", redirected)
 	}
 }

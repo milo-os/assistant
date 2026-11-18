@@ -3,10 +3,11 @@ package execapproval
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/milo-os/assistant/internal/testdb"
 )
 
 func TestMemoryStoreSingleUseAcrossConcurrentCalls(t *testing.T) {
@@ -14,10 +15,7 @@ func TestMemoryStoreSingleUseAcrossConcurrentCalls(t *testing.T) {
 }
 
 func TestPostgresStoreSingleUseAndPruning(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
+	url := testdb.URL(t)
 	ctx := context.Background()
 	store, err := NewPostgresStore(ctx, url)
 	if err != nil {

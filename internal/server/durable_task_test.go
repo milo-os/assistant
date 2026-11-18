@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -12,6 +11,7 @@ import (
 	"github.com/milo-os/assistant/internal/config"
 	"github.com/milo-os/assistant/internal/logger"
 	"github.com/milo-os/assistant/internal/taskstore"
+	"github.com/milo-os/assistant/internal/testdb"
 )
 
 // TestDurableTaskStoreEndToEnd proves the Postgres task store integrates with the
@@ -20,10 +20,7 @@ import (
 // project is read off the durably-stored task metadata. Gated on TEST_DATABASE_URL,
 // matching the history and taskstore suites.
 func TestDurableTaskStoreEndToEnd(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping durable task store integration test")
-	}
+	url := testdb.URL(t)
 	log := logger.Silent()
 	authn, authz := testAuth()
 	store, err := taskstore.NewPostgresStore(context.Background(), url, log)

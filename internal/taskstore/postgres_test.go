@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	a2astore "github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
+
+	"github.com/milo-os/assistant/internal/testdb"
 )
 
 // TestBuildPoolConfigAppliesBounds pins that the durable task store is built with
@@ -74,10 +75,7 @@ func TestListRefusesUnscopedContext(t *testing.T) {
 
 func newTestStore(t *testing.T) *PostgresStore {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping Postgres task store test")
-	}
+	url := testdb.URL(t)
 	s, err := NewPostgresStore(context.Background(), url, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("connect: %v", err)

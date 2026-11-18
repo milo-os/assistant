@@ -132,6 +132,34 @@ func TestValidateRejectsAManifestThatDoesNotSayWhatItIs(t *testing.T) {
 	}
 }
 
+// A manifest's name and namespace become path segments, so one the platform
+// would not accept is refused on its item before any request is made.
+func TestValidateRefusesANameOrNamespaceThatIsNotOne(t *testing.T) {
+	for _, bad := range []string{".", "..", "a/b"} {
+		for _, tc := range []struct{ field, manifest string }{
+			{"metadata.name", strings.Replace(workloadManifest, "name: api", "name: "+fmt.Sprintf("%q", bad), 1)},
+			{"metadata.namespace", strings.Replace(workloadManifest, "name: api",
+				"name: api\n  namespace: "+fmt.Sprintf("%q", bad), 1)},
+		} {
+			t.Run(tc.field+" "+bad, func(t *testing.T) {
+				p := writePlatform(t)
+				out := decodeInto[basetools.ValidateOutput](t, call(t, p.writeTools(t, "demo", "tok"),
+					basetools.ResourcesValidateToolName, manifestsInput(tc.manifest)))
+
+				if out.Valid || len(out.Results) != 1 || len(out.Results[0].Errors) == 0 {
+					t.Fatalf("a manifest with %s %q was accepted: %+v", tc.field, bad, out)
+				}
+				if got := out.Results[0].Errors[0].Field; got != tc.field {
+					t.Fatalf("field = %q, want %q", got, tc.field)
+				}
+				if n := len(p.requests); n != 0 {
+					t.Fatalf("%d requests reached the platform, want none", n)
+				}
+			})
+		}
+	}
+}
+
 // An unreadable manifest is one item's problem, not the whole call's.
 func TestValidateReportsEachManifestSeparately(t *testing.T) {
 	p := writePlatform(t)

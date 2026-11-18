@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/milo-os/assistant/internal/testdb"
 )
 
 // preCapabilityKeyDDL is a verbatim snapshot of the table as it stands in
@@ -62,10 +63,7 @@ func withSearchPath(rawURL, schemaName string) (string, error) {
 // rewritten, nothing may be lost, and the rows that predate keys must still
 // reach the provider through the aggregate.
 func TestPostgresStoreMigratesPreCapabilityKeyTable(t *testing.T) {
-	rawURL := os.Getenv("TEST_DATABASE_URL")
-	if rawURL == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping Postgres store tests (memory conformance still ran)")
-	}
+	rawURL := testdb.URL(t)
 	ctx := context.Background()
 
 	schemaName := "gapreport_pre_" + strings.ReplaceAll(uniqueSuffix(t), "-", "_")
