@@ -719,9 +719,9 @@ func assertRefusedAndUnchanged(t *testing.T, p *platform, refusal string) {
 // ---------------------------------------------------------------- approval
 
 type recordingApproval struct {
-	tokens, codes []string
-	err           error
-	releases      int
+	projects, tokens, codes []string
+	err                     error
+	releases                int
 	// onApprove, when set, runs as the approval is given, before any write.
 	onApprove func()
 }
@@ -731,7 +731,8 @@ func (a *recordingApproval) Release(context.Context) error {
 	return nil
 }
 
-func (a *recordingApproval) Approve(_ context.Context, token, code string) error {
+func (a *recordingApproval) Approve(_ context.Context, project, token, code string) error {
+	a.projects = append(a.projects, project)
 	a.tokens = append(a.tokens, token)
 	a.codes = append(a.codes, code)
 	if a.onApprove != nil {
@@ -779,6 +780,11 @@ func TestApplyAsksTheApprovalForThisPlanAndHonoursARefusal(t *testing.T) {
 	}
 	if len(approval.tokens) != 1 || approval.tokens[0] != plan.PlanToken || approval.codes[0] != plan.ApprovalCode {
 		t.Fatalf("approval asked with tokens=%v codes=%v", approval.tokens, approval.codes)
+	}
+	// The approval is asked with the project the plan was bound to, which
+	// the gate checks against the turn's project before using its ledger.
+	if len(approval.projects) != 1 || approval.projects[0] != "demo" {
+		t.Fatalf("approval asked with projects=%v, want [demo]", approval.projects)
 	}
 	if writes := persistedWrites(p); len(writes) != 0 {
 		t.Fatalf("writes = %+v, want none", writes)

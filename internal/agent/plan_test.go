@@ -236,7 +236,10 @@ func TestApprovalAppliesThePlanWithoutAModelDecision(t *testing.T) {
 // from its input (the real tool derives it from the manifests) and writes
 // only when the turn's approval agrees.
 type fakeApply struct {
-	writes int
+	// project is the project the plan was made for; gatedApply sets it to
+	// the turn's project, as Compose does for the real tools.
+	project string
+	writes  int
 	// fail, when set, is the write's error once the approval is given.
 	fail error
 }
@@ -253,7 +256,7 @@ func (f *fakeApply) Execute(ctx context.Context, input json.RawMessage) (string,
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
 	}
-	if err := basetools.CheckApplyApproval(ctx, args.PlanToken, args.Code); err != nil {
+	if err := basetools.CheckApplyApproval(ctx, f.project, args.PlanToken, args.Code); err != nil {
 		return "", err
 	}
 	if f.fail != nil {
@@ -275,6 +278,7 @@ func applyArgs(token, code string) json.RawMessage {
 }
 
 func gatedApply(params Params, store execapproval.Store, inner *fakeApply) agentcore.Tool {
+	inner.project = params.ProjectName
 	return gateApplyTool(agentcore.ToolSet{basetools.ResourcesApplyToolName: inner}, params, store)[basetools.ResourcesApplyToolName]
 }
 
@@ -409,6 +413,30 @@ func TestApprovalReplayUnderAnotherConversationIsRefused(t *testing.T) {
 				t.Fatalf("writes = %d, want 2 (one per project)", inner.writes)
 			}
 		})
+	}
+}
+
+// The ledger key's tenant isolation rests on the turn's project and the
+// plan's project being one value. A plan made for another project is refused
+// before the ledger is touched, so it neither applies nor spends anything.
+func TestApprovalOfAPlanForAnotherProjectIsRefused(t *testing.T) {
+	store := execapproval.NewMemoryStore()
+	inner := &fakeApply{}
+	approve := basetools.PlanApprovalPrefix + "plan-abc"
+	tool := gatedApply(Params{UserText: approve, ApprovalText: approve, ProjectName: "demo"}, store, inner)
+	inner.project = "other"
+
+	_, err := tool.Execute(context.Background(), applyArgs("tok-1", "plan-abc"))
+	if err == nil || !strings.Contains(err.Error(), `made for project "other"`) {
+		t.Fatalf("err = %v, want a refusal naming the plan's project", err)
+	}
+	if inner.writes != 0 {
+		t.Fatalf("writes = %d, want none", inner.writes)
+	}
+	for _, project := range []string{"demo", "other"} {
+		if fresh, err := store.Consume(context.Background(), project, planApprovalKey("plan-abc")); err != nil || !fresh {
+			t.Fatalf("the refused plan spent the approval in %q: fresh=%v err=%v", project, fresh, err)
+		}
 	}
 }
 

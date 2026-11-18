@@ -127,7 +127,16 @@ func (a *planApproval) Release(ctx context.Context) error {
 	return nil
 }
 
-func (a *planApproval) Approve(ctx context.Context, planToken, approvalCode string) error {
+func (a *planApproval) Approve(ctx context.Context, project, planToken, approvalCode string) error {
+	// The ledger records this approval under a.project and the plan's code.
+	// The code already covers the plan's project, but the key's tenant
+	// isolation should not rest on the tools and this gate having been given
+	// the same project: refuse a plan made for any other.
+	if project != a.project {
+		return fmt.Errorf("nothing was changed: this plan was made for project %q, but this "+
+			"conversation is in project %q. Plan the change in this project and ask the person to "+
+			"approve what comes back", project, a.project)
+	}
 	approved := (a.cardToken != "" && planToken == a.cardToken) ||
 		(a.ref != "" && (a.ref == approvalCode || a.ref == planToken))
 	if !approved {

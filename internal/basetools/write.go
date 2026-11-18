@@ -405,7 +405,7 @@ func resourcesApply(opts Options) *tool {
 			// Only now, with the plan proven and accepted again, ask whether a
 			// person approved it in this turn. The token alone proves which
 			// plan, not that anybody agreed to it: the model holds it.
-			if err := CheckApplyApproval(ctx, args.PlanToken,
+			if err := CheckApplyApproval(ctx, binding.Project, args.PlanToken,
 				plantoken.ApprovalCode(opts.PlanTokenKey, binding)); err != nil {
 				return "", err
 			}
