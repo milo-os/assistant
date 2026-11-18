@@ -80,9 +80,11 @@ func (t *approvalGatedTool) Definition() agentcore.ToolDefinition { return t.inn
 func (t *approvalGatedTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	out, err := t.inner.Execute(basetools.WithApplyApproval(ctx, t.approval), input)
 	if err != nil && t.approval.spent() {
-		err = fmt.Errorf("%w. This approval is spent: the same plan cannot be approved again. Read the "+
-			"resource back to see what is there, then plan again from that: once a change has landed, "+
-			"or for a different change, the plan gets a new approval code", err)
+		err = fmt.Errorf("%w. This approval is spent, and the same plan cannot be approved again: "+
+			"planning the same manifests gives the same approval code, which stays refused for 30 days. "+
+			"Read the resource back to see what is there and plan from that. If the change landed, the "+
+			"next plan replaces a newer version and gets a new code. If it did not, only a plan that "+
+			"changes the manifests (any field, such as a label) gets a new code for the person to approve", err)
 	}
 	return out, err
 }
@@ -155,9 +157,10 @@ func (a *planApproval) Approve(ctx context.Context, planToken, approvalCode stri
 	}
 	if !fresh {
 		return errors.New("nothing was changed: this approval was already used, and the same plan " +
-			"cannot be approved again. Read the resources back and plan again from what is there: " +
-			"once a change has landed, or for a different change, the plan gets a new approval code " +
-			"for the person to approve")
+			"cannot be approved again: the same manifests give the same approval code, which stays " +
+			"refused for 30 days. Read the resources back and plan from what is there. A plan that " +
+			"changes the manifests (any field, such as a label), or one that replaces a newer version " +
+			"of a resource, gets a new code for the person to approve")
 	}
 	a.used = true
 	a.key = key
@@ -182,11 +185,13 @@ func (a *planApproval) Approve(ctx context.Context, planToken, approvalCode stri
 // plan token for the change.
 //
 // Applying a change moves the resource versions it replaced, so the next plan
-// for that resource has a new code. The cost is a resource created, deleted
-// and created again from identical manifests: nothing it replaces has a
-// version, so the second create carries the first one's code and is refused
-// until the row ages out. resources_apply releases an approval when nothing
-// reached the platform, which covers a clean retry.
+// for that resource has a new code. The cost falls on creates, where nothing
+// replaced has a version: a resource created, deleted and created again from
+// identical manifests, or a create whose apply may have reached the platform
+// but did not land, carries the first approval's code and is refused until the
+// row ages out. The refusal tells the model so: a plan that changes the
+// manifests gets a new code the person can approve. resources_apply releases
+// an approval when nothing reached the platform, which covers a clean retry.
 //
 // While replicas of the previous release still run during a rollout, an
 // approval spent there is not in this ledger (they keyed on the plan token,
