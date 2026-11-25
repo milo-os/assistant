@@ -35,6 +35,7 @@ vars:
   EG_NS: envoy-gateway-system
   AIGW_NS: envoy-ai-gateway-system
   TOOL_DIR: '{{.ROOT_DIR}}/bin'
+  # renovate: datasource=github-releases depName=kyverno/chainsaw
   CHAINSAW_VERSION: v0.2.15
   # patch CLI defaults for dev:chat / dev:card. There is no static dev token:
   # the assistant authenticates callers with a TokenReview against the cluster,
