@@ -27,11 +27,11 @@ require (
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/term v0.48.0
-	k8s.io/api v0.37.1
-	k8s.io/apimachinery v0.37.1
-	k8s.io/apiserver v0.37.1
-	k8s.io/client-go v0.37.1
-	k8s.io/component-base v0.37.1
+	k8s.io/api v0.37.2
+	k8s.io/apimachinery v0.37.2
+	k8s.io/apiserver v0.37.2
+	k8s.io/client-go v0.37.2
+	k8s.io/component-base v0.37.2
 	k8s.io/klog/v2 v2.140.0
 	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad
 	sigs.k8s.io/yaml v1.6.0
@@ -158,8 +158,8 @@ require (
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
-	k8s.io/kms v0.37.1 // indirect
-	k8s.io/streaming v0.37.1 // indirect
+	k8s.io/kms v0.37.2 // indirect
+	k8s.io/streaming v0.37.2 // indirect
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.36.0 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
