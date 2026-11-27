@@ -56,7 +56,7 @@ jobs:
     needs:
       - publish-plugin
     if: github.event_name == 'release'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MILO_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       # Milo plugins are published to the Milo catalog, where this App is
       # installed with pull-request write.
