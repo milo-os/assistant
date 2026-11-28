@@ -80,14 +80,8 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
-      # Known to fail on main: src/widgets/chat-dock.tsx passes onChoose,
-      # onApprovePlan and onChangePlan, which exist in assistant-chat-kit 0.2.1,
-      # but npm only has 0.2.0, so tsc reports 6 TS2339 errors. The script
-      # allows exactly those 6 and fails on any other error. Run
-      # `npm run typecheck` directly once 0.2.1 is on npm and the lockfile is
-      # bumped.
-      - name: Typecheck (allows only the 6 known assistant-chat-kit 0.2.1 errors)
-        run: ../../.github/scripts/typecheck-known-errors.sh npm run typecheck
+      - name: Typecheck
+        run: npm run typecheck
 
   # Deployed as a Component (config/components/consumer-ui-plugin) folded into
   # patch-assistant's own kustomize bundle/Flux Kustomization — no separate
